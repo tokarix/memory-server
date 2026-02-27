@@ -96,61 +96,6 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }
 
-pub async fn search(
-    pool: &PgPool,
-    embedding: Vec<f32>,
-    project: &str,
-    category: Option<&Category>,
-    limit: i64,
-    min_similarity: f64,
-) -> Result<Vec<(MemorySummary, f64)>, sqlx::Error> {
-    let query_vec = Vector::from(embedding);
-    let rows = match category {
-        Some(cat) => {
-            sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at,
-                        1 - (embedding <=> $1) AS similarity
-                 FROM memories
-                 WHERE project = $2 AND category = $3
-                   AND 1 - (embedding <=> $1) >= $5
-                 ORDER BY embedding <=> $1
-                 LIMIT $4",
-            )
-            .bind(&query_vec)
-            .bind(project)
-            .bind(cat)
-            .bind(limit)
-            .bind(min_similarity)
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at,
-                        1 - (embedding <=> $1) AS similarity
-                 FROM memories
-                 WHERE project = $2
-                   AND 1 - (embedding <=> $1) >= $4
-                 ORDER BY embedding <=> $1
-                 LIMIT $3",
-            )
-            .bind(&query_vec)
-            .bind(project)
-            .bind(limit)
-            .bind(min_similarity)
-            .fetch_all(pool)
-            .await?
-        }
-    };
-    rows.iter()
-        .map(|row| {
-            let memory = row_to_summary(row)?;
-            let similarity: f64 = row.try_get("similarity")?;
-            Ok((memory, similarity))
-        })
-        .collect()
-}
-
 pub async fn update(
     pool: &PgPool,
     id: Uuid,
@@ -176,6 +121,105 @@ pub async fn update(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn hybrid_search(
+    pool: &PgPool,
+    embedding: Vec<f32>,
+    query: &str,
+    project: &str,
+    category: Option<&Category>,
+    limit: i64,
+    min_similarity: f64,
+) -> Result<Vec<(MemorySummary, f64)>, sqlx::Error> {
+    let query_vec = Vector::from(embedding);
+    let fetch_limit = limit * 3;
+    let rows = match category {
+        Some(cat) => {
+            sqlx::query(
+                "WITH vector_results AS (
+                    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+                    FROM memories
+                    WHERE project = $2 AND category = $3
+                      AND 1 - (embedding <=> $1) >= $5
+                    LIMIT $4
+                ),
+                fts_results AS (
+                    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC) AS rank_f
+                    FROM memories
+                    WHERE project = $2 AND category = $3
+                      AND fts @@ plainto_tsquery('english', $6)
+                    LIMIT $4
+                ),
+                combined AS (
+                    SELECT COALESCE(v.id, f.id) AS id,
+                           COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0) AS rrf_score
+                    FROM vector_results v
+                    FULL OUTER JOIN fts_results f ON v.id = f.id
+                )
+                SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at,
+                       c.rrf_score AS similarity
+                FROM combined c
+                JOIN memories m ON m.id = c.id
+                ORDER BY c.rrf_score DESC
+                LIMIT $7",
+            )
+            .bind(&query_vec)
+            .bind(project)
+            .bind(cat)
+            .bind(fetch_limit)
+            .bind(min_similarity)
+            .bind(query)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "WITH vector_results AS (
+                    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+                    FROM memories
+                    WHERE project = $2
+                      AND 1 - (embedding <=> $1) >= $4
+                    LIMIT $3
+                ),
+                fts_results AS (
+                    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC) AS rank_f
+                    FROM memories
+                    WHERE project = $2
+                      AND fts @@ plainto_tsquery('english', $5)
+                    LIMIT $3
+                ),
+                combined AS (
+                    SELECT COALESCE(v.id, f.id) AS id,
+                           COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0) AS rrf_score
+                    FROM vector_results v
+                    FULL OUTER JOIN fts_results f ON v.id = f.id
+                )
+                SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at,
+                       c.rrf_score AS similarity
+                FROM combined c
+                JOIN memories m ON m.id = c.id
+                ORDER BY c.rrf_score DESC
+                LIMIT $6",
+            )
+            .bind(&query_vec)
+            .bind(project)
+            .bind(fetch_limit)
+            .bind(min_similarity)
+            .bind(query)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    rows.iter()
+        .map(|row| {
+            let memory = row_to_summary(row)?;
+            let similarity: f64 = row.try_get("similarity")?;
+            Ok((memory, similarity))
+        })
+        .collect()
 }
 
 fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Error> {

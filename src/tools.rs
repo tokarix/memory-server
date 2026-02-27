@@ -165,7 +165,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Semantic search for memories: embed query via Ollama, cosine similarity retrieval"
+        description = "Hybrid memory search: combines semantic vector similarity with full-text keyword matching"
     )]
     async fn memory_search(
         &self,
@@ -181,9 +181,10 @@ impl MemoryServer {
             .min_similarity
             .unwrap_or(DEFAULT_MIN_SIMILARITY)
             .clamp(0.0, 1.0);
-        let results = db::search(
+        let results = db::hybrid_search(
             &self.pool,
             embedding,
+            &params.query,
             &params.project,
             params.category.as_ref(),
             limit,
