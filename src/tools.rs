@@ -388,7 +388,7 @@ impl MemoryServer {
             session_id: params.session_id.clone(),
             summary: params.summary,
         };
-        db::session_log_upsert(&self.pool, &log)
+        let _stored_id = db::session_log_upsert(&self.pool, &log)
             .await
             .map_err(Error::from)?;
         Ok(CallToolResult::success(vec![Content::text(format!(

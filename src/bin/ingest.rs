@@ -80,8 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary: parsed.summary,
     };
 
-    db::session_log_upsert(&pool, &log).await?;
-    tracing::info!(id = %log.id, session_id = %log.session_id, "session log stored");
+    let stored_id = db::session_log_upsert(&pool, &log).await?;
+    tracing::info!(id = %stored_id, session_id = %log.session_id, "session log stored");
 
     Ok(())
 }

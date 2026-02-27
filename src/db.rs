@@ -3,7 +3,9 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::model::{Category, Memory, MemorySummary, SessionLog, SessionLogSummary};
+use crate::model::{
+    Category, Memory, MemorySummary, SessionLog, SessionLogChunk, SessionLogSummary,
+};
 
 pub async fn all_embeddings(
     pool: &PgPool,
@@ -177,9 +179,37 @@ pub async fn session_log_search(
         .collect()
 }
 
-pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<(), sqlx::Error> {
+pub async fn session_log_chunks_replace(
+    pool: &PgPool,
+    session_log_id: Uuid,
+    chunks: &[SessionLogChunk],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM session_log_chunks WHERE session_log_id = $1")
+        .bind(session_log_id)
+        .execute(pool)
+        .await?;
+
+    for chunk in chunks {
+        let embedding = Vector::from(chunk.embedding.clone());
+        sqlx::query(
+            "INSERT INTO session_log_chunks (id, chunk_index, content, embedding, session_log_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(chunk.id)
+        .bind(chunk.chunk_index)
+        .bind(&chunk.content)
+        .bind(embedding)
+        .bind(chunk.session_log_id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<Uuid, sqlx::Error> {
     let embedding = Vector::from(log.embedding.clone());
-    sqlx::query(
+    let row = sqlx::query(
         "INSERT INTO session_logs (id, content, created_at, cwd, embedding, project, session_id, summary)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (session_id) DO UPDATE SET
@@ -187,7 +217,8 @@ pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<(), s
             cwd = EXCLUDED.cwd,
             embedding = EXCLUDED.embedding,
             project = EXCLUDED.project,
-            summary = EXCLUDED.summary",
+            summary = EXCLUDED.summary
+         RETURNING id",
     )
     .bind(log.id)
     .bind(&log.content)
@@ -197,9 +228,9 @@ pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<(), s
     .bind(&log.project)
     .bind(&log.session_id)
     .bind(&log.summary)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(())
+    row.try_get("id")
 }
 
 pub async fn update(
