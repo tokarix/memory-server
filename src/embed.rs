@@ -19,6 +19,17 @@ struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut norm_a, mut norm_b) = (0.0_f32, 0.0_f32, 0.0_f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
+}
+
 impl Client {
     pub fn new(url: String, model: String) -> Self {
         Self {
@@ -87,6 +98,37 @@ mod tests {
         let response: EmbedResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.embeddings.len(), 1);
         assert_eq!(response.embeddings[0], vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn cosine_similarity_identical() {
+        let v = [1.0, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_orthogonal() {
+        let a = [1.0, 0.0];
+        let b = [0.0, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_opposite() {
+        let a = [1.0, 0.0];
+        let b = [-1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_zero_vector() {
+        let a = [0.0, 0.0];
+        let b = [1.0, 2.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.0).abs() < 1e-6);
     }
 
     #[test]
