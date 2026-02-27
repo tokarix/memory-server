@@ -4,6 +4,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::model::Category;
 use crate::{db, embed, ollama};
 
 const DUPLICATE_THRESHOLD: f32 = 0.92;
@@ -124,6 +125,15 @@ async fn apply_merges(
             continue;
         }
 
+        if mem_a.category == Category::Rule || mem_b.category == Category::Rule {
+            tracing::info!(
+                id_a = %candidate.id_a,
+                id_b = %candidate.id_b,
+                "skipping merge: rule memories are protected"
+            );
+            continue;
+        }
+
         match llm_merge(http, ollama_url, dream_model, &mem_a, &mem_b).await {
             Ok(merged) => {
                 let embedding = embed_client.embed(&merged.summary, &merged.content).await?;
@@ -186,6 +196,14 @@ async fn apply_prunes(
         );
 
         if dry_run {
+            continue;
+        }
+
+        if memory.category == Category::Rule {
+            tracing::info!(
+                id = %candidate.id,
+                "skipping prune: rule memories are protected"
+            );
             continue;
         }
 
