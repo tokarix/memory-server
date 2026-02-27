@@ -14,6 +14,8 @@ pub struct Config {
     pub ollama_model: String,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
+    #[serde(default = "default_rerank_model")]
+    pub rerank_model: String,
 }
 
 impl Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             expand_model: default_expand_model(),
             ollama_model: default_ollama_model(),
             ollama_url: default_ollama_url(),
+            rerank_model: default_rerank_model(),
         }
     }
 }
@@ -56,6 +59,10 @@ fn default_ollama_url() -> String {
     "http://localhost:11434".to_owned()
 }
 
+fn default_rerank_model() -> String {
+    "llama3.1".to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +78,7 @@ mod tests {
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.rerank_model, "llama3.1");
     }
 
     #[test]
@@ -95,5 +103,6 @@ mod tests {
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.rerank_model, "llama3.1");
     }
 }
