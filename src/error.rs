@@ -1,3 +1,5 @@
+use rmcp::model::ErrorCode;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -16,10 +18,10 @@ impl From<Error> for rmcp::ErrorData {
     }
 }
 
-fn error_code(err: &Error) -> i32 {
+fn error_code(err: &Error) -> ErrorCode {
     match err {
-        Error::Database(_) => -32_000,
-        Error::Embedding(_) => -32_001,
+        Error::Database(_) => ErrorCode(-32_000),
+        Error::Embedding(_) => ErrorCode(-32_001),
     }
 }
 
@@ -37,7 +39,7 @@ mod tests {
     fn error_to_mcp() {
         let err = Error::Embedding("ollama down".to_owned());
         let mcp: rmcp::ErrorData = err.into();
-        assert_eq!(mcp.code, -32_001);
+        assert_eq!(mcp.code, ErrorCode(-32_001));
         assert!(mcp.message.contains("ollama down"));
     }
 
@@ -45,7 +47,7 @@ mod tests {
     fn error_codes() {
         assert_eq!(
             error_code(&Error::Embedding(String::new())),
-            -32_001
+            ErrorCode(-32_001)
         );
     }
 }

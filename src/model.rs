@@ -58,11 +58,14 @@ mod tests {
     #[test]
     fn category_alphabetical_order() {
         let variants = [Category::Context, Category::Decision, Category::ErrorFix];
-        let names: Vec<&str> = variants.iter().map(|c| match c {
-            Category::Context => "context",
-            Category::Decision => "decision",
-            Category::ErrorFix => "error_fix",
-        }).collect();
+        let names: Vec<&str> = variants
+            .iter()
+            .map(|c| match c {
+                Category::Context => "context",
+                Category::Decision => "decision",
+                Category::ErrorFix => "error_fix",
+            })
+            .collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
         assert_eq!(names, sorted);

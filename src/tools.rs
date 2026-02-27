@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -18,7 +19,7 @@ use crate::{db, model};
 pub struct MemoryServer {
     embed_client: Arc<embed::Client>,
     pool: PgPool,
-    tool_router: ToolRouter<Self>,
+    pub(crate) tool_router: ToolRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -29,7 +30,7 @@ pub struct DeleteParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
-    /// Filter by category (context, decision, error_fix)
+    /// Filter by category: `context`, `decision`, `error_fix`
     category: Option<Category>,
     /// Maximum number of results (default: 20)
     limit: Option<i64>,
@@ -41,7 +42,7 @@ pub struct ListParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
-    /// Filter by category (context, decision, error_fix)
+    /// Filter by category: `context`, `decision`, `error_fix`
     category: Option<Category>,
     /// Maximum number of results (default: 5)
     limit: Option<i64>,
@@ -53,7 +54,7 @@ pub struct SearchParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StoreParams {
-    /// Memory category: context, decision, or error_fix
+    /// Memory category: `context`, `decision`, or `error_fix`
     category: Category,
     /// Full content of the memory
     content: String,
@@ -168,7 +169,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Store a new memory with category, project, summary, content, and optional tags")]
+    #[tool(
+        description = "Store a new memory with category, project, summary, content, and optional tags"
+    )]
     async fn memory_store(
         &self,
         Parameters(params): Parameters<StoreParams>,
@@ -197,7 +200,9 @@ impl MemoryServer {
         ))]))
     }
 
-    #[tool(description = "Partial update of memory content/summary/tags, re-embeds if text changes")]
+    #[tool(
+        description = "Partial update of memory content/summary/tags, re-embeds if text changes"
+    )]
     async fn memory_update(
         &self,
         Parameters(params): Parameters<UpdateParams>,
@@ -243,7 +248,8 @@ impl MemoryServer {
 fn format_memory_list(memories: &[model::Memory]) -> String {
     let mut out = format!("## Memories ({} results)\n", memories.len());
     for (i, m) in memories.iter().enumerate() {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n### {}. [{}] {}\nID: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}\n\n---\n",
             i + 1,
             m.category,
@@ -253,7 +259,7 @@ fn format_memory_list(memories: &[model::Memory]) -> String {
             m.created_at.format("%Y-%m-%d %H:%M"),
             m.updated_at.format("%Y-%m-%d %H:%M"),
             m.content,
-        ));
+        );
     }
     out
 }
@@ -261,7 +267,8 @@ fn format_memory_list(memories: &[model::Memory]) -> String {
 fn format_search_results(results: &[(model::Memory, f64)]) -> String {
     let mut out = format!("## Search Results ({} matches)\n", results.len());
     for (i, (m, similarity)) in results.iter().enumerate() {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n### {}. [{}] {} (similarity: {:.2})\nID: {}\nTags: {}\nCreated: {}\n\n{}\n\n---\n",
             i + 1,
             m.category,
@@ -271,7 +278,7 @@ fn format_search_results(results: &[(model::Memory, f64)]) -> String {
             m.tags.join(", "),
             m.created_at.format("%Y-%m-%d %H:%M"),
             m.content,
-        ));
+        );
     }
     out
 }
