@@ -216,12 +216,16 @@ impl MemoryServer {
 
         // Run hybrid search for each query variant
         let mut variant_results = Vec::with_capacity(queries.len());
+        let mut first_embedding = None;
         for query in &queries {
             let embedding = self
                 .embed_client
                 .embed(query, "")
                 .await
                 .map_err(rmcp::ErrorData::from)?;
+            if first_embedding.is_none() {
+                first_embedding = Some(embedding.clone());
+            }
             let results = db::hybrid_search(
                 &self.pool,
                 embedding,
@@ -250,6 +254,23 @@ impl MemoryServer {
         .await;
 
         if results.is_empty() {
+            // Fallback: search session logs
+            if let Some(embedding) = first_embedding {
+                let session_results = db::session_log_search(
+                    &self.pool,
+                    embedding,
+                    &params.query,
+                    &params.project,
+                    limit,
+                    min_similarity,
+                )
+                .await
+                .map_err(Error::from)?;
+                if !session_results.is_empty() {
+                    let text = format_session_log_results(&session_results);
+                    return Ok(CallToolResult::success(vec![Content::text(text)]));
+                }
+            }
             return Ok(CallToolResult::success(vec![Content::text(
                 "No matching memories found.",
             )]));
@@ -459,6 +480,28 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
     out
 }
 
+fn format_session_log_results(results: &[(model::SessionLogSummary, f64)]) -> String {
+    let mut out = format!(
+        "## Session Log Results (fallback, {} matches)\n",
+        results.len()
+    );
+    for (i, (log, similarity)) in results.iter().enumerate() {
+        let _ = write!(
+            out,
+            "\n### {}. {} (similarity: {:.2})\nSession: {}\nProject: {}\nCwd: {}\nCreated: {}\n\n{}\n\n---\n",
+            i + 1,
+            log.summary,
+            similarity,
+            log.session_id,
+            log.project,
+            log.cwd,
+            log.created_at.format("%Y-%m-%d %H:%M"),
+            log.content,
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -578,5 +621,34 @@ mod tests {
         let results: Vec<Vec<(model::MemorySummary, f64)>> = vec![vec![]];
         let fused = outer_rrf(&results, 5);
         assert!(fused.is_empty());
+    }
+
+    fn sample_session_log() -> model::SessionLogSummary {
+        model::SessionLogSummary {
+            id: Uuid::nil(),
+            content: "User: How do I fix the build?\nAssistant: Run cargo clean.".to_owned(),
+            created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            cwd: "/home/user/myproject".to_owned(),
+            project: "myproject".to_owned(),
+            session_id: "sess-123".to_owned(),
+            summary: "Fix the build".to_owned(),
+        }
+    }
+
+    #[test]
+    fn format_session_log_output() {
+        let results = vec![(sample_session_log(), 0.75)];
+        let output = format_session_log_results(&results);
+        assert!(output.contains("Session Log Results (fallback, 1 matches)"));
+        assert!(output.contains("(similarity: 0.75)"));
+        assert!(output.contains("Session: sess-123"));
+        assert!(output.contains("Project: myproject"));
+        assert!(output.contains("cargo clean"));
+    }
+
+    #[test]
+    fn format_session_log_empty() {
+        let output = format_session_log_results(&[]);
+        assert!(output.contains("0 matches"));
     }
 }
