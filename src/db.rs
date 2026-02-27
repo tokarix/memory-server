@@ -179,7 +179,7 @@ pub async fn hybrid_search(
                 ),
                 combined AS (
                     SELECT COALESCE(v.id, f.id) AS id,
-                           COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0) AS rrf_score
+                           (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
                     FROM vector_results v
                     FULL OUTER JOIN fts_results f ON v.id = f.id
                 )
@@ -218,7 +218,7 @@ pub async fn hybrid_search(
                 ),
                 combined AS (
                     SELECT COALESCE(v.id, f.id) AS id,
-                           COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0) AS rrf_score
+                           (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
                     FROM vector_results v
                     FULL OUTER JOIN fts_results f ON v.id = f.id
                 )
