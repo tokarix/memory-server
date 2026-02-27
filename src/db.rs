@@ -5,6 +5,25 @@ use uuid::Uuid;
 
 use crate::model::{Category, Memory, MemorySummary};
 
+pub async fn all_embeddings(
+    pool: &PgPool,
+    project: &str,
+) -> Result<Vec<(Uuid, Vec<f32>)>, sqlx::Error> {
+    let rows =
+        sqlx::query("SELECT id, embedding::TEXT FROM memories WHERE project = $1 ORDER BY id")
+            .bind(project)
+            .fetch_all(pool)
+            .await?;
+    rows.iter()
+        .map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let embedding_text: String = row.try_get("embedding")?;
+            let embedding = parse_pgvector_text(&embedding_text);
+            Ok((id, embedding))
+        })
+        .collect()
+}
+
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(5)
@@ -90,6 +109,13 @@ pub async fn list(
         }
     };
     rows.iter().map(row_to_summary).collect()
+}
+
+pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query("SELECT DISTINCT project FROM memories ORDER BY project")
+        .fetch_all(pool)
+        .await?;
+    rows.iter().map(|row| row.try_get("project")).collect()
 }
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
@@ -219,6 +245,14 @@ pub async fn hybrid_search(
             let similarity: f64 = row.try_get("similarity")?;
             Ok((memory, similarity))
         })
+        .collect()
+}
+
+fn parse_pgvector_text(text: &str) -> Vec<f32> {
+    text.trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .filter_map(|s| s.trim().parse::<f32>().ok())
         .collect()
 }
 
