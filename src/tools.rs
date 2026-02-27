@@ -42,7 +42,7 @@ pub struct GetParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
-    /// Filter by category: `context`, `decision`, `error_fix`
+    /// Filter by category: `context`, `decision`, `error_fix`, `rule`
     category: Option<Category>,
     /// Maximum number of results (default: 20, max: 100)
     limit: Option<i64>,
@@ -54,7 +54,7 @@ pub struct ListParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
-    /// Filter by category: `context`, `decision`, `error_fix`
+    /// Filter by category: `context`, `decision`, `error_fix`, `rule`
     category: Option<Category>,
     /// Maximum number of results (default: 5, max: 100)
     limit: Option<i64>,
@@ -68,7 +68,7 @@ pub struct SearchParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StoreParams {
-    /// Memory category: `context`, `decision`, or `error_fix`
+    /// Memory category: `context`, `decision`, `error_fix`, or `rule`
     category: Category,
     /// Full content of the memory
     content: String,
