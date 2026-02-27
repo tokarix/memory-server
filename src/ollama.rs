@@ -1,10 +1,18 @@
+use serde::{Deserialize, Serialize};
+
 use crate::error::Error;
 
-use serde::{Deserialize, Serialize};
+const NUM_CTX: u32 = 8192;
+
+#[derive(Serialize)]
+struct GenerateOptions {
+    num_ctx: u32,
+}
 
 #[derive(Serialize)]
 struct GenerateRequest<'a> {
     model: &'a str,
+    options: GenerateOptions,
     prompt: &'a str,
     stream: bool,
 }
@@ -22,6 +30,7 @@ pub async fn generate(
 ) -> Result<String, Error> {
     let request = GenerateRequest {
         model,
+        options: GenerateOptions { num_ctx: NUM_CTX },
         prompt,
         stream: false,
     };
@@ -59,11 +68,13 @@ mod tests {
     fn generate_request_serialization() {
         let request = GenerateRequest {
             model: "llama3.1",
+            options: GenerateOptions { num_ctx: 8192 },
             prompt: "hello",
             stream: false,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "llama3.1");
+        assert_eq!(json["options"]["num_ctx"], 8192);
         assert_eq!(json["prompt"], "hello");
         assert_eq!(json["stream"], false);
     }
