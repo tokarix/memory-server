@@ -36,6 +36,18 @@ pub struct Memory {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Memory without the embedding vector, for list/get queries.
+pub struct MemorySummary {
+    pub id: Uuid,
+    pub category: Category,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub project: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

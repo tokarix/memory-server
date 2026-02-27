@@ -16,6 +16,8 @@ use crate::error::Error;
 use crate::model::Category;
 use crate::{db, model};
 
+const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
+
 pub struct MemoryServer {
     embed_client: Arc<embed::Client>,
     pool: PgPool,
@@ -29,10 +31,16 @@ pub struct DeleteParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetParams {
+    /// UUID of the memory to retrieve
+    id: Uuid,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Filter by category: `context`, `decision`, `error_fix`
     category: Option<Category>,
-    /// Maximum number of results (default: 20)
+    /// Maximum number of results (default: 20, max: 100)
     limit: Option<i64>,
     /// Offset for pagination (default: 0)
     offset: Option<i64>,
@@ -44,8 +52,10 @@ pub struct ListParams {
 pub struct SearchParams {
     /// Filter by category: `context`, `decision`, `error_fix`
     category: Option<Category>,
-    /// Maximum number of results (default: 5)
+    /// Maximum number of results (default: 5, max: 100)
     limit: Option<i64>,
+    /// Minimum similarity threshold (default: 0.5, range: 0.0-1.0)
+    min_similarity: Option<f64>,
     /// Project name to search within
     project: String,
     /// Natural language search query
@@ -109,13 +119,31 @@ impl MemoryServer {
         }
     }
 
+    #[tool(description = "Retrieve a single memory by UUID")]
+    async fn memory_get(
+        &self,
+        Parameters(params): Parameters<GetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let memory = db::get(&self.pool, params.id).await.map_err(Error::from)?;
+        match memory {
+            Some(m) => {
+                let text = format_single_memory(&m);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            None => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Memory {} not found",
+                params.id
+            ))])),
+        }
+    }
+
     #[tool(description = "Browse memories by project with optional category filter, paginated")]
     async fn memory_list(
         &self,
         Parameters(params): Parameters<ListParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let limit = params.limit.unwrap_or(20);
-        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(20).clamp(1, 100);
+        let offset = params.offset.unwrap_or(0).max(0);
         let memories = db::list(
             &self.pool,
             &params.project,
@@ -148,13 +176,18 @@ impl MemoryServer {
             .embed(&params.query, "")
             .await
             .map_err(rmcp::ErrorData::from)?;
-        let limit = params.limit.unwrap_or(5);
+        let limit = params.limit.unwrap_or(5).clamp(1, 100);
+        let min_similarity = params
+            .min_similarity
+            .unwrap_or(DEFAULT_MIN_SIMILARITY)
+            .clamp(0.0, 1.0);
         let results = db::search(
             &self.pool,
             embedding,
             &params.project,
             params.category.as_ref(),
             limit,
+            min_similarity,
         )
         .await
         .map_err(Error::from)?;
@@ -201,15 +234,20 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Partial update of memory content/summary/tags, re-embeds if text changes"
+        description = "Partial update of memory content/summary/tags, re-embeds using full stored text if any text field changes"
     )]
     async fn memory_update(
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let embedding = if params.summary.is_some() || params.content.is_some() {
-            let summary = params.summary.as_deref().unwrap_or("");
-            let content = params.content.as_deref().unwrap_or("");
+            // Fetch existing record to use stored fields for any field not provided
+            let current = db::get(&self.pool, params.id)
+                .await
+                .map_err(Error::from)?
+                .ok_or_else(|| Error::Embedding(format!("memory {} not found", params.id)))?;
+            let summary = params.summary.as_deref().unwrap_or(&current.summary);
+            let content = params.content.as_deref().unwrap_or(&current.content);
             Some(
                 self.embed_client
                     .embed(summary, content)
@@ -245,7 +283,21 @@ impl MemoryServer {
     }
 }
 
-fn format_memory_list(memories: &[model::Memory]) -> String {
+fn format_single_memory(m: &model::MemorySummary) -> String {
+    format!(
+        "## [{}] {}\nID: {}\nProject: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}",
+        m.category,
+        m.summary,
+        m.id,
+        m.project,
+        m.tags.join(", "),
+        m.created_at.format("%Y-%m-%d %H:%M"),
+        m.updated_at.format("%Y-%m-%d %H:%M"),
+        m.content,
+    )
+}
+
+fn format_memory_list(memories: &[model::MemorySummary]) -> String {
     let mut out = format!("## Memories ({} results)\n", memories.len());
     for (i, m) in memories.iter().enumerate() {
         let _ = write!(
@@ -264,7 +316,7 @@ fn format_memory_list(memories: &[model::Memory]) -> String {
     out
 }
 
-fn format_search_results(results: &[(model::Memory, f64)]) -> String {
+fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
     let mut out = format!("## Search Results ({} matches)\n", results.len());
     for (i, (m, similarity)) in results.iter().enumerate() {
         let _ = write!(
@@ -289,13 +341,12 @@ mod tests {
 
     use super::*;
 
-    fn sample_memory() -> model::Memory {
-        model::Memory {
+    fn sample_summary() -> model::MemorySummary {
+        model::MemorySummary {
             id: Uuid::nil(),
             category: Category::Decision,
             content: "Use pgvector for semantic search.".to_owned(),
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
-            embedding: vec![0.0; 1024],
             project: "test".to_owned(),
             summary: "Choose pgvector".to_owned(),
             tags: vec!["database".to_owned(), "architecture".to_owned()],
@@ -305,7 +356,7 @@ mod tests {
 
     #[test]
     fn format_list_output() {
-        let memories = vec![sample_memory()];
+        let memories = vec![sample_summary()];
         let output = format_memory_list(&memories);
         assert!(output.contains("## Memories (1 results)"));
         assert!(output.contains("[decision] Choose pgvector"));
@@ -315,7 +366,7 @@ mod tests {
 
     #[test]
     fn format_search_output() {
-        let results = vec![(sample_memory(), 0.89)];
+        let results = vec![(sample_summary(), 0.89)];
         let output = format_search_results(&results);
         assert!(output.contains("## Search Results (1 matches)"));
         assert!(output.contains("(similarity: 0.89)"));
@@ -332,5 +383,14 @@ mod tests {
     fn format_search_empty() {
         let output = format_search_results(&[]);
         assert!(output.contains("0 matches"));
+    }
+
+    #[test]
+    fn format_single() {
+        let m = sample_summary();
+        let output = format_single_memory(&m);
+        assert!(output.contains("## [decision] Choose pgvector"));
+        assert!(output.contains("Project: test"));
+        assert!(output.contains("Use pgvector for semantic search."));
     }
 }

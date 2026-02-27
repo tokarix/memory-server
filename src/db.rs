@@ -3,7 +3,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::model::{Category, Memory};
+use crate::model::{Category, Memory, MemorySummary};
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
@@ -18,6 +18,17 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+         FROM memories WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_summary).transpose()
 }
 
 pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
@@ -46,11 +57,11 @@ pub async fn list(
     category: Option<&Category>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Memory>, sqlx::Error> {
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, embedding, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at
                  FROM memories
                  WHERE project = $1 AND category = $2
                  ORDER BY updated_at DESC
@@ -65,7 +76,7 @@ pub async fn list(
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, embedding, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at
                  FROM memories
                  WHERE project = $1
                  ORDER BY updated_at DESC
@@ -78,7 +89,11 @@ pub async fn list(
             .await?
         }
     };
-    rows.iter().map(row_to_memory).collect()
+    rows.iter().map(row_to_summary).collect()
+}
+
+pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(pool).await
 }
 
 pub async fn search(
@@ -87,15 +102,17 @@ pub async fn search(
     project: &str,
     category: Option<&Category>,
     limit: i64,
-) -> Result<Vec<(Memory, f64)>, sqlx::Error> {
+    min_similarity: f64,
+) -> Result<Vec<(MemorySummary, f64)>, sqlx::Error> {
     let query_vec = Vector::from(embedding);
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, embedding, project, summary, tags, updated_at,
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at,
                         1 - (embedding <=> $1) AS similarity
                  FROM memories
                  WHERE project = $2 AND category = $3
+                   AND 1 - (embedding <=> $1) >= $5
                  ORDER BY embedding <=> $1
                  LIMIT $4",
             )
@@ -103,28 +120,31 @@ pub async fn search(
             .bind(project)
             .bind(cat)
             .bind(limit)
+            .bind(min_similarity)
             .fetch_all(pool)
             .await?
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, embedding, project, summary, tags, updated_at,
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at,
                         1 - (embedding <=> $1) AS similarity
                  FROM memories
                  WHERE project = $2
+                   AND 1 - (embedding <=> $1) >= $4
                  ORDER BY embedding <=> $1
                  LIMIT $3",
             )
             .bind(&query_vec)
             .bind(project)
             .bind(limit)
+            .bind(min_similarity)
             .fetch_all(pool)
             .await?
         }
     };
     rows.iter()
         .map(|row| {
-            let memory = row_to_memory(row)?;
+            let memory = row_to_summary(row)?;
             let similarity: f64 = row.try_get("similarity")?;
             Ok((memory, similarity))
         })
@@ -158,14 +178,12 @@ pub async fn update(
     Ok(result.rows_affected() > 0)
 }
 
-fn row_to_memory(row: &sqlx::postgres::PgRow) -> Result<Memory, sqlx::Error> {
-    let embedding: Vector = row.try_get("embedding")?;
-    Ok(Memory {
+fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Error> {
+    Ok(MemorySummary {
         id: row.try_get("id")?,
         category: row.try_get("category")?,
         content: row.try_get("content")?,
         created_at: row.try_get("created_at")?,
-        embedding: embedding.into(),
         project: row.try_get("project")?,
         summary: row.try_get("summary")?,
         tags: row.try_get("tags")?,
