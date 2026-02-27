@@ -48,6 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let pool = db::connect(&config.database_url).await?;
 
+    tracing::info!("running migrations");
+    db::migrate(&pool).await?;
+
     let embed_client = Arc::new(embed::Client::new(config.ollama_url, config.ollama_model));
     let server = tools::MemoryServer::new(pool, embed_client);
 
