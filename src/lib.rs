@@ -20,7 +20,7 @@ impl ServerHandler for tools::MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Semantic memory server: store, search, list, update, and delete memories.".into(),
+                "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_recall` at session start to load core memories (importance >= 0.7) for a project.".into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

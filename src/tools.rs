@@ -56,6 +56,12 @@ pub struct ListParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecallParams {
+    /// Project name to recall core memories for
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
     category: Option<Category>,
@@ -189,6 +195,25 @@ impl MemoryServer {
         if memories.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
                 "No memories found.",
+            )]));
+        }
+
+        let text = format_memory_list(&memories);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "Recall core memories (importance >= 0.7) for a project at session start")]
+    async fn memory_recall(
+        &self,
+        Parameters(params): Parameters<RecallParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let memories = db::list_core(&self.pool, &params.project)
+            .await
+            .map_err(Error::from)?;
+
+        if memories.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No core memories found.",
             )]));
         }
 
