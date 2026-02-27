@@ -459,9 +459,10 @@ fn outer_rrf(
 
 fn format_single_memory(m: &model::MemorySummary) -> String {
     format!(
-        "## [{}] {}\nID: {}\nProject: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}",
+        "## [{}] {} (importance: {:.2})\nID: {}\nProject: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}",
         m.category,
         m.summary,
+        m.category.importance(),
         m.id,
         m.project,
         m.tags.join(", "),
@@ -476,10 +477,11 @@ fn format_memory_list(memories: &[model::MemorySummary]) -> String {
     for (i, m) in memories.iter().enumerate() {
         let _ = write!(
             out,
-            "\n### {}. [{}] {}\nID: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}\n\n---\n",
+            "\n### {}. [{}] {} (importance: {:.2})\nID: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}\n\n---\n",
             i + 1,
             m.category,
             m.summary,
+            m.category.importance(),
             m.id,
             m.tags.join(", "),
             m.created_at.format("%Y-%m-%d %H:%M"),
@@ -495,10 +497,11 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
     for (i, (m, similarity)) in results.iter().enumerate() {
         let _ = write!(
             out,
-            "\n### {}. [{}] {} (similarity: {:.2})\nID: {}\nTags: {}\nCreated: {}\n\n{}\n\n---\n",
+            "\n### {}. [{}] {} (importance: {:.2}, similarity: {:.2})\nID: {}\nTags: {}\nCreated: {}\n\n{}\n\n---\n",
             i + 1,
             m.category,
             m.summary,
+            m.category.importance(),
             similarity,
             m.id,
             m.tags.join(", "),
@@ -559,7 +562,7 @@ mod tests {
         let memories = vec![sample_summary()];
         let output = format_memory_list(&memories);
         assert!(output.contains("## Memories (1 results)"));
-        assert!(output.contains("[decision] Choose pgvector"));
+        assert!(output.contains("[decision] Choose pgvector (importance: 0.75)"));
         assert!(output.contains("Use pgvector for semantic search."));
         assert!(output.contains("database, architecture"));
     }
@@ -569,7 +572,7 @@ mod tests {
         let results = vec![(sample_summary(), 0.89)];
         let output = format_search_results(&results);
         assert!(output.contains("## Search Results (1 matches)"));
-        assert!(output.contains("(similarity: 0.89)"));
+        assert!(output.contains("(importance: 0.75, similarity: 0.89)"));
         assert!(output.contains("[decision] Choose pgvector"));
     }
 
@@ -589,7 +592,7 @@ mod tests {
     fn format_single() {
         let m = sample_summary();
         let output = format_single_memory(&m);
-        assert!(output.contains("## [decision] Choose pgvector"));
+        assert!(output.contains("## [decision] Choose pgvector (importance: 0.75)"));
         assert!(output.contains("Project: test"));
         assert!(output.contains("Use pgvector for semantic search."));
     }
