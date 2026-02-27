@@ -15,8 +15,10 @@ use uuid::Uuid;
 use crate::embed;
 use crate::error::Error;
 use crate::model::Category;
-use crate::{db, expand, model, rerank};
+use crate::{db, expand, model, rerank, transcript};
 
+const CHUNK_OVERLAP: usize = 200;
+const CHUNK_SIZE: usize = 4000;
 const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
 
 pub struct MemoryServer {
@@ -372,11 +374,14 @@ impl MemoryServer {
                 .unwrap_or("")
                 .to_owned()
         });
+        // Embed summary only for parent session log
         let embedding = self
             .embed_client
-            .embed(&params.summary, &params.content)
+            .embed(&params.summary, "")
             .await
             .map_err(rmcp::ErrorData::from)?;
+
+        let text_chunks = transcript::chunk_text(&params.content, CHUNK_SIZE, CHUNK_OVERLAP);
 
         let log = model::SessionLog {
             id: Uuid::new_v4(),
@@ -388,12 +393,36 @@ impl MemoryServer {
             session_id: params.session_id.clone(),
             summary: params.summary,
         };
-        let _stored_id = db::session_log_upsert(&self.pool, &log)
+        let stored_id = db::session_log_upsert(&self.pool, &log)
             .await
             .map_err(Error::from)?;
+
+        // Embed each chunk and store
+        let mut chunks = Vec::with_capacity(text_chunks.len());
+        for (i, text) in text_chunks.iter().enumerate() {
+            let chunk_embedding = self
+                .embed_client
+                .embed(text, "")
+                .await
+                .map_err(rmcp::ErrorData::from)?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            chunks.push(model::SessionLogChunk {
+                chunk_index: i as i32,
+                content: text.clone(),
+                embedding: chunk_embedding,
+                id: Uuid::new_v4(),
+                session_log_id: stored_id,
+            });
+        }
+
+        db::session_log_chunks_replace(&self.pool, stored_id, &chunks)
+            .await
+            .map_err(Error::from)?;
+
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Stored session log for session {}",
-            params.session_id
+            "Stored session log for session {} ({} chunks)",
+            params.session_id,
+            chunks.len()
         ))]))
     }
 }
