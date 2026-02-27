@@ -13,6 +13,7 @@ pub mod model;
 pub mod ollama;
 pub mod rerank;
 pub mod tools;
+pub mod transcript;
 
 #[tool_handler]
 impl ServerHandler for tools::MemoryServer {
