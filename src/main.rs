@@ -1,27 +1,8 @@
 use std::sync::Arc;
 
-use rmcp::model::{ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, ServiceExt, tool_handler, transport::stdio};
+use rmcp::{ServiceExt, transport::stdio};
 
-mod config;
-mod db;
-mod embed;
-mod error;
-mod model;
-mod tools;
-
-#[tool_handler]
-impl ServerHandler for tools::MemoryServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Semantic memory server: store, search, list, update, and delete memories.".into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
-    }
-}
+use memory_server::{config, db, embed, tools};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

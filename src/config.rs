@@ -6,6 +6,8 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default = "default_database_url")]
     pub database_url: String,
+    #[serde(default = "default_dream_model")]
+    pub dream_model: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
     #[serde(default = "default_ollama_url")]
@@ -24,6 +26,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             database_url: default_database_url(),
+            dream_model: default_dream_model(),
             ollama_model: default_ollama_model(),
             ollama_url: default_ollama_url(),
         }
@@ -32,6 +35,10 @@ impl Default for Config {
 
 fn default_database_url() -> String {
     "postgres://memory:memory@localhost/memory".to_owned()
+}
+
+fn default_dream_model() -> String {
+    "llama3.1".to_owned()
 }
 
 fn default_ollama_model() -> String {
@@ -53,6 +60,7 @@ mod tests {
             config.database_url,
             "postgres://memory:memory@localhost/memory"
         );
+        assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }
@@ -75,6 +83,7 @@ mod tests {
             config.database_url,
             "postgres://memory:memory@localhost/memory"
         );
+        assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }

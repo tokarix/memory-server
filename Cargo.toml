@@ -3,6 +3,14 @@ name = "memory-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "memory-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "dream"
+path = "src/bin/dream.rs"
+
 [dependencies]
 chrono = { version = "0.4.44", features = ["serde"] }
 pgvector = { version = "0.4.1", features = ["sqlx"] }

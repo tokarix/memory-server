@@ -21,7 +21,7 @@ const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
 pub struct MemoryServer {
     embed_client: Arc<embed::Client>,
     pool: PgPool,
-    pub(crate) tool_router: ToolRouter<Self>,
+    pub tool_router: ToolRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
