@@ -8,6 +8,7 @@ pub mod db;
 pub mod dream;
 pub mod embed;
 pub mod error;
+pub mod expand;
 pub mod model;
 pub mod ollama;
 pub mod tools;
