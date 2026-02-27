@@ -305,8 +305,9 @@ async fn find_stale_candidates(
             .fold(0.0_f64, f64::max);
 
         let staleness = age_days * (1.0 - max_sim_to_recent);
+        let threshold = STALENESS_THRESHOLD * (1.0 + memory.category.importance());
 
-        if staleness > STALENESS_THRESHOLD {
+        if staleness > threshold {
             candidates.push(StaleCandidate {
                 id: memory.id,
                 score: staleness,
