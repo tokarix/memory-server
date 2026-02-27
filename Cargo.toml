@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "dream"
 path = "src/bin/dream.rs"
 
+[[bin]]
+name = "ingest"
+path = "src/bin/ingest.rs"
+
 [dependencies]
 chrono = { version = "0.4.44", features = ["serde"] }
 pgvector = { version = "0.4.1", features = ["sqlx"] }
