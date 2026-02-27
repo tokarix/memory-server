@@ -12,6 +12,7 @@ pub enum Category {
     Context,
     Decision,
     ErrorFix,
+    Rule,
 }
 
 impl fmt::Display for Category {
@@ -20,6 +21,7 @@ impl fmt::Display for Category {
             Self::Context => write!(f, "context"),
             Self::Decision => write!(f, "decision"),
             Self::ErrorFix => write!(f, "error_fix"),
+            Self::Rule => write!(f, "rule"),
         }
     }
 }
@@ -58,25 +60,39 @@ mod tests {
         assert_eq!(Category::Context.to_string(), "context");
         assert_eq!(Category::Decision.to_string(), "decision");
         assert_eq!(Category::ErrorFix.to_string(), "error_fix");
+        assert_eq!(Category::Rule.to_string(), "rule");
     }
 
     #[test]
     fn category_serde_roundtrip() {
-        let json = serde_json::to_string(&Category::ErrorFix).unwrap();
-        assert_eq!(json, r#""error_fix""#);
-        let parsed: Category = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, Category::ErrorFix);
+        for (variant, expected) in [
+            (Category::Context, r#""context""#),
+            (Category::Decision, r#""decision""#),
+            (Category::ErrorFix, r#""error_fix""#),
+            (Category::Rule, r#""rule""#),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let parsed: Category = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
     }
 
     #[test]
     fn category_alphabetical_order() {
-        let variants = [Category::Context, Category::Decision, Category::ErrorFix];
+        let variants = [
+            Category::Context,
+            Category::Decision,
+            Category::ErrorFix,
+            Category::Rule,
+        ];
         let names: Vec<&str> = variants
             .iter()
             .map(|c| match c {
                 Category::Context => "context",
                 Category::Decision => "decision",
                 Category::ErrorFix => "error_fix",
+                Category::Rule => "rule",
             })
             .collect();
         let mut sorted = names.clone();
