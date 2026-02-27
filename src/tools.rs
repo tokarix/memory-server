@@ -68,6 +68,20 @@ pub struct SearchParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionLogStoreParams {
+    /// Full session transcript content
+    content: String,
+    /// Working directory of the session
+    cwd: Option<String>,
+    /// Project name
+    project: Option<String>,
+    /// Session identifier
+    session_id: String,
+    /// Brief summary for embedding
+    summary: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct StoreParams {
     /// Memory category: `context`, `decision`, `error_fix`, or `rule`
     category: Category,
@@ -323,6 +337,43 @@ impl MemoryServer {
                 params.id
             ))]))
         }
+    }
+
+    #[tool(description = "Store a session log transcript for searchable archival")]
+    async fn session_log_store(
+        &self,
+        Parameters(params): Parameters<SessionLogStoreParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cwd = params.cwd.unwrap_or_default();
+        let project = params.project.unwrap_or_else(|| {
+            cwd.rsplit('/')
+                .find(|s| !s.is_empty())
+                .unwrap_or("")
+                .to_owned()
+        });
+        let embedding = self
+            .embed_client
+            .embed(&params.summary, &params.content)
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+
+        let log = model::SessionLog {
+            id: Uuid::new_v4(),
+            content: params.content,
+            created_at: Utc::now(),
+            cwd,
+            embedding,
+            project,
+            session_id: params.session_id.clone(),
+            summary: params.summary,
+        };
+        db::session_log_upsert(&self.pool, &log)
+            .await
+            .map_err(Error::from)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Stored session log for session {}",
+            params.session_id
+        ))]))
     }
 }
 
