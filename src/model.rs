@@ -16,6 +16,19 @@ pub enum Category {
     Rule,
 }
 
+impl Category {
+    #[must_use]
+    pub fn importance(&self) -> f64 {
+        match self {
+            Self::Context => 0.5,
+            Self::Decision => 0.75,
+            Self::ErrorFix => 0.7,
+            Self::Plan => 0.85,
+            Self::Rule => 0.9,
+        }
+    }
+}
+
 impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -110,6 +123,33 @@ mod tests {
             assert_eq!(json, expected);
             let parsed: Category = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn category_importance_values() {
+        assert!((Category::Context.importance() - 0.5).abs() < f64::EPSILON);
+        assert!((Category::Decision.importance() - 0.75).abs() < f64::EPSILON);
+        assert!((Category::ErrorFix.importance() - 0.7).abs() < f64::EPSILON);
+        assert!((Category::Plan.importance() - 0.85).abs() < f64::EPSILON);
+        assert!((Category::Rule.importance() - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn category_importance_in_range() {
+        let variants = [
+            Category::Context,
+            Category::Decision,
+            Category::ErrorFix,
+            Category::Plan,
+            Category::Rule,
+        ];
+        for variant in &variants {
+            let imp = variant.importance();
+            assert!(
+                (0.0..=1.0).contains(&imp),
+                "{variant} importance {imp} out of range"
+            );
         }
     }
 
