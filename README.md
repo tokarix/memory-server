@@ -445,217 +445,430 @@ All errors include the full error message in the MCP response. The
 conversion. The `Embedding` variant carries a formatted string with
 the HTTP status and response body from Ollama when available.
 
+## Known Issues and Limitations
+
+Issues identified through critical review. These should be addressed
+before production use.
+
+### 1. No automatic recall trigger
+
+The biggest limitation: Claude Code will not call `memory_search`
+spontaneously unless explicitly instructed. Without a session-start
+hook or a `CLAUDE.md` instruction like "at the start of every session
+call `memory_search` for the current project", the memory server is
+invisible. The tools exist but the trigger mechanism does not.
+
+**Mitigation**: add to your project's `CLAUDE.md`:
+```
+At session start, call memory_search with project "<name>" and query
+"current conventions, active decisions, and recent errors" to load
+relevant context.
+```
+
+### 2. Embedding asymmetry between store and search
+
+Stored memories embed `"{summary}\n\n{content}"` (full context),
+but search queries embed `"{query}\n\n"` (query only, empty content).
+This means query vectors live in a different distribution than memory
+vectors. BGE-M3 is relatively robust to this, but short queries
+against long memories will have reduced recall.
+
+**Impact**: "database connection pooling" as a 3-word query will not
+match as well against a 200-word memory about connection pooling that
+was embedded with its full content.
+
+### 3. Partial update re-embedding is broken
+
+`memory_update` with only `summary` set creates an embedding from
+`"{new_summary}\n\n"` — the full stored content is not read from the
+database and not included. The resulting embedding is wrong and will
+not represent the actual stored memory.
+
+**Fix needed**: fetch the existing memory from the database before
+computing the re-embedding, and use the stored fields for any field
+not provided in the update.
+
+### 4. No similarity threshold on search
+
+`memory_search` returns up to `limit` results regardless of
+similarity score. If no memories are relevant, it returns the
+least-irrelevant ones (e.g., similarity 0.35). Claude Code has no
+signal that these are noise. A minimum similarity threshold
+(default 0.5) should exclude low-quality results.
+
+### 5. Project name is not inferred
+
+Every tool call requires a `project` name supplied by the caller.
+Claude Code does not have a built-in "current project" concept. If
+session 1 stores under `"memory-server"` and session 2 searches under
+`"memory_server"`, all memories are invisible. There is no
+normalization, no fuzzy matching, no fallback.
+
+**Mitigation**: use a `.memory-project` file in the project root, or
+always use the git repository name as the project identifier.
+
+### 6. Stale memories are indistinguishable from current ones
+
+After 6 months, the corpus will contain superseded decisions with no
+staleness signal. `updated_at` is stored but not used in search
+ranking. A decision from January that was replaced in June will still
+surface with high similarity. This is actively harmful.
+
+### 7. List queries fetch unused embeddings
+
+`db::list` fetches the full `Memory` struct including the 1024-element
+`Vec<f32>` embedding (4 KB per row), then `format_memory_list`
+ignores it. The list path should use a projection that excludes the
+embedding column.
+
+### 8. No `memory_get` tool
+
+There is no way to retrieve a single memory by UUID. The
+fetch-before-update workflow requires `memory_list`, visual scanning,
+and UUID extraction. A `memory_get(id)` tool is trivially useful.
+
+### 9. Three-service operational burden
+
+Running PostgreSQL, Ollama, and memory-server with no graceful
+degradation. If Ollama is down, every tool call fails. There is no
+health check, no retry logic, no lazy connection, no fallback. The
+server exits immediately if PostgreSQL is unreachable at startup.
+
+### 10. No input validation on limit/offset
+
+`limit` and `offset` are `i64`. Negative values are accepted and
+produce undefined behavior in PostgreSQL. Should be clamped:
+`limit.max(1).min(100)`, `offset.max(0)`.
+
+## Design Analysis
+
+Critical analysis of the architecture and its trade-offs, informed by
+review and by comparison with the [qorvus](https://github.com/stintel/qorvus)
+memory system which implements a similar vector search architecture
+with pluggable SQLite/PostgreSQL backends.
+
+### Is semantic search the right approach?
+
+For the stated use cases — error fixes, decisions, conventions —
+semantic search is frequently overkill and sometimes counterproductive:
+
+- **Error messages are precise.** Searching for "cannot borrow as
+  mutable" does not benefit from fuzzy embedding matching; it benefits
+  from exact substring search. Semantic embeddings are noisy for
+  highly specific technical strings.
+- **Small corpus sizes.** A realistic 6-month corpus is 300-800
+  memories. At 4 KB per embedding, that is 3 MB of vector data. HNSW
+  is not needed — a linear scan would be equivalent in latency. The
+  B-tree indexes on `project` and `category` do the heavy lifting.
+- **Hybrid search should be day-one.** Full-text search with
+  `tsvector`/`tsquery` catches exact keyword matches that embeddings
+  miss (error codes, function names, identifiers). This is listed as
+  a future improvement but should be in the initial implementation.
+
+The qorvus project validates the overall approach: its memory system
+uses the same architecture (Ollama embeddings + pgvector cosine
+similarity + HNSW indexing) and works well in practice. The key
+difference is that qorvus has automatic memory recall — it
+pre-searches memory before every user message and injects results as
+context. This "always-on" approach is what makes memory useful.
+
+### Operational burden: the Ollama problem
+
+Ollama must be running, BGE-M3 must be loaded into RAM (~570 MB),
+and the first embed call after cold start takes 1-3 seconds on CPU.
+On laptops that suspend/resume, Ollama frequently dies or hangs.
+
+**Alternative**: `fastembed-rs` (wraps ONNX Runtime) supports BGE-M3
+natively, downloads the model on first run, and handles inference
+in-process. This eliminates the Ollama dependency entirely, reducing
+the operational burden from three services to one (PostgreSQL only).
+
+**Alternative**: a SQLite backend with in-process cosine similarity
+(as qorvus implements) eliminates the PostgreSQL dependency too,
+making the server fully self-contained. Suitable for small corpora
+(< 50K entries). The qorvus SQLite backend stores embeddings as
+little-endian f32 BLOBs and computes cosine similarity in Rust.
+
+### Corpus quality degradation over time
+
+Without guardrails, the memory corpus will accumulate:
+
+- **Duplicates**: same decision stored multiple times with different
+  wording, diluting search results
+- **Stale entries**: superseded decisions that contradict current ones,
+  with no signal about which is authoritative
+- **Noise**: low-quality entries ("I ran cargo fmt today") that
+  reduce overall search precision
+- **Inconsistent project names**: same project stored under multiple
+  spellings, making memories invisible across sessions
+
+The current design has no deduplication, no versioning, no staleness
+tracking, and no quality gate. These problems compound over months.
+
+### Prompt injection via stored memories
+
+If an adversary can cause a memory to be stored (e.g., a malicious
+repository that causes Claude Code to call `memory_store` with
+crafted content), every future session searching that project's
+memories will receive the injected instructions. The attacker only
+needs to trigger one `memory_store` call with adversarial content.
+
+There is no sanitization of stored content, no review step, and no
+flagging of instruction-like content. This is a systemic risk with
+any LLM memory system. Mitigations include: requiring user
+confirmation before storing, rate-limiting autonomous storage, or
+content validation.
+
+### Interaction with Claude Code's existing memory
+
+Claude Code already has `CLAUDE.md` (project instructions) and
+auto-memory (`MEMORY.md`). These are simpler, require zero
+infrastructure, and are always available. The memory-server adds:
+
+- Semantic search (CLAUDE.md does not have this)
+- Machine-writable storage from within sessions
+- Structured categories and per-project scoping
+- Scalability beyond what fits in a markdown file
+
+The value proposition is specifically autonomous storage and
+retrieval. If Claude Code can be trusted to store and retrieve
+effectively, the value is real. If the user has to manually trigger
+every operation, `CLAUDE.md` is strictly better.
+
 ## Future Improvements
 
-### Enforced rules via memory
+Organized by priority. Items marked **[critical]** address known
+issues above. Items marked **[qorvus]** are informed by patterns
+in the qorvus memory system.
+
+### Priority 1: Correctness fixes
+
+#### Fix partial update re-embedding [critical]
+
+Fetch the existing memory from the database before computing the
+re-embedding. Use stored fields for any field not provided in the
+update request.
+
+```rust
+// Before re-embedding, fetch current state:
+let current = db::get(&self.pool, params.id).await?;
+let summary = params.summary.as_deref().unwrap_or(&current.summary);
+let content = params.content.as_deref().unwrap_or(&current.content);
+let embedding = self.embed_client.embed(summary, content).await?;
+```
+
+#### Add similarity threshold to search [critical]
+
+Filter results below a configurable minimum similarity (default 0.5).
+Return "no relevant memories found" instead of low-quality noise.
+
+```sql
+WHERE project = $2
+  AND 1 - (embedding <=> $1) >= $4  -- minimum similarity
+ORDER BY embedding <=> $1
+LIMIT $3
+```
+
+#### Add `memory_get` tool [critical]
+
+Single-memory retrieval by UUID. Required for fetch-before-update and
+for inspecting specific memories.
+
+#### Clamp limit/offset values [critical]
+
+```rust
+let limit = params.limit.unwrap_or(20).clamp(1, 100);
+let offset = params.offset.unwrap_or(0).max(0);
+```
+
+### Priority 2: Usability
+
+#### Automatic project name inference
+
+Read a `.memory-project` file from the working directory, or fall
+back to the git repository name (`git rev-parse --show-toplevel |
+basename`). Provide this as a default in tool descriptions so Claude
+Code does not need to guess.
 
 **Complexity: low**
 
-Add a `rule` category for project-enforced rules that must always be
-followed. A dedicated `memory_rules` tool returns all active rules for
-a project, designed to be called at session start or via a Claude Code
-hook. This turns the memory server into an enforceable instruction
-layer — rules stored here override defaults and persist across
-sessions.
+#### Duplicate detection on store
 
-Implementation: add `Rule` to the `Category` enum, a new
-`memory_rules` tool that lists all rules for a project (no
-pagination, always returns everything), and a migration to add the
-enum value.
-
-### Auto-save disagreements and consensus
+Before inserting, run a similarity search. If a near-duplicate exists
+(similarity > 0.92), return it in the response with a suggestion to
+update instead of creating a new entry.
 
 **Complexity: low**
 
-Add a `consensus` category for recording instances where the user and
-Claude Code disagreed, deliberated, and reached a resolution. Each
-memory stores the initial positions, the reasoning, and the final
-decision. Over time, this builds a corpus of calibration data —
-Claude Code can search past disagreements to avoid repeating the same
-arguments and to better predict user preferences.
+#### Full-text search (hybrid mode) [qorvus]
 
-Implementation: add `Consensus` to the `Category` enum with a
-`memory_consensus` tool that accepts structured fields (initial
-position, counterargument, resolution). The semantic search naturally
-surfaces relevant past disagreements when similar topics arise.
+Add a `search_vector TSVECTOR` column with a GIN index. Enhance
+`memory_search` with a `mode` parameter: `semantic` (default),
+`keyword`, or `hybrid` (union of both, deduplicated). This catches
+exact matches that embeddings miss — error codes, function names,
+specific identifiers.
 
-### Duplicate detection
+**Complexity: medium**
+
+#### Exclude embeddings from list queries
+
+The list path should not fetch the 4 KB embedding vector per row.
+Use a SQL projection that omits the `embedding` column, or a
+separate `MemorySummary` type without the embedding field.
 
 **Complexity: low**
 
-Before storing a new memory, run a similarity search and warn if a
-highly similar memory already exists (e.g., similarity > 0.92). This
-prevents the same decision or fix from being recorded multiple times
-with slightly different wording. The tool could return the existing
-memory and ask whether to update it instead.
+#### Migration management
 
-Implementation: add a similarity check to `memory_store` before
-inserting. If a near-duplicate is found, return it in the response
-with a suggestion to use `memory_update` instead.
+Replace manual `psql < migration.sql` with `sqlx::migrate!()`. The
+server checks and applies pending migrations on startup, making
+deployment zero-touch. Add the `migrate` feature to sqlx.
 
-### Memory decay and relevance scoring
+**Complexity: low** (the estimate of "medium" in the original list
+was too high — this is a 10-line change)
 
-**Complexity: medium**
+### Priority 3: Quality and longevity
 
-Add a `relevance_score` or `access_count` column that tracks how
-often a memory is retrieved. Memories that are never accessed could
-be flagged for review or archival. Combine recency (updated_at) with
-access frequency to produce a composite relevance score for ranking.
+#### Enforced rules via memory
 
-Implementation: add an `access_count INTEGER DEFAULT 0` and
-`last_accessed TIMESTAMPTZ` column. Increment on every search hit.
-Add a `memory_prune` tool that lists stale memories (old, never
-accessed). Optionally, a decay function that reduces relevance
-scores over time.
+Add a `rule` category. A `memory_rules` tool returns all active rules
+for a project (no pagination). Designed to be called at session start
+via `CLAUDE.md` instruction. This turns the memory server into an
+enforceable instruction layer.
 
-### Full-text search fallback
+**Complexity: low**
 
-**Complexity: medium**
+#### Auto-save disagreements and consensus
 
-Add PostgreSQL full-text search (`tsvector`/`tsquery`) as a fallback
-when semantic search returns low-similarity results. This catches
-exact keyword matches that embedding models might miss (e.g., error
-codes, function names, specific identifiers). The tool could run
-both searches in parallel and merge results.
+Add a `consensus` category for recording deliberation outcomes. Each
+memory stores initial positions, reasoning, and the resolution.
+Semantic search naturally surfaces relevant past disagreements.
 
-Implementation: add a `search_vector TSVECTOR` column with a GIN
-index, populate it via a trigger on insert/update, and add a
-`memory_search_text` tool (or enhance `memory_search` with a
-`mode` parameter: `semantic`, `keyword`, `hybrid`).
+**Complexity: low**
 
-### Migration management
+#### Recency bias in search ranking
+
+Weight search results by `updated_at` recency. A simple approach:
+multiply cosine similarity by a time decay factor, e.g.,
+`similarity * (1 / (1 + days_since_update * 0.01))`. This degrades
+stale memories gracefully without deleting them.
 
 **Complexity: medium**
 
-Replace the manual `psql < migration.sql` step with sqlx's built-in
-migration runner. The server would check and apply pending migrations
-on startup, making deployment zero-touch.
+#### Memory decay and access tracking
 
-Implementation: use `sqlx::migrate!()` macro with the `migrations/`
-directory. This requires adding the `migrate` feature to sqlx and
-running `sqlx migrate` commands during development. The macro embeds
-migrations in the binary at compile time.
-
-### IRC bridge
+Add `access_count INTEGER DEFAULT 0` and `last_accessed TIMESTAMPTZ`
+columns. Increment on every search hit. Add a `memory_prune` tool
+that lists stale memories (old, zero access count). Optionally, a
+decay function that reduces relevance scores over time.
 
 **Complexity: medium**
 
-A separate service that bridges an IRC channel to Claude Code
-sessions. The bot joins a configured channel, forwards messages to
-Claude Code (via the Anthropic API or a local model), and relays
-responses back. This allows interaction through IRC — useful for
-monitoring, quick queries, or collaborative debugging from a
-preferred communication medium.
+#### Backup and export
 
-Implementation: separate binary using the `irc` crate for the IRC
-client, `reqwest` for the Anthropic API, and a message queue (tokio
-channels) to serialize concurrent conversations. The bot would need
-conversation state management, rate limiting, and authentication
-(only respond to configured nicks/channels).
+A `memory_export` tool dumps all memories for a project as JSON
+(without embeddings). A `memory_import` tool loads a dump and
+re-embeds. The export format should be stable and versioned.
 
-### Local LLM review layer
+**Complexity: low**
+
+### Priority 4: Architecture improvements
+
+#### SQLite backend [qorvus]
+
+Add a SQLite storage backend as an alternative to PostgreSQL. The
+qorvus project demonstrates this with a `MemoryStore` trait and two
+implementations:
+
+- **SQLite**: stores embeddings as little-endian f32 BLOBs, computes
+  cosine similarity in Rust (loads all entries, scores, sorts).
+  Zero-config, no external service, suitable for < 50K entries.
+- **PostgreSQL**: uses pgvector HNSW for scalable cosine search.
+
+A `MemoryStore` trait abstraction in memory-server would allow the
+same pluggability. For most single-user setups, SQLite is sufficient
+and eliminates the PostgreSQL dependency entirely.
+
+**Complexity: medium**
+
+#### In-process embeddings (fastembed-rs)
+
+Replace the Ollama HTTP dependency with `fastembed-rs`, which wraps
+ONNX Runtime and supports BGE-M3 natively. The model downloads on
+first run and runs in-process. This eliminates the Ollama dependency
+and makes the binary fully self-contained (with the SQLite backend,
+a single binary with zero external services).
+
+**Complexity: medium**
+
+#### Lazy connection with retry
+
+Replace the hard exit on PostgreSQL connection failure with lazy
+pool initialization and reconnect handling. The server starts even
+if the database is temporarily unavailable, and tools return clear
+errors until connectivity is restored.
+
+**Complexity: low**
+
+#### Cross-project memory sharing
+
+Allow memories scoped to `_global` (or a configurable scope field)
+so that decisions like "always use rustls" apply across all Rust
+projects. Modify search to optionally include global memories.
+
+**Complexity: medium**
+
+#### Embedding model hot-swap
+
+Store the model name alongside each embedding. When the configured
+model changes, new memories use the new model. Add a
+`memory_reindex` tool for bulk re-embedding.
+
+**Complexity: medium**
+
+### Priority 5: Extended features
+
+#### Local LLM review layer
+
+A `review_changes` tool that sends diffs to a local Ollama model for
+independent review. The qorvus project implements a full review
+pipeline with configurable reviewer models, up to 3 revision rounds,
+and streaming events (`review_start`, `review_feedback`,
+`review_approved`). That design could be adapted here.
 
 **Complexity: medium-high**
 
-A second MCP server (or additional tool in this one) that sends
-proposed changes to a local Ollama model for independent review.
-Every code change gets a second opinion from a model with a clean
-context window — no accumulated biases from the current conversation.
-The reviewer model could check for rule violations, logical errors,
-or missed edge cases.
+#### IRC bridge
 
-Implementation: a `review_changes` tool that accepts a diff and
-context, sends it to a local model (e.g., Qwen 2.5 32B, Llama 3.3
-70B, or DeepSeek R1 via Ollama), and returns structured feedback.
-Challenges include context window limits of local models, response
-quality compared to Claude, and latency (large local models are
-slow).
+Separate service bridging an IRC channel to Claude Code. The bot
+joins a configured channel, forwards messages to Claude Code (via
+API or local model), and relays responses. Needs conversation state,
+rate limiting, and auth (respond only to configured nicks/channels).
 
-### Cross-project memory sharing
+**Complexity: medium** (separate project)
 
-**Complexity: medium**
-
-Allow memories to be shared across projects or linked between them.
-A decision made in one project (e.g., "always use rustls, never
-openssl") might apply to all Rust projects. Add a `global` project
-scope or a linking mechanism.
-
-Implementation: add a `scope` field (`project`, `global`) or allow
-`project` to be a comma-separated list. Modify search to optionally
-include global memories. Alternatively, add a `memory_link` tool
-that creates cross-references between memories in different projects.
-
-### Embedding model hot-swap
-
-**Complexity: medium**
-
-Allow changing the embedding model without re-embedding everything
-immediately. Store the model name alongside each embedding. When the
-configured model changes, new memories use the new model while old
-ones keep working. Add a `memory_reindex` tool that re-embeds all
-memories with the current model in the background.
-
-Implementation: add a `model TEXT NOT NULL DEFAULT 'bge-m3'` column.
-The search query would need to handle mixed-model scenarios (either
-by filtering to the current model or by always re-embedding queries
-with all models used in the corpus). The `memory_reindex` tool would
-iterate through all memories and regenerate embeddings.
-
-### Backup and export
-
-**Complexity: low**
-
-Add a `memory_export` tool that dumps all memories for a project as
-JSON (without embeddings — they can be regenerated). This enables
-backup, migration between instances, and sharing memory corpora.
-Pair with a `memory_import` tool that loads a JSON dump and
-re-embeds everything.
-
-Implementation: a `memory_export` tool that serializes memories
-to JSON and a `memory_import` tool that deserializes, generates
-embeddings, and inserts. The export format should be stable and
-versioned.
-
-### Conversation summarization
-
-**Complexity: high**
+#### Conversation summarization
 
 Automatically summarize completed Claude Code sessions and store key
-decisions, errors encountered, and patterns observed as memories.
-This removes the need for manual `memory_store` calls — the server
-would observe the conversation and extract noteworthy items.
-
-Implementation: requires access to the conversation transcript
-(possibly via Claude Code hooks or a post-session trigger). A
-summarization model (either Claude via API or a local model) would
-extract structured memories from the transcript. This is the most
-complex improvement because it requires conversation access,
-summarization quality, and deduplication against existing memories.
-
-### Web UI for memory browsing
+decisions, errors, and patterns as memories. Requires conversation
+transcript access (Claude Code hooks or post-session trigger) and a
+summarization model. Highest-value improvement but hardest to build.
 
 **Complexity: high**
 
-A web interface for browsing, searching, editing, and managing
-memories outside of Claude Code. Useful for reviewing what Claude
-Code has learned, bulk editing, and monitoring memory growth.
+#### Web UI for memory browsing
 
-Implementation: add an HTTP server (axum or actix-web) alongside
-the stdio MCP server, or as a separate binary sharing the same
-database. The UI would be a simple SPA (or server-rendered HTML)
-with search, filter, and CRUD functionality. Could reuse the same
-`db.rs` query layer.
-
-### Multi-tenant / team memory
+Web interface for browsing, searching, editing, and managing memories
+outside of Claude Code. Use axum alongside the stdio MCP server, or
+as a separate binary sharing the database. The qorvus project's full
+web UI with SSE streaming could serve as a reference.
 
 **Complexity: high**
 
-Support multiple users sharing a memory server instance, with
-per-user and shared team memories. Requires authentication (API
-keys or tokens), access control (who can read/write which
-projects), and isolation between tenants.
+#### Multi-tenant / team memory
 
-Implementation: add a `user_id` column, authentication middleware
-in the MCP transport layer, and access control checks in every
-tool handler. This fundamentally changes the architecture from a
-single-user local tool to a shared service.
+Per-user and shared team memories with auth and access control.
+Fundamentally changes the architecture from single-user local tool
+to shared service. Better designed as a separate project.
+
+**Complexity: high** (effective rewrite)
