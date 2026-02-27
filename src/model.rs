@@ -37,6 +37,7 @@ pub struct Memory {
 }
 
 /// Memory without the embedding vector, for list/get queries.
+#[derive(Clone)]
 pub struct MemorySummary {
     pub id: Uuid,
     pub category: Category,

@@ -32,8 +32,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("running migrations");
     db::migrate(&pool).await?;
 
-    let embed_client = Arc::new(embed::Client::new(config.ollama_url, config.ollama_model));
-    let server = tools::MemoryServer::new(pool, embed_client);
+    let http = reqwest::Client::new();
+    let embed_client = Arc::new(embed::Client::new(
+        config.ollama_url.clone(),
+        config.ollama_model,
+    ));
+    let server = tools::MemoryServer::new(
+        pool,
+        embed_client,
+        config.expand_model,
+        http,
+        config.ollama_url,
+    );
 
     tracing::info!("starting MCP stdio server");
     let service = server

@@ -8,6 +8,8 @@ pub struct Config {
     pub database_url: String,
     #[serde(default = "default_dream_model")]
     pub dream_model: String,
+    #[serde(default = "default_expand_model")]
+    pub expand_model: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
     #[serde(default = "default_ollama_url")]
@@ -27,6 +29,7 @@ impl Default for Config {
         Self {
             database_url: default_database_url(),
             dream_model: default_dream_model(),
+            expand_model: default_expand_model(),
             ollama_model: default_ollama_model(),
             ollama_url: default_ollama_url(),
         }
@@ -38,6 +41,10 @@ fn default_database_url() -> String {
 }
 
 fn default_dream_model() -> String {
+    "llama3.1".to_owned()
+}
+
+fn default_expand_model() -> String {
     "llama3.1".to_owned()
 }
 
@@ -61,6 +68,7 @@ mod tests {
             "postgres://memory:memory@localhost/memory"
         );
         assert_eq!(config.dream_model, "llama3.1");
+        assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }
@@ -84,6 +92,7 @@ mod tests {
             "postgres://memory:memory@localhost/memory"
         );
         assert_eq!(config.dream_model, "llama3.1");
+        assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
     }
