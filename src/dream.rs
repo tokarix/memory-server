@@ -125,11 +125,13 @@ async fn apply_merges(
             continue;
         }
 
-        if mem_a.category == Category::Rule || mem_b.category == Category::Rule {
+        if matches!(mem_a.category, Category::Plan | Category::Rule)
+            || matches!(mem_b.category, Category::Plan | Category::Rule)
+        {
             tracing::info!(
                 id_a = %candidate.id_a,
                 id_b = %candidate.id_b,
-                "skipping merge: rule memories are protected"
+                "skipping merge: plan/rule memories are protected"
             );
             continue;
         }
@@ -199,10 +201,10 @@ async fn apply_prunes(
             continue;
         }
 
-        if memory.category == Category::Rule {
+        if matches!(memory.category, Category::Plan | Category::Rule) {
             tracing::info!(
                 id = %candidate.id,
-                "skipping prune: rule memories are protected"
+                "skipping prune: plan/rule memories are protected"
             );
             continue;
         }
