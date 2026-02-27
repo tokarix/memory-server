@@ -51,6 +51,29 @@ pub struct MemorySummary {
     pub updated_at: DateTime<Utc>,
 }
 
+pub struct SessionLog {
+    pub id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub cwd: String,
+    pub embedding: Vec<f32>,
+    pub project: String,
+    pub session_id: String,
+    pub summary: String,
+}
+
+/// Session log without the embedding vector, for search results.
+#[derive(Clone)]
+pub struct SessionLogSummary {
+    pub id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub cwd: String,
+    pub project: String,
+    pub session_id: String,
+    pub summary: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

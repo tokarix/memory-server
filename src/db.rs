@@ -3,7 +3,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::model::{Category, Memory, MemorySummary};
+use crate::model::{Category, Memory, MemorySummary, SessionLog, SessionLogSummary};
 
 pub async fn all_embeddings(
     pool: &PgPool,
@@ -120,6 +120,86 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
+}
+
+pub async fn session_log_search(
+    pool: &PgPool,
+    embedding: Vec<f32>,
+    query: &str,
+    project: &str,
+    limit: i64,
+    min_similarity: f64,
+) -> Result<Vec<(SessionLogSummary, f64)>, sqlx::Error> {
+    let query_vec = Vector::from(embedding);
+    let fetch_limit = limit * 3;
+    let rows = sqlx::query(
+        "WITH vector_results AS (
+            SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+            FROM session_logs
+            WHERE project = $2
+              AND 1 - (embedding <=> $1) >= $4
+            LIMIT $3
+        ),
+        fts_results AS (
+            SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC) AS rank_f
+            FROM session_logs
+            WHERE project = $2
+              AND fts @@ plainto_tsquery('english', $5)
+            LIMIT $3
+        ),
+        combined AS (
+            SELECT COALESCE(v.id, f.id) AS id,
+                   (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+            FROM vector_results v
+            FULL OUTER JOIN fts_results f ON v.id = f.id
+        )
+        SELECT s.id, s.content, s.created_at, s.cwd, s.project, s.session_id, s.summary,
+               c.rrf_score AS similarity
+        FROM combined c
+        JOIN session_logs s ON s.id = c.id
+        ORDER BY c.rrf_score DESC
+        LIMIT $6",
+    )
+    .bind(&query_vec)
+    .bind(project)
+    .bind(fetch_limit)
+    .bind(min_similarity)
+    .bind(query)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let log = row_to_session_log_summary(row)?;
+            let similarity: f64 = row.try_get("similarity")?;
+            Ok((log, similarity))
+        })
+        .collect()
+}
+
+pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<(), sqlx::Error> {
+    let embedding = Vector::from(log.embedding.clone());
+    sqlx::query(
+        "INSERT INTO session_logs (id, content, created_at, cwd, embedding, project, session_id, summary)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (session_id) DO UPDATE SET
+            content = EXCLUDED.content,
+            cwd = EXCLUDED.cwd,
+            embedding = EXCLUDED.embedding,
+            project = EXCLUDED.project,
+            summary = EXCLUDED.summary",
+    )
+    .bind(log.id)
+    .bind(&log.content)
+    .bind(log.created_at)
+    .bind(&log.cwd)
+    .bind(embedding)
+    .bind(&log.project)
+    .bind(&log.session_id)
+    .bind(&log.summary)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn update(
@@ -254,6 +334,20 @@ fn parse_pgvector_text(text: &str) -> Vec<f32> {
         .split(',')
         .filter_map(|s| s.trim().parse::<f32>().ok())
         .collect()
+}
+
+fn row_to_session_log_summary(
+    row: &sqlx::postgres::PgRow,
+) -> Result<SessionLogSummary, sqlx::Error> {
+    Ok(SessionLogSummary {
+        id: row.try_get("id")?,
+        content: row.try_get("content")?,
+        created_at: row.try_get("created_at")?,
+        cwd: row.try_get("cwd")?,
+        project: row.try_get("project")?,
+        session_id: row.try_get("session_id")?,
+        summary: row.try_get("summary")?,
+    })
 }
 
 fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Error> {
