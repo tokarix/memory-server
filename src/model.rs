@@ -64,6 +64,14 @@ pub struct SessionLog {
     pub summary: String,
 }
 
+pub struct SessionLogChunk {
+    pub chunk_index: i32,
+    pub content: String,
+    pub embedding: Vec<f32>,
+    pub id: Uuid,
+    pub session_log_id: Uuid,
+}
+
 /// Session log without the embedding vector, for search results.
 #[derive(Clone)]
 pub struct SessionLogSummary {
