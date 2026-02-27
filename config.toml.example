@@ -1,0 +1,3 @@
+database_url = "postgres://memory:memory@localhost/memory"
+ollama_model = "bge-m3"
+ollama_url = "http://localhost:11434"
