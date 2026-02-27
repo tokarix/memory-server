@@ -115,7 +115,8 @@ fn blend(
                 _ => (0.40, 0.60),
             };
 
-            let blended_score = w_rrf * norm_rrf + w_llm * norm_llm;
+            let importance = memory.category.importance();
+            let blended_score = (w_rrf * norm_rrf + w_llm * norm_llm) * (0.5 + importance);
             (memory, blended_score)
         })
         .collect();
@@ -249,6 +250,44 @@ mod tests {
         // blended = 0.40*0.45 + 0.60*1.0 = 0.78
         let rank12_item = blended.iter().find(|(m, _)| m.id == ids[11]).unwrap();
         assert!((rank12_item.1 - 0.78).abs() < 1e-10);
+    }
+
+    fn make_summary_with_category(id: Uuid, category: Category) -> model::MemorySummary {
+        model::MemorySummary {
+            id,
+            category,
+            content: "test content".to_owned(),
+            created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            project: "test".to_owned(),
+            summary: "test summary".to_owned(),
+            tags: vec![],
+            updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn blend_importance_boost() {
+        // Two memories with identical RRF and LLM scores but different categories
+        let id_rule = Uuid::from_u128(1);
+        let id_context = Uuid::from_u128(2);
+        let results = vec![
+            (make_summary_with_category(id_rule, Category::Rule), 1.0),
+            (
+                make_summary_with_category(id_context, Category::Context),
+                1.0,
+            ),
+        ];
+        let scores = vec![(id_rule, 5_u8), (id_context, 5_u8)];
+
+        let blended = blend(results, &scores);
+
+        // Both have same base: 0.75*1.0 + 0.25*0.5 = 0.875
+        // Rule: 0.875 * (0.5 + 0.9) = 0.875 * 1.4 = 1.225
+        // Context: 0.875 * (0.5 + 0.5) = 0.875 * 1.0 = 0.875
+        assert_eq!(blended[0].0.id, id_rule);
+        assert!((blended[0].1 - 1.225).abs() < 1e-10);
+        assert_eq!(blended[1].0.id, id_context);
+        assert!((blended[1].1 - 0.875).abs() < 1e-10);
     }
 
     #[test]
