@@ -27,6 +27,12 @@ impl Category {
             Self::Rule => 0.9,
         }
     }
+
+    /// Returns `true` if this category is considered "core" (importance >= 0.7).
+    #[must_use]
+    pub fn is_core(&self) -> bool {
+        self.importance() >= 0.7
+    }
 }
 
 impl fmt::Display for Category {
@@ -151,6 +157,15 @@ mod tests {
                 "{variant} importance {imp} out of range"
             );
         }
+    }
+
+    #[test]
+    fn category_is_core() {
+        assert!(!Category::Context.is_core());
+        assert!(Category::Decision.is_core());
+        assert!(Category::ErrorFix.is_core());
+        assert!(Category::Plan.is_core());
+        assert!(Category::Rule.is_core());
     }
 
     #[test]
