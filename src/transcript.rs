@@ -148,6 +148,44 @@ fn extract_texts(content: &MessageContent) -> Vec<String> {
     }
 }
 
+pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let len = text.len();
+
+    while start < len {
+        let mut end = (start + chunk_size).min(len);
+        // Snap to char boundary
+        while end < len && !text.is_char_boundary(end) {
+            end += 1;
+        }
+
+        chunks.push(text[start..end].to_owned());
+
+        if end >= len {
+            break;
+        }
+
+        let advance = if chunk_size > overlap {
+            chunk_size - overlap
+        } else {
+            chunk_size
+        };
+        let mut next = start + advance;
+        // Snap to char boundary
+        while next < len && !text.is_char_boundary(next) {
+            next += 1;
+        }
+        start = next;
+    }
+
+    chunks
+}
+
 fn truncate_to_char_boundary(s: &mut String, max_len: usize) {
     if s.len() <= max_len {
         return;
@@ -293,5 +331,61 @@ mod tests {
         let result = parse_jsonl(jsonl(lines)).unwrap();
         assert!(result.content.contains("visible response"));
         assert!(!result.content.contains("internal thought"));
+    }
+
+    #[test]
+    fn chunk_text_empty() {
+        let chunks = chunk_text("", 100, 20);
+        assert_eq!(chunks, vec![""]);
+    }
+
+    #[test]
+    fn chunk_text_short() {
+        let chunks = chunk_text("hello", 100, 20);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn chunk_text_exact_boundary() {
+        let chunks = chunk_text("abcde", 5, 2);
+        assert_eq!(chunks, vec!["abcde"]);
+    }
+
+    #[test]
+    fn chunk_text_multi_chunk_overlap() {
+        // 10 chars, chunk_size=4, overlap=2 → advance by 2 each time
+        let chunks = chunk_text("abcdefghij", 4, 2);
+        assert_eq!(chunks[0], "abcd");
+        assert_eq!(chunks[1], "cdef");
+        assert_eq!(chunks[2], "efgh");
+        assert_eq!(chunks[3], "ghij");
+        assert_eq!(chunks.len(), 4);
+    }
+
+    #[test]
+    fn chunk_text_unicode_safety() {
+        // "héllo" — é is 2 bytes, total 6 bytes
+        let text = "héllo world";
+        let chunks = chunk_text(text, 5, 1);
+        // Every chunk must be valid UTF-8 (enforced by &str return)
+        for chunk in &chunks {
+            assert!(chunk.len() <= 6); // may snap past 5 to char boundary
+        }
+        // Reconstruct: all chars present in at least one chunk
+        for c in text.chars() {
+            assert!(
+                chunks.iter().any(|ch| ch.contains(c)),
+                "char {c:?} missing from chunks"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_text_no_overlap() {
+        let chunks = chunk_text("abcdefghij", 4, 0);
+        assert_eq!(chunks[0], "abcd");
+        assert_eq!(chunks[1], "efgh");
+        assert_eq!(chunks[2], "ij");
+        assert_eq!(chunks.len(), 3);
     }
 }
