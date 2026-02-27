@@ -1,7 +1,12 @@
 use std::io::BufReader;
 use std::sync::Arc;
 
+use uuid::Uuid;
+
 use memory_server::{config, db, embed, model, transcript};
+
+const CHUNK_OVERLAP: usize = 200;
+const CHUNK_SIZE: usize = 4000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,12 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reader = BufReader::new(file);
     let parsed = transcript::parse_jsonl(reader).ok_or("failed to parse transcript")?;
 
+    let text_chunks = transcript::chunk_text(&parsed.content, CHUNK_SIZE, CHUNK_OVERLAP);
+
     tracing::info!(
         session_id = %parsed.session_id,
         project = %parsed.project,
         cwd = %parsed.cwd,
         summary_len = parsed.summary.len(),
         content_len = parsed.content.len(),
+        chunk_count = text_chunks.len(),
         "parsed transcript",
     );
 
@@ -56,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cwd: {}", parsed.cwd);
         println!("summary: {}", parsed.summary);
         println!("content_len: {}", parsed.content.len());
+        println!("chunk_count: {}", text_chunks.len());
         return Ok(());
     }
 
@@ -67,10 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db::migrate(&pool).await?;
 
     let embed_client = Arc::new(embed::Client::new(config.ollama_url, config.ollama_model));
-    let embedding = embed_client.embed(&parsed.summary, &parsed.content).await?;
+
+    // Embed summary only for parent session log
+    let embedding = embed_client.embed(&parsed.summary, "").await?;
 
     let log = model::SessionLog {
-        id: uuid::Uuid::new_v4(),
+        id: Uuid::new_v4(),
         content: parsed.content,
         created_at: chrono::Utc::now(),
         cwd: parsed.cwd,
@@ -82,6 +93,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stored_id = db::session_log_upsert(&pool, &log).await?;
     tracing::info!(id = %stored_id, session_id = %log.session_id, "session log stored");
+
+    // Embed each chunk and store
+    let mut chunks = Vec::with_capacity(text_chunks.len());
+    for (i, text) in text_chunks.iter().enumerate() {
+        let chunk_embedding = embed_client.embed(text, "").await?;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        chunks.push(model::SessionLogChunk {
+            chunk_index: i as i32,
+            content: text.clone(),
+            embedding: chunk_embedding,
+            id: Uuid::new_v4(),
+            session_log_id: stored_id,
+        });
+    }
+
+    db::session_log_chunks_replace(&pool, stored_id, &chunks).await?;
+    tracing::info!(
+        id = %stored_id,
+        chunk_count = chunks.len(),
+        "session log chunks stored"
+    );
 
     Ok(())
 }
