@@ -11,6 +11,7 @@ pub mod error;
 pub mod expand;
 pub mod model;
 pub mod ollama;
+pub mod rerank;
 pub mod tools;
 
 #[tool_handler]
