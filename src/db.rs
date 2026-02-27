@@ -135,12 +135,21 @@ pub async fn session_log_search(
     let query_vec = Vector::from(embedding);
     let fetch_limit = limit * 3;
     let rows = sqlx::query(
-        "WITH vector_results AS (
-            SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
-            FROM session_logs
-            WHERE project = $2
-              AND 1 - (embedding <=> $1) >= $4
+        "WITH nearest_chunks AS (
+            SELECT c.session_log_id,
+                   c.embedding <=> $1 AS distance
+            FROM session_log_chunks c
+            JOIN session_logs sl ON sl.id = c.session_log_id
+            WHERE sl.project = $2
+            ORDER BY c.embedding <=> $1
             LIMIT $3
+        ),
+        vector_results AS (
+            SELECT session_log_id AS id,
+                   ROW_NUMBER() OVER (ORDER BY MIN(distance)) AS rank_v
+            FROM nearest_chunks
+            WHERE 1 - distance >= $4
+            GROUP BY session_log_id
         ),
         fts_results AS (
             SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC) AS rank_f
