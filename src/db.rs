@@ -72,6 +72,31 @@ pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let categories: Vec<Category> = [
+        Category::Context,
+        Category::Decision,
+        Category::ErrorFix,
+        Category::Plan,
+        Category::Rule,
+    ]
+    .into_iter()
+    .filter(Category::is_core)
+    .collect();
+
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+         FROM memories
+         WHERE project = $1 AND category = ANY($2)
+         ORDER BY updated_at DESC",
+    )
+    .bind(project)
+    .bind(&categories)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
 pub async fn list(
     pool: &PgPool,
     project: &str,
