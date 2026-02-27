@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.expand_model,
         http,
         config.ollama_url,
+        config.rerank_model,
     );
 
     tracing::info!("starting MCP stdio server");

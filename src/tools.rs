@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::embed;
 use crate::error::Error;
 use crate::model::Category;
-use crate::{db, expand, model};
+use crate::{db, expand, model, rerank};
 
 const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
 
@@ -25,6 +25,7 @@ pub struct MemoryServer {
     http: reqwest::Client,
     ollama_url: String,
     pool: PgPool,
+    rerank_model: String,
     pub tool_router: ToolRouter<Self>,
 }
 
@@ -100,6 +101,7 @@ impl MemoryServer {
         expand_model: String,
         http: reqwest::Client,
         ollama_url: String,
+        rerank_model: String,
     ) -> Self {
         Self {
             embed_client,
@@ -107,6 +109,7 @@ impl MemoryServer {
             http,
             ollama_url,
             pool,
+            rerank_model,
             tool_router: Self::tool_router(),
         }
     }
@@ -221,6 +224,16 @@ impl MemoryServer {
 
         // Outer RRF: original query (index 0) gets 2x weight
         let results = outer_rrf(&variant_results, limit);
+
+        // LLM re-ranking: blend algorithmic scores with semantic relevance
+        let results = rerank::rerank(
+            &self.http,
+            &self.ollama_url,
+            &self.rerank_model,
+            &params.query,
+            results,
+        )
+        .await;
 
         if results.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
