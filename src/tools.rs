@@ -136,6 +136,15 @@ impl MemoryServer {
         }
     }
 
+    #[tool(description = "Return the memory server version (includes git hash)")]
+    async fn memory_server_version(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("GIT_HASH"),
+        ))]))
+    }
+
     #[tool(description = "Delete a memory by UUID")]
     async fn memory_delete(
         &self,
