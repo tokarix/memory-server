@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         Arc::new(embed::Client::new(
             config.ollama_url.clone(),
-            config.ollama_model,
+            config.embedding_model,
         )),
         config.expand_model,
         config.generate_num_ctx,

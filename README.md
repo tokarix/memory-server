@@ -84,7 +84,7 @@ http_bind = "127.0.0.1:8080"
 memoryd_url = "http://127.0.0.1:8080"
 database_url = "postgres://memory:memory@localhost/memory"
 ollama_url = "http://localhost:11434"
-ollama_model = "bge-m3"
+embedding_model = "bge-m3"
 expand_model = "llama3.1"
 rerank_model = "llama3.1"
 dream_model = "llama3.1"
@@ -99,7 +99,7 @@ Configuration fields:
 | `http_bind` | `127.0.0.1:8080` | Bind address for `memoryd` |
 | `memoryd_url` | `http://127.0.0.1:8080` | Base URL used by `memory-mcp` |
 | `ollama_url` | `http://localhost:11434` | Ollama base URL |
-| `ollama_model` | `bge-m3` | Embedding model |
+| `embedding_model` | `bge-m3` | Embedding model |
 | `expand_model` | `llama3.1` | Query expansion model |
 | `rerank_model` | `llama3.1` | Search reranking model |
 | `dream_model` | `llama3.1` | Dream/prune maintenance model |

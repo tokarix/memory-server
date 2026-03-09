@@ -75,7 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
 
-    let embed_client = Arc::new(embed::Client::new(config.ollama_url, config.ollama_model));
+    let embed_client = Arc::new(embed::Client::new(
+        config.ollama_url,
+        config.embedding_model,
+    ));
 
     // Embed summary only for parent session log
     let embedding = embed_client.embed(&parsed.summary, "").await?;

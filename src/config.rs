@@ -10,12 +10,12 @@ pub struct Config {
     pub database_url: String,
     #[serde(default = "default_dream_model")]
     pub dream_model: String,
+    #[serde(default = "default_embedding_model", alias = "ollama_model")]
+    pub embedding_model: String,
     #[serde(default = "default_expand_model")]
     pub expand_model: String,
     #[serde(default = "default_generate_num_ctx")]
     pub generate_num_ctx: u32,
-    #[serde(default = "default_ollama_model")]
-    pub ollama_model: String,
     #[serde(default = "default_ollama_url")]
     pub ollama_url: String,
     #[serde(default = "default_http_bind")]
@@ -40,9 +40,9 @@ impl Default for Config {
             api_token: None,
             database_url: default_database_url(),
             dream_model: default_dream_model(),
+            embedding_model: default_embedding_model(),
             expand_model: default_expand_model(),
             generate_num_ctx: default_generate_num_ctx(),
-            ollama_model: default_ollama_model(),
             ollama_url: default_ollama_url(),
             http_bind: default_http_bind(),
             memoryd_url: default_memoryd_url(),
@@ -75,7 +75,7 @@ fn default_expand_model() -> String {
     "llama3.1".to_owned()
 }
 
-fn default_ollama_model() -> String {
+fn default_embedding_model() -> String {
     "bge-m3".to_owned()
 }
 
@@ -102,24 +102,31 @@ mod tests {
         assert_eq!(config.memoryd_url, "http://127.0.0.1:8080");
         assert_eq!(config.api_token, None);
         assert_eq!(config.dream_model, "llama3.1");
+        assert_eq!(config.embedding_model, "bge-m3");
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.generate_num_ctx, 8192);
-        assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.rerank_model, "llama3.1");
     }
 
     #[test]
     fn deserialize_partial() {
-        let toml = r#"ollama_model = "nomic-embed-text""#;
+        let toml = r#"embedding_model = "nomic-embed-text""#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.ollama_model, "nomic-embed-text");
+        assert_eq!(config.embedding_model, "nomic-embed-text");
         assert_eq!(config.http_bind, "127.0.0.1:8080");
         assert_eq!(config.memoryd_url, "http://127.0.0.1:8080");
         assert_eq!(
             config.database_url,
             "postgres://memory:memory@localhost/memory"
         );
+    }
+
+    #[test]
+    fn deserialize_legacy_ollama_model_alias() {
+        let toml = r#"ollama_model = "nomic-embed-text""#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.embedding_model, "nomic-embed-text");
     }
 
     #[test]
@@ -133,9 +140,9 @@ mod tests {
         assert_eq!(config.memoryd_url, "http://127.0.0.1:8080");
         assert_eq!(config.api_token, None);
         assert_eq!(config.dream_model, "llama3.1");
+        assert_eq!(config.embedding_model, "bge-m3");
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.generate_num_ctx, 8192);
-        assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.rerank_model, "llama3.1");
     }
