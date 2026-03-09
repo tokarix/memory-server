@@ -130,6 +130,16 @@ locally. `memoryd` runs the HTTP service on `http_bind`, and
 
 ## MCP client setup
 
+Minimal `memory-mcp` config:
+
+```toml
+memoryd_url = "http://127.0.0.1:8080"
+# api_token = "replace-me"
+```
+
+`memoryd` uses the full server config shown earlier. `memory-mcp` only
+needs `memoryd_url` and, if enabled on the server, `api_token`.
+
 ### Codex
 
 Add an MCP server entry to `~/.codex/config.toml`:
