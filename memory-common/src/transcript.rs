@@ -148,6 +148,7 @@ fn extract_texts(content: &MessageContent) -> Vec<String> {
     }
 }
 
+#[must_use]
 pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];

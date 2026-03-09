@@ -2,19 +2,19 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use crate::api::{
+use crate::error::Error;
+use crate::model;
+use crate::protocol::{
     AppendSessionMessageDto, BootstrapEnvelope, CreateSessionDto, DeleteEnvelope,
     FinalizeSessionDto, FinalizeSessionEnvelope, HealthResponse, MemoryEnvelope,
     MemoryListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope, SessionEnvelope,
     SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitPlanReviewDto,
 };
-use crate::app::{
+use crate::protocol::{
     AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
-use crate::error::Error;
-use crate::model;
 
 #[derive(Clone)]
 pub struct HttpMemoryClient {
@@ -24,6 +24,11 @@ pub struct HttpMemoryClient {
 }
 
 impl HttpMemoryClient {
+    /// Build an HTTP client for `memoryd`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `base_url` is not a valid URL.
     pub fn new(base_url: &str, bearer_token: Option<String>) -> Result<Self, Error> {
         let base_url = reqwest::Url::parse(base_url)
             .map_err(|error| Error::Transport(format!("invalid memoryd_url: {error}")))?;
@@ -34,11 +39,21 @@ impl HttpMemoryClient {
         })
     }
 
+    /// Fetch the remote server version string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn version(&self) -> Result<String, Error> {
         let response: HealthResponse = self.request(Method::GET, &["api", "v1", "health"]).await?;
         Ok(response.version)
     }
 
+    /// Delete a memory by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn delete_memory(&self, id: Uuid) -> Result<bool, Error> {
         let id = id.to_string();
         let response: DeleteEnvelope = self
@@ -47,6 +62,11 @@ impl HttpMemoryClient {
         Ok(response.deleted)
     }
 
+    /// Fetch one memory by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn get_memory(&self, id: Uuid) -> Result<Option<model::MemorySummary>, Error> {
         let id = id.to_string();
         match self
@@ -59,6 +79,11 @@ impl HttpMemoryClient {
         }
     }
 
+    /// List memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn list_memories(
         &self,
         request: ListMemoriesRequest,
@@ -80,6 +105,11 @@ impl HttpMemoryClient {
         Ok(response.memories.into_iter().map(Into::into).collect())
     }
 
+    /// Load core memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
         let response: MemoryListEnvelope = self
             .request(Method::GET, &["api", "v1", "projects", project, "recall"])
@@ -87,6 +117,11 @@ impl HttpMemoryClient {
         Ok(response.memories.into_iter().map(Into::into).collect())
     }
 
+    /// Load durable rules for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn list_rules(
         &self,
         project: &str,
@@ -102,6 +137,11 @@ impl HttpMemoryClient {
         })
     }
 
+    /// Load effective rules and optional recall memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn bootstrap_project(
         &self,
         project: &str,
@@ -127,6 +167,11 @@ impl HttpMemoryClient {
         })
     }
 
+    /// Create or upsert a normalized session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
@@ -146,6 +191,11 @@ impl HttpMemoryClient {
         Ok(response.session.into())
     }
 
+    /// Append one message to a normalized session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn append_session_message(
         &self,
         request: AppendSessionMessageRequest,
@@ -167,6 +217,11 @@ impl HttpMemoryClient {
         Ok(response.message.into())
     }
 
+    /// Finalize a normalized session into searchable log chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn finalize_session(
         &self,
         request: FinalizeSessionRequest,
@@ -188,6 +243,11 @@ impl HttpMemoryClient {
         }
     }
 
+    /// List plans waiting for review.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn list_plan_review_queue(
         &self,
         project: &str,
@@ -200,6 +260,11 @@ impl HttpMemoryClient {
         Ok(response.memories.into_iter().map(Into::into).collect())
     }
 
+    /// Submit a plan review decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn submit_plan_review(
         &self,
         plan_id: Uuid,
@@ -228,6 +293,11 @@ impl HttpMemoryClient {
         }
     }
 
+    /// Search memories and session logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn search_memories(
         &self,
         request: SearchMemoriesRequest,
@@ -259,6 +329,11 @@ impl HttpMemoryClient {
         Ok(SearchOutcome::Empty)
     }
 
+    /// Store a new memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn store_memory(
         &self,
         request: StoreMemoryRequest,
@@ -269,6 +344,11 @@ impl HttpMemoryClient {
         Ok(response.memory.into())
     }
 
+    /// Update an existing memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn update_memory(
         &self,
         request: UpdateMemoryRequest,
@@ -293,6 +373,11 @@ impl HttpMemoryClient {
         }
     }
 
+    /// Store a full session transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
     pub async fn store_session_log(&self, request: StoreSessionLogRequest) -> Result<usize, Error> {
         let response: StoreSessionLogEnvelope = self
             .request_with_body(Method::POST, &["api", "v1", "sessions"], &request)
@@ -368,7 +453,7 @@ impl HttpMemoryClient {
         {
             let mut path_segments = url
                 .path_segments_mut()
-                .map_err(|_| Error::Transport("memoryd_url cannot be a base URL".to_owned()))?;
+                .map_err(|()| Error::Transport("memoryd_url cannot be a base URL".to_owned()))?;
             path_segments.clear();
             path_segments.extend(segments);
         }

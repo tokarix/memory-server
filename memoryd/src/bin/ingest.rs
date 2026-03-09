@@ -1,9 +1,11 @@
+//! Import a transcript JSONL file into memory server session logs.
+
 use std::io::BufReader;
 use std::sync::Arc;
 
 use uuid::Uuid;
 
-use memory_server::{config, db, embed, model, transcript};
+use memoryd::{config, db, embed, model, transcript};
 
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;

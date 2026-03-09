@@ -1,32 +1,13 @@
-[package]
-name = "memory-server"
+[workspace]
+members = ["memory-common", "memory-mcp", "memoryd"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[[bin]]
-name = "memory-server"
-path = "src/main.rs"
-
-[[bin]]
-name = "memoryd"
-path = "src/bin/memoryd.rs"
-
-[[bin]]
-name = "memory-mcp"
-path = "src/bin/memory_mcp.rs"
-
-[[bin]]
-name = "dream"
-path = "src/bin/dream.rs"
-
-[[bin]]
-name = "ingest"
-path = "src/bin/ingest.rs"
-
-[dependencies]
-axum = { version = "0.8.8", features = ["json", "macros", "query", "tokio"] }
+[workspace.dependencies]
 chrono = { version = "0.4.44", features = ["serde"] }
-pgvector = { version = "0.4.1", features = ["sqlx"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "0.16.0", features = ["transport-io"] }
 schemars = { version = "1", features = ["uuid1"] }

@@ -1143,19 +1143,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memory-server"
+name = "memory-common"
 version = "0.1.0"
 dependencies = [
- "axum",
  "chrono",
- "pgvector",
- "reqwest",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "memory-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "memory-common",
+ "reqwest",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "memoryd"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "memory-common",
+ "pgvector",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
  "tokio",
  "toml",
  "tower-http",

@@ -1,23 +1,13 @@
-#![allow(clippy::missing_errors_doc, clippy::must_use_candidate)]
+//! MCP adapter for the memory server HTTP API.
 
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool_handler};
 
-pub mod api;
-pub mod app;
-pub mod config;
-pub mod db;
-pub mod dream;
-pub mod embed;
-pub mod error;
-pub mod expand;
 pub mod http_client;
 pub mod mcp;
-pub mod model;
-pub mod ollama;
-pub mod rerank;
 pub mod tools;
-pub mod transcript;
+
+pub use memory_common::{config, error, model, protocol};
 
 #[tool_handler]
 impl ServerHandler for tools::MemoryServer {

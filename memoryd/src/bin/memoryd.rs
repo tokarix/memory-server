@@ -1,9 +1,11 @@
+//! Run the memory server HTTP daemon.
+
 use std::sync::Arc;
 
 use axum::Router;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
-use memory_server::{api, app::MemoryApp, config, db, embed};
+use memoryd::{api, app::MemoryApp, config, db, embed};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

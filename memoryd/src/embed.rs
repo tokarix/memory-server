@@ -19,6 +19,7 @@ struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+#[must_use]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let (mut dot, mut norm_a, mut norm_b) = (0.0_f32, 0.0_f32, 0.0_f32);
     for (x, y) in a.iter().zip(b.iter()) {
@@ -31,6 +32,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 impl Client {
+    #[must_use]
     pub fn new(url: String, model: String) -> Self {
         Self {
             http: reqwest::Client::new(),
@@ -39,6 +41,11 @@ impl Client {
         }
     }
 
+    /// Request an embedding for the provided summary and content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedding request fails or the response is invalid.
     pub async fn embed(&self, summary: &str, content: &str) -> Result<Vec<f32>, Error> {
         let input = format!("{summary}\n\n{content}");
         let request = EmbedRequest {

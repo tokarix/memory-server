@@ -115,6 +115,7 @@ pub enum SearchOutcome {
 }
 
 impl MemoryApp {
+    #[must_use]
     pub fn new(
         pool: PgPool,
         embed_client: Arc<embed::Client>,
@@ -140,14 +141,29 @@ impl MemoryApp {
         format!("{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"))
     }
 
+    /// Delete a memory by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn delete_memory(&self, id: Uuid) -> Result<bool, Error> {
         db::delete(&self.pool, id).await.map_err(Error::from)
     }
 
+    /// Fetch one memory by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn get_memory(&self, id: Uuid) -> Result<Option<model::MemorySummary>, Error> {
         db::get(&self.pool, id).await.map_err(Error::from)
     }
 
+    /// List memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn list_memories(
         &self,
         request: ListMemoriesRequest,
@@ -165,12 +181,22 @@ impl MemoryApp {
         .map_err(Error::from)
     }
 
+    /// Load core memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
         db::list_core(&self.pool, project)
             .await
             .map_err(Error::from)
     }
 
+    /// Create or upsert a normalized session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
@@ -193,6 +219,11 @@ impl MemoryApp {
             .map_err(Error::from)
     }
 
+    /// Append one message to a normalized session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn append_session_message(
         &self,
         request: AppendSessionMessageRequest,
@@ -212,6 +243,11 @@ impl MemoryApp {
             .map_err(Error::from)
     }
 
+    /// Finalize a normalized session into searchable log chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading, embedding, or persistence fails.
     pub async fn finalize_session(
         &self,
         request: FinalizeSessionRequest,
@@ -231,6 +267,11 @@ impl MemoryApp {
         Ok(Some(finalized))
     }
 
+    /// Load durable rules for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn list_rules(
         &self,
         project: &str,
@@ -248,6 +289,11 @@ impl MemoryApp {
         })
     }
 
+    /// Load effective rules and optional recall memories for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if rule or recall loading fails.
     pub async fn bootstrap_project(
         &self,
         project: &str,
@@ -272,6 +318,11 @@ impl MemoryApp {
         })
     }
 
+    /// Search memories and fall back to session logs when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if expansion, embedding, reranking, or database retrieval fails.
     pub async fn search_memories(
         &self,
         request: SearchMemoriesRequest,
@@ -347,6 +398,11 @@ impl MemoryApp {
         Ok(SearchOutcome::Empty)
     }
 
+    /// Store a new memory and embed it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding or persistence fails.
     pub async fn store_memory(
         &self,
         request: StoreMemoryRequest,
@@ -380,6 +436,11 @@ impl MemoryApp {
         })
     }
 
+    /// Update a memory and re-embed when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading, embedding, or persistence fails.
     pub async fn update_memory(
         &self,
         request: UpdateMemoryRequest,
@@ -414,6 +475,11 @@ impl MemoryApp {
         db::get(&self.pool, request.id).await.map_err(Error::from)
     }
 
+    /// Store a full transcript as a searchable session log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if embedding or persistence fails.
     pub async fn store_session_log(&self, request: StoreSessionLogRequest) -> Result<usize, Error> {
         let cwd = request.cwd.unwrap_or_default();
         let project = request.project.unwrap_or_else(|| project_from_cwd(&cwd));
@@ -427,6 +493,11 @@ impl MemoryApp {
         .await
     }
 
+    /// List plans that are waiting for review.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
     pub async fn list_plan_review_queue(
         &self,
         project: &str,
@@ -437,6 +508,11 @@ impl MemoryApp {
             .map_err(Error::from)
     }
 
+    /// Submit a plan review and retag the reviewed plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if loading or updating the plan fails.
     pub async fn submit_plan_review(
         &self,
         plan_id: Uuid,
@@ -587,9 +663,7 @@ fn aggregate_session_messages(
         content.push('\n');
     }
 
-    let mut summary = summary_override
-        .map(str::to_owned)
-        .unwrap_or_else(|| prompts.join(" | "));
+    let mut summary = summary_override.map_or_else(|| prompts.join(" | "), str::to_owned);
     truncate_to_char_boundary(&mut summary, 2_000);
     truncate_to_char_boundary(&mut content, 50_000);
     (content, summary)

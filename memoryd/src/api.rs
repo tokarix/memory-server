@@ -746,7 +746,7 @@ impl From<Error> for ApiError {
         match error {
             Error::Database(inner) => Self {
                 code: "database_error",
-                message: inner.to_string(),
+                message: inner.clone(),
                 status: StatusCode::INTERNAL_SERVER_ERROR,
             },
             Error::Embedding(message) => Self {

@@ -27,6 +27,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Load configuration from a TOML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the TOML cannot be parsed.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;

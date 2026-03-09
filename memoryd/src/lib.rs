@@ -1,0 +1,12 @@
+//! HTTP service and background workers for the memory server.
+
+pub mod api;
+pub mod app;
+pub mod db;
+pub mod dream;
+pub mod embed;
+pub mod expand;
+pub mod ollama;
+pub mod rerank;
+
+pub use memory_common::{config, error, model, protocol, transcript};

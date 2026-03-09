@@ -8,6 +8,11 @@ use crate::model::{
     SessionMessage, SessionMessageSummary, SessionSummary,
 };
 
+/// Load all embeddings for one project.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn all_embeddings(
     pool: &PgPool,
     project: &str,
@@ -27,6 +32,11 @@ pub async fn all_embeddings(
         .collect()
 }
 
+/// Connect to `PostgreSQL`.
+///
+/// # Errors
+///
+/// Returns an error if the pool cannot be created or the database cannot be reached.
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(5)
@@ -34,6 +44,11 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
+/// Create or upsert a normalized session row.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn create_session(
     pool: &PgPool,
     session: &Session,
@@ -64,6 +79,11 @@ pub async fn create_session(
     row_to_session_summary(&row)
 }
 
+/// Delete one memory by ID.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM memories WHERE id = $1")
         .bind(id)
@@ -72,6 +92,11 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Append one message to a normalized session.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn append_session_message(
     pool: &PgPool,
     message: &SessionMessage,
@@ -105,6 +130,11 @@ pub async fn append_session_message(
     row_to_session_message_summary(&row)
 }
 
+/// Fetch one memory by ID.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, category, content, created_at, project, summary, tags, updated_at
@@ -116,6 +146,11 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx:
     row.as_ref().map(row_to_summary).transpose()
 }
 
+/// Fetch one normalized session by ID.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Option<SessionSummary>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, created_at, updated_at, ended_at, cwd, project, external_session_id, agent
@@ -128,6 +163,11 @@ pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Option<SessionSummar
     row.as_ref().map(row_to_session_summary).transpose()
 }
 
+/// Insert a new memory row.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
     let embedding = Vector::from(memory.embedding.clone());
     sqlx::query(
@@ -148,6 +188,11 @@ pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// List core memories for a project.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let categories: Vec<Category> = [
         Category::Context,
@@ -173,6 +218,11 @@ pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary
     rows.iter().map(row_to_summary).collect()
 }
 
+/// List plans awaiting review.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list_plan_review_queue(
     pool: &PgPool,
     project: &str,
@@ -195,6 +245,11 @@ pub async fn list_plan_review_queue(
     rows.iter().map(row_to_summary).collect()
 }
 
+/// List durable rules for a project.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list_rules(
     pool: &PgPool,
     project: &str,
@@ -228,6 +283,11 @@ pub async fn list_rules(
     rows.iter().map(row_to_summary).collect()
 }
 
+/// List memories for a project with optional filtering.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list(
     pool: &PgPool,
     project: &str,
@@ -269,6 +329,11 @@ pub async fn list(
     rows.iter().map(row_to_summary).collect()
 }
 
+/// List all known projects.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
     let rows = sqlx::query("SELECT DISTINCT project FROM memories ORDER BY project")
         .fetch_all(pool)
@@ -276,10 +341,20 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
     rows.iter().map(|row| row.try_get("project")).collect()
 }
 
+/// Run all SQL migrations.
+///
+/// # Errors
+///
+/// Returns an error if migrations cannot be applied.
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    sqlx::migrate!("../migrations").run(pool).await
 }
 
+/// List messages for one normalized session.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn list_session_messages(
     pool: &PgPool,
     session_id: Uuid,
@@ -296,6 +371,11 @@ pub async fn list_session_messages(
     rows.iter().map(row_to_session_message_summary).collect()
 }
 
+/// Search finalized session logs.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn session_log_search(
     pool: &PgPool,
     embedding: Vec<f32>,
@@ -360,6 +440,11 @@ pub async fn session_log_search(
         .collect()
 }
 
+/// Replace all chunks for a stored session log.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn session_log_chunks_replace(
     pool: &PgPool,
     session_log_id: Uuid,
@@ -388,6 +473,11 @@ pub async fn session_log_chunks_replace(
     Ok(())
 }
 
+/// Upsert a parent session log row.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<Uuid, sqlx::Error> {
     let embedding = Vector::from(log.embedding.clone());
     let row = sqlx::query(
@@ -414,6 +504,11 @@ pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<Uuid,
     row.try_get("id")
 }
 
+/// Mark a normalized session as finalized.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn update_session_finalized(
     pool: &PgPool,
     id: Uuid,
@@ -431,6 +526,11 @@ pub async fn update_session_finalized(
     Ok(result.rows_affected() > 0)
 }
 
+/// Update a memory row in place.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn update(
     pool: &PgPool,
     id: Uuid,
@@ -458,6 +558,11 @@ pub async fn update(
     Ok(result.rows_affected() > 0)
 }
 
+/// Run hybrid semantic plus full-text memory search.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
 pub async fn hybrid_search(
     pool: &PgPool,
     embedding: Vec<f32>,

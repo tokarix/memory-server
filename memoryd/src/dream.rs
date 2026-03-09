@@ -34,6 +34,21 @@ struct StaleCandidate {
     score: f64,
 }
 
+struct DreamContext<'a> {
+    dream_model: &'a str,
+    dry_run: bool,
+    embed_client: &'a embed::Client,
+    http: &'a reqwest::Client,
+    num_ctx: u32,
+    ollama_url: &'a str,
+    pool: &'a sqlx::PgPool,
+}
+
+/// Run one dream maintenance cycle across all projects.
+///
+/// # Errors
+///
+/// Returns an error if loading, embedding, generation, or persistence fails.
 pub async fn run(
     pool: &sqlx::PgPool,
     embed_client: &embed::Client,
@@ -43,6 +58,15 @@ pub async fn run(
     dry_run: bool,
     num_ctx: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let context = DreamContext {
+        dream_model,
+        dry_run,
+        embed_client,
+        http,
+        num_ctx,
+        ollama_url,
+        pool,
+    };
     let projects = db::list_projects(pool).await?;
     tracing::info!(count = projects.len(), "discovered projects");
 
@@ -65,28 +89,8 @@ pub async fn run(
             "stale candidates found"
         );
 
-        let merged_ids = apply_merges(
-            pool,
-            embed_client,
-            http,
-            ollama_url,
-            dream_model,
-            dry_run,
-            num_ctx,
-            &merge_candidates,
-        )
-        .await?;
-        apply_prunes(
-            pool,
-            http,
-            ollama_url,
-            dream_model,
-            dry_run,
-            num_ctx,
-            &stale_candidates,
-            &merged_ids,
-        )
-        .await?;
+        let merged_ids = apply_merges(&context, &merge_candidates).await?;
+        apply_prunes(&context, &stale_candidates, &merged_ids).await?;
     }
 
     tracing::info!("dream cycle complete");
@@ -94,13 +98,7 @@ pub async fn run(
 }
 
 async fn apply_merges(
-    pool: &sqlx::PgPool,
-    embed_client: &embed::Client,
-    http: &reqwest::Client,
-    ollama_url: &str,
-    dream_model: &str,
-    dry_run: bool,
-    num_ctx: u32,
+    context: &DreamContext<'_>,
     candidates: &[MergeCandidate],
 ) -> Result<HashSet<Uuid>, Box<dyn std::error::Error>> {
     let mut merged_ids: HashSet<Uuid> = HashSet::new();
@@ -110,8 +108,8 @@ async fn apply_merges(
             continue;
         }
 
-        let mem_a = db::get(pool, candidate.id_a).await?;
-        let mem_b = db::get(pool, candidate.id_b).await?;
+        let mem_a = db::get(context.pool, candidate.id_a).await?;
+        let mem_b = db::get(context.pool, candidate.id_b).await?;
         let (Some(mem_a), Some(mem_b)) = (mem_a, mem_b) else {
             continue;
         };
@@ -125,7 +123,7 @@ async fn apply_merges(
             "merge candidate pair"
         );
 
-        if dry_run {
+        if context.dry_run {
             continue;
         }
 
@@ -140,11 +138,23 @@ async fn apply_merges(
             continue;
         }
 
-        match llm_merge(http, ollama_url, dream_model, num_ctx, &mem_a, &mem_b).await {
+        match llm_merge(
+            context.http,
+            context.ollama_url,
+            context.dream_model,
+            context.num_ctx,
+            &mem_a,
+            &mem_b,
+        )
+        .await
+        {
             Ok(merged) => {
-                let embedding = embed_client.embed(&merged.summary, &merged.content).await?;
+                let embedding = context
+                    .embed_client
+                    .embed(&merged.summary, &merged.content)
+                    .await?;
                 db::update(
-                    pool,
+                    context.pool,
                     candidate.id_a,
                     Some(&merged.content),
                     Some(embedding),
@@ -152,7 +162,7 @@ async fn apply_merges(
                     None,
                 )
                 .await?;
-                db::delete(pool, candidate.id_b).await?;
+                db::delete(context.pool, candidate.id_b).await?;
                 merged_ids.insert(candidate.id_a);
                 merged_ids.insert(candidate.id_b);
                 tracing::info!(
@@ -177,12 +187,7 @@ async fn apply_merges(
 }
 
 async fn apply_prunes(
-    pool: &sqlx::PgPool,
-    http: &reqwest::Client,
-    ollama_url: &str,
-    dream_model: &str,
-    dry_run: bool,
-    num_ctx: u32,
+    context: &DreamContext<'_>,
     candidates: &[StaleCandidate],
     merged_ids: &HashSet<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -191,7 +196,7 @@ async fn apply_prunes(
             continue;
         }
 
-        let Some(memory) = db::get(pool, candidate.id).await? else {
+        let Some(memory) = db::get(context.pool, candidate.id).await? else {
             continue;
         };
 
@@ -202,7 +207,7 @@ async fn apply_prunes(
             "stale candidate"
         );
 
-        if dry_run {
+        if context.dry_run {
             continue;
         }
 
@@ -214,7 +219,15 @@ async fn apply_prunes(
             continue;
         }
 
-        match llm_prune(http, ollama_url, dream_model, num_ctx, &memory).await {
+        match llm_prune(
+            context.http,
+            context.ollama_url,
+            context.dream_model,
+            context.num_ctx,
+            &memory,
+        )
+        .await
+        {
             Ok(decision) => {
                 if decision.keep {
                     tracing::info!(
@@ -223,7 +236,7 @@ async fn apply_prunes(
                         "keeping stale memory"
                     );
                 } else {
-                    db::delete(pool, candidate.id).await?;
+                    db::delete(context.pool, candidate.id).await?;
                     tracing::info!(
                         id = %candidate.id,
                         reason = decision.reason,

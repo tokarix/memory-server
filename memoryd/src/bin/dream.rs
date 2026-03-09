@@ -1,6 +1,8 @@
+//! Run the dream compaction job against stored memories.
+
 use std::sync::Arc;
 
-use memory_server::{config, db, dream, embed};
+use memoryd::{config, db, dream, embed};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

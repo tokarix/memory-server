@@ -1,0 +1,34 @@
+[package]
+name = "memoryd"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "memoryd"
+path = "src/bin/memoryd.rs"
+
+[[bin]]
+name = "dream"
+path = "src/bin/dream.rs"
+
+[[bin]]
+name = "ingest"
+path = "src/bin/ingest.rs"
+
+[dependencies]
+axum = { version = "0.8.8", features = ["json", "macros", "query", "tokio"] }
+chrono.workspace = true
+memory-common = { path = "../memory-common", features = ["sqlx"] }
+pgvector = { version = "0.4.1", features = ["sqlx"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tower-http.workspace = true
+uuid.workspace = true
+
+[build-dependencies]

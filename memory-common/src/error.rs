@@ -1,9 +1,7 @@
-use rmcp::model::ErrorCode;
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
     #[error("embedding error: {0}")]
     Embedding(String),
     #[error("{0} not found")]
@@ -12,6 +10,14 @@ pub enum Error {
     Transport(String),
 }
 
+#[cfg(feature = "sqlx")]
+impl From<sqlx::Error> for Error {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Database(err.to_string())
+    }
+}
+
+#[cfg(feature = "rmcp")]
 impl From<Error> for rmcp::ErrorData {
     fn from(err: Error) -> Self {
         Self {
@@ -22,12 +28,13 @@ impl From<Error> for rmcp::ErrorData {
     }
 }
 
-fn error_code(err: &Error) -> ErrorCode {
+#[cfg(feature = "rmcp")]
+fn error_code(err: &Error) -> rmcp::model::ErrorCode {
     match err {
-        Error::Database(_) => ErrorCode(-32_000),
-        Error::Embedding(_) => ErrorCode(-32_001),
-        Error::Transport(_) => ErrorCode(-32_002),
-        Error::NotFound(_) => ErrorCode(-32_004),
+        Error::Database(_) => rmcp::model::ErrorCode(-32_000),
+        Error::Embedding(_) => rmcp::model::ErrorCode(-32_001),
+        Error::Transport(_) => rmcp::model::ErrorCode(-32_002),
+        Error::NotFound(_) => rmcp::model::ErrorCode(-32_004),
     }
 }
 
@@ -42,18 +49,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "rmcp")]
     fn error_to_mcp() {
         let err = Error::Embedding("ollama down".to_owned());
         let mcp: rmcp::ErrorData = err.into();
-        assert_eq!(mcp.code, ErrorCode(-32_001));
+        assert_eq!(mcp.code, rmcp::model::ErrorCode(-32_001));
         assert!(mcp.message.contains("ollama down"));
     }
 
     #[test]
+    #[cfg(feature = "rmcp")]
     fn error_codes() {
         assert_eq!(
             error_code(&Error::Embedding(String::new())),
-            ErrorCode(-32_001)
+            rmcp::model::ErrorCode(-32_001)
         );
     }
 }

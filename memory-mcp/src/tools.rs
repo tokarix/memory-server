@@ -8,19 +8,18 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::app::{
-    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
-    ListMemoriesRequest, MemoryApp, RuleList, SearchMemoriesRequest, SearchOutcome,
-    StoreMemoryRequest, StoreSessionLogRequest, UpdateMemoryRequest,
-};
 use crate::error::Error;
 use crate::http_client::HttpMemoryClient;
 use crate::model;
 use crate::model::Category;
+use crate::protocol::{
+    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
+    ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
+    StoreSessionLogRequest, UpdateMemoryRequest,
+};
 
 #[derive(Clone)]
 pub enum MemoryBackend {
-    Local(MemoryApp),
     Http(HttpMemoryClient),
 }
 
@@ -191,6 +190,7 @@ pub struct UpdateParams {
 
 #[tool_router]
 impl MemoryServer {
+    #[must_use]
     pub fn new(backend: MemoryBackend) -> Self {
         Self {
             backend,
@@ -571,21 +571,18 @@ impl MemoryServer {
 impl MemoryBackend {
     async fn version(&self) -> Result<String, Error> {
         match self {
-            Self::Local(app) => Ok(app.version()),
             Self::Http(client) => client.version().await,
         }
     }
 
     async fn delete_memory(&self, id: Uuid) -> Result<bool, Error> {
         match self {
-            Self::Local(app) => app.delete_memory(id).await,
             Self::Http(client) => client.delete_memory(id).await,
         }
     }
 
     async fn get_memory(&self, id: Uuid) -> Result<Option<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => app.get_memory(id).await,
             Self::Http(client) => client.get_memory(id).await,
         }
     }
@@ -595,21 +592,18 @@ impl MemoryBackend {
         request: ListMemoriesRequest,
     ) -> Result<Vec<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => app.list_memories(request).await,
             Self::Http(client) => client.list_memories(request).await,
         }
     }
 
     async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => app.recall_project(project).await,
             Self::Http(client) => client.recall_project(project).await,
         }
     }
 
     async fn list_rules(&self, project: &str, include_general: bool) -> Result<RuleList, Error> {
         match self {
-            Self::Local(app) => app.list_rules(project, include_general).await,
             Self::Http(client) => client.list_rules(project, include_general).await,
         }
     }
@@ -621,10 +615,6 @@ impl MemoryBackend {
         include_recall: bool,
     ) -> Result<BootstrapPayload, Error> {
         match self {
-            Self::Local(app) => {
-                app.bootstrap_project(project, include_general, include_recall)
-                    .await
-            }
             Self::Http(client) => {
                 client
                     .bootstrap_project(project, include_general, include_recall)
@@ -638,7 +628,6 @@ impl MemoryBackend {
         request: SearchMemoriesRequest,
     ) -> Result<SearchOutcome, Error> {
         match self {
-            Self::Local(app) => app.search_memories(request).await,
             Self::Http(client) => client.search_memories(request).await,
         }
     }
@@ -648,7 +637,6 @@ impl MemoryBackend {
         request: StoreMemoryRequest,
     ) -> Result<model::MemorySummary, Error> {
         match self {
-            Self::Local(app) => app.store_memory(request).await,
             Self::Http(client) => client.store_memory(request).await,
         }
     }
@@ -658,14 +646,12 @@ impl MemoryBackend {
         request: UpdateMemoryRequest,
     ) -> Result<Option<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => app.update_memory(request).await,
             Self::Http(client) => client.update_memory(request).await,
         }
     }
 
     async fn store_session_log(&self, request: StoreSessionLogRequest) -> Result<usize, Error> {
         match self {
-            Self::Local(app) => app.store_session_log(request).await,
             Self::Http(client) => client.store_session_log(request).await,
         }
     }
@@ -675,7 +661,6 @@ impl MemoryBackend {
         request: CreateSessionRequest,
     ) -> Result<model::SessionSummary, Error> {
         match self {
-            Self::Local(app) => app.create_session(request).await,
             Self::Http(client) => client.create_session(request).await,
         }
     }
@@ -685,7 +670,6 @@ impl MemoryBackend {
         request: AppendSessionMessageRequest,
     ) -> Result<model::SessionMessageSummary, Error> {
         match self {
-            Self::Local(app) => app.append_session_message(request).await,
             Self::Http(client) => client.append_session_message(request).await,
         }
     }
@@ -695,7 +679,6 @@ impl MemoryBackend {
         request: FinalizeSessionRequest,
     ) -> Result<Option<usize>, Error> {
         match self {
-            Self::Local(app) => app.finalize_session(request).await,
             Self::Http(client) => client.finalize_session(request).await,
         }
     }
@@ -706,7 +689,6 @@ impl MemoryBackend {
         limit: i64,
     ) -> Result<Vec<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => app.list_plan_review_queue(project, limit).await,
             Self::Http(client) => client.list_plan_review_queue(project, limit).await,
         }
     }
@@ -720,10 +702,6 @@ impl MemoryBackend {
         notes: String,
     ) -> Result<Option<model::MemorySummary>, Error> {
         match self {
-            Self::Local(app) => {
-                app.submit_plan_review(plan_id, project, reviewer, verdict, notes)
-                    .await
-            }
             Self::Http(client) => {
                 client
                     .submit_plan_review(plan_id, project, reviewer, verdict, notes)
@@ -857,11 +835,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tokio::net::TcpListener;
 
-    use crate::api::{
+    use crate::protocol::{
         BootstrapEnvelope, HealthResponse, MemoryEnvelope, MemoryListEnvelope, PatchMemoryRequest,
         RuleListEnvelope,
     };
-    use crate::app::outer_rrf;
 
     use super::*;
 
@@ -920,64 +897,6 @@ mod tests {
         assert!(output.contains("## [decision] Choose pgvector (importance: 0.75)"));
         assert!(output.contains("Project: test"));
         assert!(output.contains("Use pgvector for semantic search."));
-    }
-
-    #[test]
-    fn outer_rrf_single_variant() {
-        let id = Uuid::from_u128(1);
-        let results = vec![vec![(sample_summary_with_id(id), 0.9)]];
-        let fused = outer_rrf(&results, 5);
-        assert_eq!(fused.len(), 1);
-        assert_eq!(fused[0].0.id, id);
-        // Original query (index 0) gets 2x weight: 2.0 / (60 + 1) = 2/61
-        let expected = 2.0 / 61.0;
-        assert!((fused[0].1 - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn outer_rrf_deduplicates() {
-        let id = Uuid::from_u128(1);
-        let variant0 = vec![(sample_summary_with_id(id), 0.9)];
-        let variant1 = vec![(sample_summary_with_id(id), 0.8)];
-        let results = vec![variant0, variant1];
-        let fused = outer_rrf(&results, 5);
-        assert_eq!(fused.len(), 1);
-        // 2.0/(60+1) + 1.0/(60+1)
-        let expected = 2.0 / 61.0 + 1.0 / 61.0;
-        assert!((fused[0].1 - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn outer_rrf_original_weighted_higher() {
-        let id_a = Uuid::from_u128(1);
-        let id_b = Uuid::from_u128(2);
-        // id_a only in original (2x weight), id_b only in expansion (1x weight)
-        let variant0 = vec![(sample_summary_with_id(id_a), 0.9)];
-        let variant1 = vec![(sample_summary_with_id(id_b), 0.9)];
-        let results = vec![variant0, variant1];
-        let fused = outer_rrf(&results, 5);
-        assert_eq!(fused.len(), 2);
-        assert_eq!(fused[0].0.id, id_a);
-        assert_eq!(fused[1].0.id, id_b);
-    }
-
-    #[test]
-    fn outer_rrf_respects_limit() {
-        let ids: Vec<Uuid> = (1..=5).map(Uuid::from_u128).collect();
-        let variant0: Vec<_> = ids
-            .iter()
-            .map(|&id| (sample_summary_with_id(id), 0.9))
-            .collect();
-        let results = vec![variant0];
-        let fused = outer_rrf(&results, 3);
-        assert_eq!(fused.len(), 3);
-    }
-
-    #[test]
-    fn outer_rrf_empty_input() {
-        let results: Vec<Vec<(model::MemorySummary, f64)>> = vec![vec![]];
-        let fused = outer_rrf(&results, 5);
-        assert!(fused.is_empty());
     }
 
     fn sample_session_log() -> model::SessionLogSummary {
@@ -1048,7 +967,7 @@ mod tests {
 
     #[derive(Clone)]
     struct StubState {
-        memory: Arc<Mutex<Option<crate::api::MemoryDto>>>,
+        memory: Arc<Mutex<Option<crate::protocol::MemoryDto>>>,
     }
 
     #[tokio::test]
@@ -1091,7 +1010,7 @@ mod tests {
             .unwrap();
         let store_text = first_text(&store);
         assert!(store_text.contains("Stored memory"));
-        let id = extract_uuid(&store_text);
+        let id = extract_uuid(store_text);
 
         let get = server
             .memory_get(Parameters(GetParams { id }))
@@ -1162,7 +1081,7 @@ mod tests {
         State(state): State<StubState>,
         Json(request): Json<StoreMemoryRequest>,
     ) -> Json<MemoryEnvelope> {
-        let memory = crate::api::MemoryDto {
+        let memory = crate::protocol::MemoryDto {
             category: request.category,
             content: request.content,
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
@@ -1228,7 +1147,7 @@ mod tests {
     ) -> Json<RuleListEnvelope> {
         let project_rules = state.memory.lock().unwrap().clone().into_iter().collect();
         Json(RuleListEnvelope {
-            general_rules: vec![crate::api::MemoryDto {
+            general_rules: vec![crate::protocol::MemoryDto {
                 category: Category::Rule,
                 content: "Use hooks to block unsafe actions.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
@@ -1248,7 +1167,7 @@ mod tests {
     ) -> Json<BootstrapEnvelope> {
         let project_rules = state.memory.lock().unwrap().clone().into_iter().collect();
         Json(BootstrapEnvelope {
-            general_rules: vec![crate::api::MemoryDto {
+            general_rules: vec![crate::protocol::MemoryDto {
                 category: Category::Rule,
                 content: "Use hooks to block unsafe actions.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
@@ -1260,7 +1179,7 @@ mod tests {
             }],
             project,
             project_rules,
-            recall_memories: vec![crate::api::MemoryDto {
+            recall_memories: vec![crate::protocol::MemoryDto {
                 category: Category::Decision,
                 content: "Prefer the HTTP adapter boundary.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),

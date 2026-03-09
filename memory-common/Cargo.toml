@@ -1,0 +1,20 @@
+[package]
+name = "memory-common"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+rmcp = ["dep:rmcp"]
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+chrono.workspace = true
+rmcp = { workspace = true, optional = true }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, optional = true }
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true

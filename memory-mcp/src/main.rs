@@ -1,4 +1,4 @@
-use memory_server::mcp;
+use memory_mcp::mcp;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,5 +11,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(false)
         .init();
 
-    mcp::run(std::env::args().nth(1).as_deref()).await
+    mcp::run_http(std::env::args().nth(1).as_deref()).await
 }

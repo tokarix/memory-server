@@ -5,8 +5,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, sqlx::Type)]
-#[sqlx(type_name = "memory_category", rename_all = "snake_case")]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "memory_category", rename_all = "snake_case")
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Category {
     Context,

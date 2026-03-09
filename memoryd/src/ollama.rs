@@ -20,6 +20,11 @@ struct GenerateResponse {
     response: String,
 }
 
+/// Request one text generation from `Ollama`.
+///
+/// # Errors
+///
+/// Returns an error if the HTTP request fails or the response cannot be parsed.
 pub async fn generate(
     http: &reqwest::Client,
     url: &str,
