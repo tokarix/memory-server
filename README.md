@@ -111,8 +111,15 @@ Configuration fields:
 ### 4. Build
 
 ```sh
-cargo build --release
+cargo build -p memory-mcp --release
+cargo build -p memoryd --release
 ```
+
+When building a specific workspace package from the repository root,
+always pass `-p <package>`. For example, use `cargo build -p memory-mcp
+--release` instead of `cargo build --bin memory-mcp --release`, because
+the latter can still pull in other workspace members and unify their
+features.
 
 ### 5. Run
 
@@ -216,13 +223,13 @@ Parses a JSONL transcript file and stores it into `session_logs` and
 `session_log_chunks`.
 
 ```sh
-cargo run --release --bin ingest -- ./config.toml /path/to/transcript.jsonl
+cargo run -p memoryd --release --bin ingest -- ./config.toml /path/to/transcript.jsonl
 ```
 
 Dry run:
 
 ```sh
-cargo run --release --bin ingest -- --dry-run ./config.toml /path/to/transcript.jsonl
+cargo run -p memoryd --release --bin ingest -- --dry-run ./config.toml /path/to/transcript.jsonl
 ```
 
 ### `dream`
@@ -232,13 +239,13 @@ stale low-importance memories. `plan` and `rule` memories are protected
 from these mutations.
 
 ```sh
-cargo run --release --bin dream -- ./config.toml
+cargo run -p memoryd --release --bin dream -- ./config.toml
 ```
 
 Dry run:
 
 ```sh
-cargo run --release --bin dream -- --dry-run ./config.toml
+cargo run -p memoryd --release --bin dream -- --dry-run ./config.toml
 ```
 
 ## Database notes
