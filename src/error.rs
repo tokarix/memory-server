@@ -6,6 +6,10 @@ pub enum Error {
     Database(#[from] sqlx::Error),
     #[error("embedding error: {0}")]
     Embedding(String),
+    #[error("{0} not found")]
+    NotFound(String),
+    #[error("transport error: {0}")]
+    Transport(String),
 }
 
 impl From<Error> for rmcp::ErrorData {
@@ -22,6 +26,8 @@ fn error_code(err: &Error) -> ErrorCode {
     match err {
         Error::Database(_) => ErrorCode(-32_000),
         Error::Embedding(_) => ErrorCode(-32_001),
+        Error::Transport(_) => ErrorCode(-32_002),
+        Error::NotFound(_) => ErrorCode(-32_004),
     }
 }
 

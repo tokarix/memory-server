@@ -8,6 +8,14 @@ name = "memory-server"
 path = "src/main.rs"
 
 [[bin]]
+name = "memoryd"
+path = "src/bin/memoryd.rs"
+
+[[bin]]
+name = "memory-mcp"
+path = "src/bin/memory_mcp.rs"
+
+[[bin]]
 name = "dream"
 path = "src/bin/dream.rs"
 
@@ -16,6 +24,7 @@ name = "ingest"
 path = "src/bin/ingest.rs"
 
 [dependencies]
+axum = { version = "0.8.8", features = ["json", "macros", "query", "tokio"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 pgvector = { version = "0.4.1", features = ["sqlx"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
@@ -25,8 +34,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "derive", "macros", "migrate", "postgres", "runtime-tokio", "uuid"] }
 thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-std"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-std", "net"] }
 toml = "1.0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "std"] }
+tower-http = { version = "0.6.8", features = ["trace"] }
 uuid = { version = "1.21.0", features = ["v4", "serde"] }

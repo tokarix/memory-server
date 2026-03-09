@@ -3,12 +3,16 @@
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool_handler};
 
+pub mod api;
+pub mod app;
 pub mod config;
 pub mod db;
 pub mod dream;
 pub mod embed;
 pub mod error;
 pub mod expand;
+pub mod http_client;
+pub mod mcp;
 pub mod model;
 pub mod ollama;
 pub mod rerank;

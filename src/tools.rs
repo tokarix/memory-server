@@ -1,34 +1,30 @@
-use std::collections::HashMap;
 use std::fmt::Write;
-use std::sync::Arc;
 
-use chrono::Utc;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::embed;
+use crate::app::{
+    ListMemoriesRequest, MemoryApp, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
+    StoreSessionLogRequest, UpdateMemoryRequest,
+};
 use crate::error::Error;
+use crate::http_client::HttpMemoryClient;
+use crate::model;
 use crate::model::Category;
-use crate::{db, expand, model, rerank, transcript};
 
-const CHUNK_OVERLAP: usize = 200;
-const CHUNK_SIZE: usize = 4000;
-const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
+#[derive(Clone)]
+pub enum MemoryBackend {
+    Local(MemoryApp),
+    Http(HttpMemoryClient),
+}
 
 pub struct MemoryServer {
-    embed_client: Arc<embed::Client>,
-    expand_model: String,
-    generate_num_ctx: u32,
-    http: reqwest::Client,
-    ollama_url: String,
-    pool: PgPool,
-    rerank_model: String,
+    backend: MemoryBackend,
     pub tool_router: ToolRouter<Self>,
 }
 
@@ -118,34 +114,21 @@ pub struct UpdateParams {
 
 #[tool_router]
 impl MemoryServer {
-    pub fn new(
-        pool: PgPool,
-        embed_client: Arc<embed::Client>,
-        expand_model: String,
-        generate_num_ctx: u32,
-        http: reqwest::Client,
-        ollama_url: String,
-        rerank_model: String,
-    ) -> Self {
+    pub fn new(backend: MemoryBackend) -> Self {
         Self {
-            embed_client,
-            expand_model,
-            generate_num_ctx,
-            http,
-            ollama_url,
-            pool,
-            rerank_model,
+            backend,
             tool_router: Self::tool_router(),
         }
     }
 
     #[tool(description = "Return the memory server version (includes git hash)")]
     async fn memory_server_version(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{}-{}",
-            env!("CARGO_PKG_VERSION"),
-            env!("GIT_HASH"),
-        ))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            self.backend
+                .version()
+                .await
+                .map_err(rmcp::ErrorData::from)?,
+        )]))
     }
 
     #[tool(description = "Delete a memory by UUID")]
@@ -153,9 +136,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<DeleteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let deleted = db::delete(&self.pool, params.id)
+        let deleted = self
+            .backend
+            .delete_memory(params.id)
             .await
-            .map_err(Error::from)?;
+            .map_err(rmcp::ErrorData::from)?;
         if deleted {
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Deleted memory {}",
@@ -174,7 +159,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<GetParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let memory = db::get(&self.pool, params.id).await.map_err(Error::from)?;
+        let memory = self
+            .backend
+            .get_memory(params.id)
+            .await
+            .map_err(rmcp::ErrorData::from)?;
         match memory {
             Some(m) => {
                 let text = format_single_memory(&m);
@@ -192,17 +181,16 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<ListParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let limit = params.limit.unwrap_or(20).clamp(1, 100);
-        let offset = params.offset.unwrap_or(0).max(0);
-        let memories = db::list(
-            &self.pool,
-            &params.project,
-            params.category.as_ref(),
-            limit,
-            offset,
-        )
-        .await
-        .map_err(Error::from)?;
+        let memories = self
+            .backend
+            .list_memories(ListMemoriesRequest {
+                category: params.category,
+                limit: params.limit,
+                offset: params.offset,
+                project: params.project,
+            })
+            .await
+            .map_err(rmcp::ErrorData::from)?;
 
         if memories.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -219,9 +207,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<RecallParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let memories = db::list_core(&self.pool, &params.project)
+        let memories = self
+            .backend
+            .recall_project(&params.project)
             .await
-            .map_err(Error::from)?;
+            .map_err(rmcp::ErrorData::from)?;
 
         if memories.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -238,87 +228,30 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let limit = params.limit.unwrap_or(5).clamp(1, 100);
-        let min_similarity = params
-            .min_similarity
-            .unwrap_or(DEFAULT_MIN_SIMILARITY)
-            .clamp(0.0, 1.0);
-        let inner_limit = limit * 2;
-
-        let queries = expand::expand_query(
-            &self.http,
-            &self.ollama_url,
-            &self.expand_model,
-            self.generate_num_ctx,
-            &params.query,
-        )
-        .await;
-
-        // Run hybrid search for each query variant
-        let mut variant_results = Vec::with_capacity(queries.len());
-        let mut first_embedding = None;
-        for query in &queries {
-            let embedding = self
-                .embed_client
-                .embed(query, "")
-                .await
-                .map_err(rmcp::ErrorData::from)?;
-            if first_embedding.is_none() {
-                first_embedding = Some(embedding.clone());
-            }
-            let results = db::hybrid_search(
-                &self.pool,
-                embedding,
-                query,
-                &params.project,
-                params.category.as_ref(),
-                inner_limit,
-                min_similarity,
-            )
+        match self
+            .backend
+            .search_memories(SearchMemoriesRequest {
+                category: params.category,
+                limit: params.limit,
+                min_similarity: params.min_similarity,
+                project: params.project,
+                query: params.query,
+            })
             .await
-            .map_err(Error::from)?;
-            variant_results.push(results);
-        }
-
-        // Outer RRF: original query (index 0) gets 2x weight
-        let results = outer_rrf(&variant_results, limit);
-
-        // LLM re-ranking: blend algorithmic scores with semantic relevance
-        let results = rerank::rerank(
-            &self.http,
-            &self.ollama_url,
-            &self.rerank_model,
-            self.generate_num_ctx,
-            &params.query,
-            results,
-        )
-        .await;
-
-        if results.is_empty() {
-            // Fallback: search session logs
-            if let Some(embedding) = first_embedding {
-                let session_results = db::session_log_search(
-                    &self.pool,
-                    embedding,
-                    &params.query,
-                    &params.project,
-                    limit,
-                    min_similarity,
-                )
-                .await
-                .map_err(Error::from)?;
-                if !session_results.is_empty() {
-                    let text = format_session_log_results(&session_results);
-                    return Ok(CallToolResult::success(vec![Content::text(text)]));
-                }
+            .map_err(rmcp::ErrorData::from)?
+        {
+            SearchOutcome::Memories(results) => Ok(CallToolResult::success(vec![Content::text(
+                format_search_results(&results),
+            )])),
+            SearchOutcome::SessionLogs(results) => {
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_session_log_results(&results),
+                )]))
             }
-            return Ok(CallToolResult::success(vec![Content::text(
+            SearchOutcome::Empty => Ok(CallToolResult::success(vec![Content::text(
                 "No matching memories found.",
-            )]));
+            )])),
         }
-
-        let text = format_search_results(&results);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(
@@ -328,24 +261,17 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<StoreParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let embedding = self
-            .embed_client
-            .embed(&params.summary, &params.content)
+        let memory = self
+            .backend
+            .store_memory(StoreMemoryRequest {
+                category: params.category,
+                content: params.content,
+                project: params.project,
+                summary: params.summary,
+                tags: params.tags,
+            })
             .await
             .map_err(rmcp::ErrorData::from)?;
-        let now = Utc::now();
-        let memory = model::Memory {
-            id: Uuid::new_v4(),
-            category: params.category,
-            content: params.content,
-            created_at: now,
-            embedding,
-            project: params.project,
-            summary: params.summary,
-            tags: params.tags.unwrap_or_default(),
-            updated_at: now,
-        };
-        db::insert(&self.pool, &memory).await.map_err(Error::from)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Stored memory {} ({}): {}",
             memory.id, memory.category, memory.summary
@@ -359,36 +285,18 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let embedding = if params.summary.is_some() || params.content.is_some() {
-            // Fetch existing record to use stored fields for any field not provided
-            let current = db::get(&self.pool, params.id)
-                .await
-                .map_err(Error::from)?
-                .ok_or_else(|| Error::Embedding(format!("memory {} not found", params.id)))?;
-            let summary = params.summary.as_deref().unwrap_or(&current.summary);
-            let content = params.content.as_deref().unwrap_or(&current.content);
-            Some(
-                self.embed_client
-                    .embed(summary, content)
-                    .await
-                    .map_err(rmcp::ErrorData::from)?,
-            )
-        } else {
-            None
-        };
-
-        let updated = db::update(
-            &self.pool,
-            params.id,
-            params.content.as_deref(),
-            embedding,
-            params.summary.as_deref(),
-            params.tags.as_deref(),
-        )
-        .await
-        .map_err(Error::from)?;
-
-        if updated {
+        if self
+            .backend
+            .update_memory(UpdateMemoryRequest {
+                content: params.content,
+                id: params.id,
+                summary: params.summary,
+                tags: params.tags,
+            })
+            .await
+            .map_err(rmcp::ErrorData::from)?
+            .is_some()
+        {
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Updated memory {}",
                 params.id
@@ -406,94 +314,100 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SessionLogStoreParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let cwd = params.cwd.unwrap_or_default();
-        let project = params.project.unwrap_or_else(|| {
-            cwd.rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or("")
-                .to_owned()
-        });
-        // Embed summary only for parent session log
-        let embedding = self
-            .embed_client
-            .embed(&params.summary, "")
+        let chunk_count = self
+            .backend
+            .store_session_log(StoreSessionLogRequest {
+                content: params.content,
+                cwd: params.cwd,
+                project: params.project,
+                session_id: params.session_id.clone(),
+                summary: params.summary,
+            })
             .await
             .map_err(rmcp::ErrorData::from)?;
 
-        let text_chunks = transcript::chunk_text(&params.content, CHUNK_SIZE, CHUNK_OVERLAP);
-
-        let log = model::SessionLog {
-            id: Uuid::new_v4(),
-            content: params.content,
-            created_at: Utc::now(),
-            cwd,
-            embedding,
-            project,
-            session_id: params.session_id.clone(),
-            summary: params.summary,
-        };
-        let stored_id = db::session_log_upsert(&self.pool, &log)
-            .await
-            .map_err(Error::from)?;
-
-        // Embed each chunk and store
-        let mut chunks = Vec::with_capacity(text_chunks.len());
-        for (i, text) in text_chunks.iter().enumerate() {
-            let chunk_embedding = self
-                .embed_client
-                .embed(text, "")
-                .await
-                .map_err(rmcp::ErrorData::from)?;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            chunks.push(model::SessionLogChunk {
-                chunk_index: i as i32,
-                content: text.clone(),
-                embedding: chunk_embedding,
-                id: Uuid::new_v4(),
-                session_log_id: stored_id,
-            });
-        }
-
-        db::session_log_chunks_replace(&self.pool, stored_id, &chunks)
-            .await
-            .map_err(Error::from)?;
-
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Stored session log for session {} ({} chunks)",
-            params.session_id,
-            chunks.len()
+            params.session_id, chunk_count
         ))]))
     }
 }
 
-/// Reciprocal Rank Fusion across multiple query variant result lists.
-/// The first variant (original query) receives 2x weight.
-fn outer_rrf(
-    variant_results: &[Vec<(model::MemorySummary, f64)>],
-    limit: i64,
-) -> Vec<(model::MemorySummary, f64)> {
-    let mut rrf_scores: HashMap<Uuid, f64> = HashMap::new();
-    let mut memories: HashMap<Uuid, &model::MemorySummary> = HashMap::new();
-
-    for (variant_idx, results) in variant_results.iter().enumerate() {
-        let weight = if variant_idx == 0 { 2.0 } else { 1.0 };
-        for (rank_idx, (memory, _)) in results.iter().enumerate() {
-            #[allow(clippy::cast_precision_loss)]
-            let contribution = weight / (60.0 + (rank_idx + 1) as f64);
-            *rrf_scores.entry(memory.id).or_default() += contribution;
-            memories.entry(memory.id).or_insert(memory);
+impl MemoryBackend {
+    async fn version(&self) -> Result<String, Error> {
+        match self {
+            Self::Local(app) => Ok(app.version()),
+            Self::Http(client) => client.version().await,
         }
     }
 
-    let mut ranked: Vec<(Uuid, f64)> = rrf_scores.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let n = usize::try_from(limit).unwrap_or(usize::MAX);
-    ranked.truncate(n);
+    async fn delete_memory(&self, id: Uuid) -> Result<bool, Error> {
+        match self {
+            Self::Local(app) => app.delete_memory(id).await,
+            Self::Http(client) => client.delete_memory(id).await,
+        }
+    }
 
-    ranked
-        .into_iter()
-        .filter_map(|(id, score)| memories.get(&id).map(|m| ((*m).clone(), score)))
-        .collect()
+    async fn get_memory(&self, id: Uuid) -> Result<Option<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => app.get_memory(id).await,
+            Self::Http(client) => client.get_memory(id).await,
+        }
+    }
+
+    async fn list_memories(
+        &self,
+        request: ListMemoriesRequest,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => app.list_memories(request).await,
+            Self::Http(client) => client.list_memories(request).await,
+        }
+    }
+
+    async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => app.recall_project(project).await,
+            Self::Http(client) => client.recall_project(project).await,
+        }
+    }
+
+    async fn search_memories(
+        &self,
+        request: SearchMemoriesRequest,
+    ) -> Result<SearchOutcome, Error> {
+        match self {
+            Self::Local(app) => app.search_memories(request).await,
+            Self::Http(client) => client.search_memories(request).await,
+        }
+    }
+
+    async fn store_memory(
+        &self,
+        request: StoreMemoryRequest,
+    ) -> Result<model::MemorySummary, Error> {
+        match self {
+            Self::Local(app) => app.store_memory(request).await,
+            Self::Http(client) => client.store_memory(request).await,
+        }
+    }
+
+    async fn update_memory(
+        &self,
+        request: UpdateMemoryRequest,
+    ) -> Result<Option<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => app.update_memory(request).await,
+            Self::Http(client) => client.update_memory(request).await,
+        }
+    }
+
+    async fn store_session_log(&self, request: StoreSessionLogRequest) -> Result<usize, Error> {
+        match self {
+            Self::Local(app) => app.store_session_log(request).await,
+            Self::Http(client) => client.store_session_log(request).await,
+        }
+    }
 }
 
 fn format_single_memory(m: &model::MemorySummary) -> String {
@@ -575,7 +489,16 @@ fn format_session_log_results(results: &[(model::SessionLogSummary, f64)]) -> St
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use chrono::{TimeZone, Utc};
+    use tokio::net::TcpListener;
+
+    use crate::api::{HealthResponse, MemoryEnvelope, MemoryListEnvelope, PatchMemoryRequest};
+    use crate::app::outer_rrf;
 
     use super::*;
 
@@ -721,5 +644,169 @@ mod tests {
     fn format_session_log_empty() {
         let output = format_session_log_results(&[]);
         assert!(output.contains("0 matches"));
+    }
+
+    #[derive(Clone)]
+    struct StubState {
+        memory: Arc<Mutex<Option<crate::api::MemoryDto>>>,
+    }
+
+    #[tokio::test]
+    async fn http_backend_mcp_store_get_update_roundtrip() {
+        let state = StubState {
+            memory: Arc::new(Mutex::new(None)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/api/v1/health", get(stub_health))
+            .route("/api/v1/memories", post(stub_store_memory))
+            .route(
+                "/api/v1/memories/{id}",
+                get(stub_get_memory).patch(stub_update_memory),
+            )
+            .route(
+                "/api/v1/projects/{project}/memories",
+                get(stub_list_memories),
+            )
+            .with_state(state.clone());
+        let _server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client = HttpMemoryClient::new(&format!("http://{addr}"), None).unwrap();
+        let server = MemoryServer::new(MemoryBackend::Http(client));
+
+        let store = server
+            .memory_store(Parameters(StoreParams {
+                category: Category::Decision,
+                content: "Use memoryd behind the MCP adapter.".to_owned(),
+                project: "memory-server".to_owned(),
+                summary: "Split MCP from HTTP service".to_owned(),
+                tags: Some(vec!["split".to_owned(), "http".to_owned()]),
+            }))
+            .await
+            .unwrap();
+        let store_text = first_text(&store);
+        assert!(store_text.contains("Stored memory"));
+        let id = extract_uuid(&store_text);
+
+        let get = server
+            .memory_get(Parameters(GetParams { id }))
+            .await
+            .unwrap();
+        let get_text = first_text(&get);
+        assert!(get_text.contains("Split MCP from HTTP service"));
+        assert!(get_text.contains("Use memoryd behind the MCP adapter."));
+
+        let update = server
+            .memory_update(Parameters(UpdateParams {
+                content: Some("Use memoryd over HTTP for the MCP adapter.".to_owned()),
+                id,
+                summary: Some("HTTP adapter uses exact API payloads".to_owned()),
+                tags: Some(vec![
+                    "split".to_owned(),
+                    "http".to_owned(),
+                    "tested".to_owned(),
+                ]),
+            }))
+            .await
+            .unwrap();
+        let update_text = first_text(&update);
+        assert!(update_text.contains("Updated memory"));
+
+        let get_after = server
+            .memory_get(Parameters(GetParams { id }))
+            .await
+            .unwrap();
+        let get_after_text = first_text(&get_after);
+        assert!(get_after_text.contains("HTTP adapter uses exact API payloads"));
+        assert!(get_after_text.contains("Use memoryd over HTTP for the MCP adapter."));
+        assert!(get_after_text.contains("split, http, tested"));
+    }
+
+    async fn stub_health() -> Json<HealthResponse> {
+        Json(HealthResponse {
+            status: "ok".to_owned(),
+            version: "test-version".to_owned(),
+        })
+    }
+
+    async fn stub_store_memory(
+        State(state): State<StubState>,
+        Json(request): Json<StoreMemoryRequest>,
+    ) -> Json<MemoryEnvelope> {
+        let memory = crate::api::MemoryDto {
+            category: request.category,
+            content: request.content,
+            created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            id: Uuid::new_v4(),
+            project: request.project,
+            summary: request.summary,
+            tags: request.tags.unwrap_or_default(),
+            updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+        };
+        *state.memory.lock().unwrap() = Some(memory.clone());
+        Json(MemoryEnvelope { memory })
+    }
+
+    async fn stub_get_memory(
+        State(state): State<StubState>,
+        Path(id): Path<Uuid>,
+    ) -> Result<Json<MemoryEnvelope>, axum::http::StatusCode> {
+        let memory = state.memory.lock().unwrap().clone();
+        match memory {
+            Some(memory) if memory.id == id => Ok(Json(MemoryEnvelope { memory })),
+            _ => Err(axum::http::StatusCode::NOT_FOUND),
+        }
+    }
+
+    async fn stub_update_memory(
+        State(state): State<StubState>,
+        Path(id): Path<Uuid>,
+        Json(request): Json<PatchMemoryRequest>,
+    ) -> Result<Json<MemoryEnvelope>, axum::http::StatusCode> {
+        let mut guard = state.memory.lock().unwrap();
+        let Some(memory) = guard.as_mut() else {
+            return Err(axum::http::StatusCode::NOT_FOUND);
+        };
+        if memory.id != id {
+            return Err(axum::http::StatusCode::NOT_FOUND);
+        }
+        if let Some(content) = request.content {
+            memory.content = content;
+        }
+        if let Some(summary) = request.summary {
+            memory.summary = summary;
+        }
+        if let Some(tags) = request.tags {
+            memory.tags = tags;
+        }
+        memory.updated_at = Utc.with_ymd_and_hms(2025, 6, 16, 12, 0, 0).unwrap();
+        Ok(Json(MemoryEnvelope {
+            memory: memory.clone(),
+        }))
+    }
+
+    async fn stub_list_memories(
+        State(state): State<StubState>,
+        Path(_project): Path<String>,
+    ) -> Json<MemoryListEnvelope> {
+        let memories = state.memory.lock().unwrap().clone().into_iter().collect();
+        Json(MemoryListEnvelope { memories })
+    }
+
+    fn first_text(result: &CallToolResult) -> &str {
+        result.content[0]
+            .raw
+            .as_text()
+            .map(|text| text.text.as_str())
+            .unwrap()
+    }
+
+    fn extract_uuid(text: &str) -> Uuid {
+        text.split_whitespace()
+            .find_map(|token| Uuid::parse_str(token).ok())
+            .unwrap()
     }
 }

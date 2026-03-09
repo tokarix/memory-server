@@ -3,12 +3,16 @@
 Semantic memory MCP server backed by PostgreSQL, pgvector, and local
 Ollama models.
 
-The current binary is a stdio MCP server:
+Current layout:
 
 ```text
-agent client <--stdio--> memory-server <---> PostgreSQL + pgvector
+agent client <--stdio--> memory-server / memory-mcp
                                      |
-                                     +--> Ollama
+                                     +--> shared app core <---> PostgreSQL + pgvector
+                                                          |
+                                                          +--> Ollama
+
+web/admin/other clients <--HTTP--> memoryd
 ```
 
 Planned HTTP split:
@@ -76,6 +80,8 @@ ollama pull llama3.1
 Copy and edit `config.toml.example` if needed:
 
 ```toml
+http_bind = "127.0.0.1:8080"
+memoryd_url = "http://127.0.0.1:8080"
 database_url = "postgres://memory:memory@localhost/memory"
 ollama_url = "http://localhost:11434"
 ollama_model = "bge-m3"
@@ -90,6 +96,8 @@ Configuration fields:
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `database_url` | `postgres://memory:memory@localhost/memory` | PostgreSQL connection string |
+| `http_bind` | `127.0.0.1:8080` | Bind address for `memoryd` |
+| `memoryd_url` | `http://127.0.0.1:8080` | Base URL used by `memory-mcp` |
 | `ollama_url` | `http://localhost:11434` | Ollama base URL |
 | `ollama_model` | `bge-m3` | Embedding model |
 | `expand_model` | `llama3.1` | Query expansion model |
@@ -109,7 +117,16 @@ cargo build --release
 RUST_LOG=info ./target/release/memory-server ./config.toml
 ```
 
-The server runs pending SQL migrations on startup.
+Alternative binaries:
+
+```sh
+RUST_LOG=info ./target/release/memory-mcp ./config.toml
+RUST_LOG=info ./target/release/memoryd ./config.toml
+```
+
+`memory-server` remains the monolith entrypoint and runs migrations
+locally. `memoryd` runs the HTTP service on `http_bind`, and
+`memory-mcp` is the stdio adapter that calls `memoryd_url`.
 
 ## MCP client setup
 
@@ -119,7 +136,7 @@ Add an MCP server entry to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.memory]
-command = "/absolute/path/to/target/release/memory-server"
+command = "/absolute/path/to/target/release/memory-mcp"
 args = ["/absolute/path/to/config.toml"]
 
 [mcp_servers.memory.env]
@@ -135,12 +152,28 @@ Add a stdio MCP server entry to `~/.claude.json`:
   "mcpServers": {
     "memory": {
       "type": "stdio",
-      "command": "/absolute/path/to/target/release/memory-server",
+      "command": "/absolute/path/to/target/release/memory-mcp",
       "args": ["/absolute/path/to/config.toml"]
     }
   }
 }
 ```
+
+## HTTP API
+
+`memoryd` currently exposes:
+
+- `GET /api/v1/health`
+- `POST /api/v1/memories`
+- `POST /api/v1/memories/search`
+- `GET /api/v1/memories/{id}`
+- `PATCH /api/v1/memories/{id}`
+- `DELETE /api/v1/memories/{id}`
+- `GET /api/v1/projects/{project}/recall`
+- `POST /api/v1/sessions`
+
+If `api_token` is set in config, all `/api/v1/*` routes except health
+require `Authorization: Bearer <token>`.
 
 ## Available MCP tools
 
