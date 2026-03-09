@@ -9,8 +9,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::app::{
-    ListMemoriesRequest, MemoryApp, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
-    StoreSessionLogRequest, UpdateMemoryRequest,
+    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
+    ListMemoriesRequest, MemoryApp, RuleList, SearchMemoriesRequest, SearchOutcome,
+    StoreMemoryRequest, StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use crate::error::Error;
 use crate::http_client::HttpMemoryClient;
@@ -59,6 +60,24 @@ pub struct RecallParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RulesParams {
+    /// Whether to include rules stored under the shared `general` project
+    include_general: Option<bool>,
+    /// Project name to load rules for
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BootstrapParams {
+    /// Whether to include rules stored under the shared `general` project
+    include_general: Option<bool>,
+    /// Whether to include non-rule core recall memories alongside rules
+    include_recall: Option<bool>,
+    /// Project name to bootstrap
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
     category: Option<Category>,
@@ -84,6 +103,64 @@ pub struct SessionLogStoreParams {
     session_id: String,
     /// Brief summary for embedding
     summary: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionStartParams {
+    /// Agent/client identity, for example `claude` or `codex`
+    agent: Option<String>,
+    /// Working directory of the session
+    cwd: Option<String>,
+    /// External client session identifier
+    external_session_id: String,
+    /// Project name
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionMessageParams {
+    /// Agent/client identity, for example `claude` or `codex`
+    agent: Option<String>,
+    /// Message body
+    content: String,
+    /// Optional message kind such as `message`, `tool`, or `command`
+    kind: Option<String>,
+    /// Optional metadata blob, stored as text
+    metadata: Option<String>,
+    /// Role such as `user`, `assistant`, `tool`, or `system`
+    role: String,
+    /// Internal memoryd session UUID
+    session_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionFinalizeParams {
+    /// Internal memoryd session UUID
+    session_id: Uuid,
+    /// Optional override summary
+    summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanReviewQueueParams {
+    /// Maximum number of plans to return (default: 20, max: 100)
+    limit: Option<i64>,
+    /// Project name
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubmitPlanReviewParams {
+    /// Review notes
+    notes: String,
+    /// Plan memory UUID
+    plan_id: Uuid,
+    /// Optional override project for the review memory
+    project: Option<String>,
+    /// Reviewer identity
+    reviewer: String,
+    /// Verdict string such as `approved`, `changes-requested`, or `rejected`
+    verdict: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -223,6 +300,44 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    #[tool(
+        description = "Load durable rule memories for a project, optionally unioned with shared general rules"
+    )]
+    async fn memory_rules(
+        &self,
+        Parameters(params): Parameters<RulesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let rules = self
+            .backend
+            .list_rules(&params.project, params.include_general.unwrap_or(true))
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            format_rule_list(&params.project, &rules),
+        )]))
+    }
+
+    #[tool(
+        description = "Bootstrap a session by loading effective rules plus non-rule core recall memories for a project"
+    )]
+    async fn memory_bootstrap(
+        &self,
+        Parameters(params): Parameters<BootstrapParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let payload = self
+            .backend
+            .bootstrap_project(
+                &params.project,
+                params.include_general.unwrap_or(true),
+                params.include_recall.unwrap_or(true),
+            )
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            format_bootstrap(&payload),
+        )]))
+    }
+
     #[tool(description = "Semantic memory search: embed query, cosine similarity retrieval")]
     async fn memory_search(
         &self,
@@ -331,6 +446,126 @@ impl MemoryServer {
             params.session_id, chunk_count
         ))]))
     }
+
+    #[tool(description = "Create or upsert a normalized shared session for cross-agent capture")]
+    async fn session_start(
+        &self,
+        Parameters(params): Parameters<SessionStartParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let session = self
+            .backend
+            .create_session(CreateSessionRequest {
+                agent: params.agent,
+                cwd: params.cwd,
+                external_session_id: params.external_session_id,
+                project: params.project,
+            })
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Started session {} for external session {}",
+            session.id, session.external_session_id
+        ))]))
+    }
+
+    #[tool(description = "Append one message or tool event to a normalized shared session")]
+    async fn session_message_append(
+        &self,
+        Parameters(params): Parameters<SessionMessageParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let message = self
+            .backend
+            .append_session_message(AppendSessionMessageRequest {
+                agent: params.agent,
+                content: params.content,
+                kind: params.kind,
+                metadata: params.metadata,
+                role: params.role,
+                session_id: params.session_id,
+            })
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Appended {} message {} to session {}",
+            message.role, message.id, message.session_id
+        ))]))
+    }
+
+    #[tool(description = "Finalize a normalized session into searchable session-log chunks")]
+    async fn session_finalize(
+        &self,
+        Parameters(params): Parameters<SessionFinalizeParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let chunk_count = self
+            .backend
+            .finalize_session(FinalizeSessionRequest {
+                session_id: params.session_id,
+                summary: params.summary,
+            })
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        match chunk_count {
+            Some(count) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Finalized session {} ({} chunks)",
+                params.session_id, count
+            ))])),
+            None => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Session {} not found",
+                params.session_id
+            ))])),
+        }
+    }
+
+    #[tool(description = "List plan memories in a project that are tagged review-needed")]
+    async fn plan_review_queue(
+        &self,
+        Parameters(params): Parameters<PlanReviewQueueParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let limit = params.limit.unwrap_or(20).clamp(1, 100);
+        let memories = self
+            .backend
+            .list_plan_review_queue(&params.project, limit)
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        if memories.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No plans awaiting review.",
+            )]));
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            format_memory_list(&memories),
+        )]))
+    }
+
+    #[tool(
+        description = "Store a review decision for a plan memory and mark the original plan reviewed"
+    )]
+    async fn plan_review_submit(
+        &self,
+        Parameters(params): Parameters<SubmitPlanReviewParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let review = self
+            .backend
+            .submit_plan_review(
+                params.plan_id,
+                params.project,
+                params.reviewer,
+                params.verdict,
+                params.notes,
+            )
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        match review {
+            Some(memory) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Stored plan review {} for plan {}",
+                memory.id, params.plan_id
+            ))])),
+            None => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Plan {} not found",
+                params.plan_id
+            ))])),
+        }
+    }
 }
 
 impl MemoryBackend {
@@ -372,6 +607,32 @@ impl MemoryBackend {
         }
     }
 
+    async fn list_rules(&self, project: &str, include_general: bool) -> Result<RuleList, Error> {
+        match self {
+            Self::Local(app) => app.list_rules(project, include_general).await,
+            Self::Http(client) => client.list_rules(project, include_general).await,
+        }
+    }
+
+    async fn bootstrap_project(
+        &self,
+        project: &str,
+        include_general: bool,
+        include_recall: bool,
+    ) -> Result<BootstrapPayload, Error> {
+        match self {
+            Self::Local(app) => {
+                app.bootstrap_project(project, include_general, include_recall)
+                    .await
+            }
+            Self::Http(client) => {
+                client
+                    .bootstrap_project(project, include_general, include_recall)
+                    .await
+            }
+        }
+    }
+
     async fn search_memories(
         &self,
         request: SearchMemoriesRequest,
@@ -406,6 +667,68 @@ impl MemoryBackend {
         match self {
             Self::Local(app) => app.store_session_log(request).await,
             Self::Http(client) => client.store_session_log(request).await,
+        }
+    }
+
+    async fn create_session(
+        &self,
+        request: CreateSessionRequest,
+    ) -> Result<model::SessionSummary, Error> {
+        match self {
+            Self::Local(app) => app.create_session(request).await,
+            Self::Http(client) => client.create_session(request).await,
+        }
+    }
+
+    async fn append_session_message(
+        &self,
+        request: AppendSessionMessageRequest,
+    ) -> Result<model::SessionMessageSummary, Error> {
+        match self {
+            Self::Local(app) => app.append_session_message(request).await,
+            Self::Http(client) => client.append_session_message(request).await,
+        }
+    }
+
+    async fn finalize_session(
+        &self,
+        request: FinalizeSessionRequest,
+    ) -> Result<Option<usize>, Error> {
+        match self {
+            Self::Local(app) => app.finalize_session(request).await,
+            Self::Http(client) => client.finalize_session(request).await,
+        }
+    }
+
+    async fn list_plan_review_queue(
+        &self,
+        project: &str,
+        limit: i64,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => app.list_plan_review_queue(project, limit).await,
+            Self::Http(client) => client.list_plan_review_queue(project, limit).await,
+        }
+    }
+
+    async fn submit_plan_review(
+        &self,
+        plan_id: Uuid,
+        project: Option<String>,
+        reviewer: String,
+        verdict: String,
+        notes: String,
+    ) -> Result<Option<model::MemorySummary>, Error> {
+        match self {
+            Self::Local(app) => {
+                app.submit_plan_review(plan_id, project, reviewer, verdict, notes)
+                    .await
+            }
+            Self::Http(client) => {
+                client
+                    .submit_plan_review(plan_id, project, reviewer, verdict, notes)
+                    .await
+            }
         }
     }
 }
@@ -465,6 +788,43 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
     out
 }
 
+fn format_rule_list(project: &str, rules: &RuleList) -> String {
+    let total = rules.general_rules.len() + rules.project_rules.len();
+    let mut out = format!("## Rule Set ({total} rules)\nProject: {project}\n");
+    append_memory_section(&mut out, "General Rules", &rules.general_rules);
+    append_memory_section(&mut out, "Project Rules", &rules.project_rules);
+    out
+}
+
+fn format_bootstrap(payload: &BootstrapPayload) -> String {
+    let mut out = format!("## Bootstrap\nProject: {}\n", payload.project);
+    append_memory_section(&mut out, "General Rules", &payload.general_rules);
+    append_memory_section(&mut out, "Project Rules", &payload.project_rules);
+    append_memory_section(&mut out, "Core Recall", &payload.recall_memories);
+    out
+}
+
+fn append_memory_section(out: &mut String, title: &str, memories: &[model::MemorySummary]) {
+    let _ = write!(out, "\n### {title} ({})\n", memories.len());
+    if memories.is_empty() {
+        let _ = writeln!(out, "None.");
+        return;
+    }
+    for (index, memory) in memories.iter().enumerate() {
+        let _ = write!(
+            out,
+            "\n{}. [{}] {}\nProject: {}\nTags: {}\nUpdated: {}\n\n{}\n",
+            index + 1,
+            memory.category,
+            memory.summary,
+            memory.project,
+            memory.tags.join(", "),
+            memory.updated_at.format("%Y-%m-%d %H:%M"),
+            memory.content,
+        );
+    }
+}
+
 fn format_session_log_results(results: &[(model::SessionLogSummary, f64)]) -> String {
     let mut out = format!(
         "## Session Log Results (fallback, {} matches)\n",
@@ -497,7 +857,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tokio::net::TcpListener;
 
-    use crate::api::{HealthResponse, MemoryEnvelope, MemoryListEnvelope, PatchMemoryRequest};
+    use crate::api::{
+        BootstrapEnvelope, HealthResponse, MemoryEnvelope, MemoryListEnvelope, PatchMemoryRequest,
+        RuleListEnvelope,
+    };
     use crate::app::outer_rrf;
 
     use super::*;
@@ -646,6 +1009,43 @@ mod tests {
         assert!(output.contains("0 matches"));
     }
 
+    #[test]
+    fn format_rule_list_output() {
+        let general = model::MemorySummary {
+            project: "general".to_owned(),
+            summary: "Always run tests".to_owned(),
+            ..sample_summary()
+        };
+        let project = sample_summary();
+        let output = format_rule_list(
+            "test",
+            &RuleList {
+                general_rules: vec![general],
+                project_rules: vec![project],
+            },
+        );
+        assert!(output.contains("## Rule Set (2 rules)"));
+        assert!(output.contains("### General Rules (1)"));
+        assert!(output.contains("### Project Rules (1)"));
+        assert!(output.contains("Always run tests"));
+        assert!(output.contains("Choose pgvector"));
+    }
+
+    #[test]
+    fn format_bootstrap_output() {
+        let output = format_bootstrap(&BootstrapPayload {
+            general_rules: vec![],
+            project: "test".to_owned(),
+            project_rules: vec![sample_summary()],
+            recall_memories: vec![sample_summary_with_id(Uuid::from_u128(2))],
+        });
+        assert!(output.contains("## Bootstrap"));
+        assert!(output.contains("### General Rules (0)"));
+        assert!(output.contains("None."));
+        assert!(output.contains("### Project Rules (1)"));
+        assert!(output.contains("### Core Recall (1)"));
+    }
+
     #[derive(Clone)]
     struct StubState {
         memory: Arc<Mutex<Option<crate::api::MemoryDto>>>,
@@ -669,6 +1069,8 @@ mod tests {
                 "/api/v1/projects/{project}/memories",
                 get(stub_list_memories),
             )
+            .route("/api/v1/projects/{project}/rules", get(stub_list_rules))
+            .route("/api/v1/projects/{project}/bootstrap", get(stub_bootstrap))
             .with_state(state.clone());
         let _server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -723,6 +1125,30 @@ mod tests {
         assert!(get_after_text.contains("HTTP adapter uses exact API payloads"));
         assert!(get_after_text.contains("Use memoryd over HTTP for the MCP adapter."));
         assert!(get_after_text.contains("split, http, tested"));
+
+        let rules = server
+            .memory_rules(Parameters(RulesParams {
+                include_general: Some(true),
+                project: "memory-server".to_owned(),
+            }))
+            .await
+            .unwrap();
+        let rules_text = first_text(&rules);
+        assert!(rules_text.contains("## Rule Set"));
+        assert!(rules_text.contains("### General Rules"));
+        assert!(rules_text.contains("### Project Rules"));
+
+        let bootstrap = server
+            .memory_bootstrap(Parameters(BootstrapParams {
+                include_general: Some(true),
+                include_recall: Some(true),
+                project: "memory-server".to_owned(),
+            }))
+            .await
+            .unwrap();
+        let bootstrap_text = first_text(&bootstrap);
+        assert!(bootstrap_text.contains("## Bootstrap"));
+        assert!(bootstrap_text.contains("### Core Recall"));
     }
 
     async fn stub_health() -> Json<HealthResponse> {
@@ -794,6 +1220,57 @@ mod tests {
     ) -> Json<MemoryListEnvelope> {
         let memories = state.memory.lock().unwrap().clone().into_iter().collect();
         Json(MemoryListEnvelope { memories })
+    }
+
+    async fn stub_list_rules(
+        State(state): State<StubState>,
+        Path(_project): Path<String>,
+    ) -> Json<RuleListEnvelope> {
+        let project_rules = state.memory.lock().unwrap().clone().into_iter().collect();
+        Json(RuleListEnvelope {
+            general_rules: vec![crate::api::MemoryDto {
+                category: Category::Rule,
+                content: "Use hooks to block unsafe actions.".to_owned(),
+                created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+                id: Uuid::from_u128(99),
+                project: "general".to_owned(),
+                summary: "General safety rules".to_owned(),
+                tags: vec!["rules".to_owned()],
+                updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            }],
+            project_rules,
+        })
+    }
+
+    async fn stub_bootstrap(
+        State(state): State<StubState>,
+        Path(project): Path<String>,
+    ) -> Json<BootstrapEnvelope> {
+        let project_rules = state.memory.lock().unwrap().clone().into_iter().collect();
+        Json(BootstrapEnvelope {
+            general_rules: vec![crate::api::MemoryDto {
+                category: Category::Rule,
+                content: "Use hooks to block unsafe actions.".to_owned(),
+                created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+                id: Uuid::from_u128(99),
+                project: "general".to_owned(),
+                summary: "General safety rules".to_owned(),
+                tags: vec!["rules".to_owned()],
+                updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            }],
+            project,
+            project_rules,
+            recall_memories: vec![crate::api::MemoryDto {
+                category: Category::Decision,
+                content: "Prefer the HTTP adapter boundary.".to_owned(),
+                created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+                id: Uuid::from_u128(100),
+                project: "memory-server".to_owned(),
+                summary: "Adapter boundary decision".to_owned(),
+                tags: vec!["decision".to_owned()],
+                updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            }],
+        })
     }
 
     fn first_text(result: &CallToolResult) -> &str {

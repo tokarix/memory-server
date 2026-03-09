@@ -32,7 +32,7 @@ impl ServerHandler for tools::MemoryServer {
                 ..Implementation::from_build_env()
             },
             instructions: Some(
-                "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_recall` at session start to load core memories (importance >= 0.7) for a project.".into(),
+                "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_bootstrap` at session start to load effective rules plus non-rule core memories for a project. Use `memory_rules` when hooks or agents need just the durable rule set.".into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

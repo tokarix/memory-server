@@ -193,11 +193,18 @@ require `Authorization: Bearer <token>`.
 | `memory_store` | Store a new memory |
 | `memory_search` | Hybrid semantic search within a project |
 | `memory_recall` | Load core memories for a project |
+| `memory_rules` | Load general + project durable rules |
+| `memory_bootstrap` | Load effective rules plus non-rule core recall |
 | `memory_list` | Browse memories by project/category |
 | `memory_get` | Fetch a single memory by UUID |
 | `memory_update` | Update summary/content/tags and re-embed if needed |
 | `memory_delete` | Delete a memory by UUID |
+| `session_start` | Create or upsert a normalized shared session |
+| `session_message_append` | Append a prompt/response/tool event to a shared session |
+| `session_finalize` | Finalize a shared session into searchable chunks |
 | `session_log_store` | Store a full session transcript for archival/search |
+| `plan_review_queue` | List plan memories tagged `review-needed` |
+| `plan_review_submit` | Store a plan review and mark the plan reviewed |
 
 `memory_search` behavior:
 - expands the user query with the configured LLM
@@ -256,6 +263,109 @@ The current schema is migration-driven. For the next planned shape, see
 A Claude Code `PreCompact` hook script is included at
 [`hooks/pre-compact.sh`](hooks/pre-compact.sh). It runs the `ingest`
 binary against the session transcript before compaction.
+
+Additional hook scripts are available for durable rule bootstrap and
+per-message session capture:
+
+- [`hooks/bootstrap.sh`](hooks/bootstrap.sh): fetches and caches
+  `memory_bootstrap` output for the current session and creates the
+  normalized remote session row
+- [`hooks/capture-message.sh`](hooks/capture-message.sh): append a user or
+  assistant message to the normalized remote session stream
+- [`hooks/pre-command.sh`](hooks/pre-command.sh): blocks obviously risky
+  commands, fails closed when bootstrap is missing, and records command
+  attempts as session events
+- [`hooks/session-stop.sh`](hooks/session-stop.sh): final flush of the
+  normalized session into searchable chunks
+
+This lets you save each prompt and each response as the session unfolds,
+with agent identity, instead of only storing a transcript at compaction
+time.
+
+Example wiring with explicit agent identities:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/bootstrap.sh claude"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/capture-message.sh claude user"
+      }]
+    }],
+    "AssistantResponse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/capture-message.sh claude assistant"
+      }]
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/pre-command.sh claude"
+      }]
+    }],
+    "PreCompact": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/pre-compact.sh"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/absolute/path/to/memory-server/hooks/session-stop.sh"
+      }]
+    }]
+  }
+}
+```
+
+Notes:
+
+- Use `claude` and `codex` as explicit first arguments if both clients
+  write into the same memory service. That makes the stored session events
+  attributable during search/finalization.
+- The exact event names vary by client. Map these scripts to the closest
+  available events in each client.
+- The scripts expect `jq` and `curl`.
+- They read `memoryd_url` and optional `api_token` from `config.toml`, or
+  from `MEMORY_SERVER_CONFIG` if you want to point at another config file.
+- Hook state is cached under `/tmp/memory-server-hooks/<external-session-id>/`.
+
+For durable instruction enforcement, prefer the following flow over
+duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
+
+- Store durable instructions as `rule` memories. Put cross-project rules
+  under project `general`; put repo-specific rules under that repo's
+  project name.
+- Call `memory_bootstrap(project)` at session start or first prompt in a
+  hook so the agent receives the effective rule set plus supporting
+  non-rule recall memories.
+- Call `memory_rules(project)` from pre-action hooks when only the
+  enforceable rule set is needed.
+- Keep hooks focused on deterministic enforcement and verification:
+  blocking destructive commands, requiring explicit approvals, requiring
+  bootstrap to have happened, and recording compliance failures.
+- Keep memory rules focused on durable intent and policy that the model
+  must follow but that a shell hook cannot reliably derive on its own.
+
+## Plan Review Workflow
+
+For cross-agent collaboration, use `plan` memories as the handoff object
+and session events as the raw chronology.
+
+- Claude stores a `plan` memory tagged `review-needed`.
+- Codex calls `plan_review_queue(project)` to find pending plan reviews.
+- Codex reviews the plan and calls `plan_review_submit(...)`.
+- `plan_review_submit` stores a `decision` memory linked to the plan and
+  updates the original plan tags from `review-needed` to `reviewed`.
 
 ## Development
 

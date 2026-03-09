@@ -3,11 +3,14 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::api::{
-    DeleteEnvelope, HealthResponse, MemoryEnvelope, MemoryListEnvelope, PatchMemoryRequest,
-    SearchEnvelope, StoreSessionLogEnvelope,
+    AppendSessionMessageDto, BootstrapEnvelope, CreateSessionDto, DeleteEnvelope,
+    FinalizeSessionDto, FinalizeSessionEnvelope, HealthResponse, MemoryEnvelope,
+    MemoryListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope, SessionEnvelope,
+    SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitPlanReviewDto,
 };
 use crate::app::{
-    ListMemoriesRequest, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
+    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
+    ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use crate::error::Error;
@@ -82,6 +85,147 @@ impl HttpMemoryClient {
             .request(Method::GET, &["api", "v1", "projects", project, "recall"])
             .await?;
         Ok(response.memories.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn list_rules(
+        &self,
+        project: &str,
+        include_general: bool,
+    ) -> Result<RuleList, Error> {
+        let mut url = self.url(&["api", "v1", "projects", project, "rules"])?;
+        url.query_pairs_mut()
+            .append_pair("include_general", &include_general.to_string());
+        let response: RuleListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
+        Ok(RuleList {
+            general_rules: response.general_rules.into_iter().map(Into::into).collect(),
+            project_rules: response.project_rules.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    pub async fn bootstrap_project(
+        &self,
+        project: &str,
+        include_general: bool,
+        include_recall: bool,
+    ) -> Result<BootstrapPayload, Error> {
+        let mut url = self.url(&["api", "v1", "projects", project, "bootstrap"])?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("include_general", &include_general.to_string());
+            query.append_pair("include_recall", &include_recall.to_string());
+        }
+        let response: BootstrapEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
+        Ok(BootstrapPayload {
+            general_rules: response.general_rules.into_iter().map(Into::into).collect(),
+            project: response.project,
+            project_rules: response.project_rules.into_iter().map(Into::into).collect(),
+            recall_memories: response
+                .recall_memories
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        })
+    }
+
+    pub async fn create_session(
+        &self,
+        request: CreateSessionRequest,
+    ) -> Result<model::SessionSummary, Error> {
+        let response: SessionEnvelope = self
+            .request_with_body(
+                Method::POST,
+                &["api", "v1", "sessions", "start"],
+                &CreateSessionDto {
+                    agent: request.agent,
+                    cwd: request.cwd,
+                    external_session_id: request.external_session_id,
+                    project: request.project,
+                },
+            )
+            .await?;
+        Ok(response.session.into())
+    }
+
+    pub async fn append_session_message(
+        &self,
+        request: AppendSessionMessageRequest,
+    ) -> Result<model::SessionMessageSummary, Error> {
+        let session_id = request.session_id.to_string();
+        let response: SessionMessageEnvelope = self
+            .request_with_body(
+                Method::POST,
+                &["api", "v1", "sessions", &session_id, "messages"],
+                &AppendSessionMessageDto {
+                    agent: request.agent,
+                    content: request.content,
+                    kind: request.kind,
+                    metadata: request.metadata,
+                    role: request.role,
+                },
+            )
+            .await?;
+        Ok(response.message.into())
+    }
+
+    pub async fn finalize_session(
+        &self,
+        request: FinalizeSessionRequest,
+    ) -> Result<Option<usize>, Error> {
+        let session_id = request.session_id.to_string();
+        match self
+            .request_with_body::<_, FinalizeSessionEnvelope>(
+                Method::POST,
+                &["api", "v1", "sessions", &session_id, "finalize"],
+                &FinalizeSessionDto {
+                    summary: request.summary,
+                },
+            )
+            .await
+        {
+            Ok(response) => Ok(Some(response.chunk_count)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn list_plan_review_queue(
+        &self,
+        project: &str,
+        limit: i64,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        let mut url = self.url(&["api", "v1", "projects", project, "plans", "review-queue"])?;
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string());
+        let response: MemoryListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
+        Ok(response.memories.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn submit_plan_review(
+        &self,
+        plan_id: Uuid,
+        project: Option<String>,
+        reviewer: String,
+        verdict: String,
+        notes: String,
+    ) -> Result<Option<model::MemorySummary>, Error> {
+        match self
+            .request_with_body::<_, MemoryEnvelope>(
+                Method::POST,
+                &["api", "v1", "plans", "review"],
+                &SubmitPlanReviewDto {
+                    notes,
+                    plan_id,
+                    project,
+                    reviewer,
+                    verdict,
+                },
+            )
+            .await
+        {
+            Ok(response) => Ok(Some(response.memory.into())),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn search_memories(

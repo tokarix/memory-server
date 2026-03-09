@@ -91,6 +91,28 @@ pub struct SessionLogChunk {
     pub session_log_id: Uuid,
 }
 
+pub struct Session {
+    pub agent: String,
+    pub created_at: DateTime<Utc>,
+    pub cwd: String,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub external_session_id: String,
+    pub id: Uuid,
+    pub project: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub struct SessionMessage {
+    pub agent: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+    pub kind: String,
+    pub metadata: Option<String>,
+    pub role: String,
+    pub session_id: Uuid,
+}
+
 /// Session log without the embedding vector, for search results.
 #[derive(Clone)]
 pub struct SessionLogSummary {
@@ -101,6 +123,30 @@ pub struct SessionLogSummary {
     pub project: String,
     pub session_id: String,
     pub summary: String,
+}
+
+#[derive(Clone)]
+pub struct SessionSummary {
+    pub agent: String,
+    pub created_at: DateTime<Utc>,
+    pub cwd: String,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub external_session_id: String,
+    pub id: Uuid,
+    pub project: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub struct SessionMessageSummary {
+    pub agent: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+    pub kind: String,
+    pub metadata: Option<String>,
+    pub role: String,
+    pub session_id: Uuid,
 }
 
 #[cfg(test)]

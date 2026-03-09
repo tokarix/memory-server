@@ -19,13 +19,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INGEST="${SCRIPT_DIR}/../target/release/ingest"
 CONFIG="${SCRIPT_DIR}/../config.toml"
+# shellcheck source=hooks/_common.sh
+source "${SCRIPT_DIR}/_common.sh"
 
 # Read hook input from stdin
 input=$(cat)
 
 transcript_path=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
+session_id="$(session_id_from_input "$input")"
 
 if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
+    if [ -n "$session_id" ]; then
+        finalize_remote_session "$session_id" || true
+    fi
     exit 0
 fi
 
@@ -37,3 +43,7 @@ ingest_args+=("$transcript_path")
 
 # Run ingest, but never block compaction
 "$INGEST" "${ingest_args[@]}" 2>/dev/null || true
+
+if [ -n "$session_id" ]; then
+    finalize_remote_session "$session_id" || true
+fi

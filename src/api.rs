@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::app::{
-    ListMemoriesRequest, MemoryApp, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
-    StoreSessionLogRequest, UpdateMemoryRequest,
+    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
+    ListMemoriesRequest, MemoryApp, RuleList, SearchMemoriesRequest, SearchOutcome,
+    StoreMemoryRequest, StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use crate::error::Error;
 use crate::model::{Category, MemorySummary, SessionLogSummary};
@@ -27,12 +28,33 @@ struct ListMemoriesQuery {
 }
 
 #[derive(Deserialize)]
+struct RulesQuery {
+    include_general: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct BootstrapQuery {
+    include_general: Option<bool>,
+    include_recall: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ReviewQueueQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct RecallPath {
     project: String,
 }
 
 #[derive(Deserialize)]
 struct MemoryPath {
+    id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct SessionPath {
     id: Uuid,
 }
 
@@ -60,6 +82,20 @@ pub struct MemoryListEnvelope {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub struct RuleListEnvelope {
+    pub general_rules: Vec<MemoryDto>,
+    pub project_rules: Vec<MemoryDto>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct BootstrapEnvelope {
+    pub general_rules: Vec<MemoryDto>,
+    pub project: String,
+    pub project_rules: Vec<MemoryDto>,
+    pub recall_memories: Vec<MemoryDto>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SearchEnvelope {
     pub fallback: bool,
     pub memories: Vec<MemoryMatchDto>,
@@ -70,6 +106,22 @@ pub struct SearchEnvelope {
 pub struct StoreSessionLogEnvelope {
     pub chunk_count: usize,
     pub session_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SessionEnvelope {
+    pub session: SessionDto,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SessionMessageEnvelope {
+    pub message: SessionMessageDto,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FinalizeSessionEnvelope {
+    pub chunk_count: usize,
+    pub session_id: Uuid,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -113,6 +165,61 @@ pub struct SessionLogDto {
     pub summary: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SessionDto {
+    pub agent: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub cwd: String,
+    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub external_session_id: String,
+    pub id: Uuid,
+    pub project: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SessionMessageDto {
+    pub agent: String,
+    pub content: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub id: Uuid,
+    pub kind: String,
+    pub metadata: Option<String>,
+    pub role: String,
+    pub session_id: Uuid,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CreateSessionDto {
+    pub agent: Option<String>,
+    pub cwd: Option<String>,
+    pub external_session_id: String,
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct AppendSessionMessageDto {
+    pub agent: Option<String>,
+    pub content: String,
+    pub kind: Option<String>,
+    pub metadata: Option<String>,
+    pub role: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FinalizeSessionDto {
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SubmitPlanReviewDto {
+    pub notes: String,
+    pub plan_id: Uuid,
+    pub project: Option<String>,
+    pub reviewer: String,
+    pub verdict: String,
+}
+
 #[derive(Serialize)]
 struct ApiErrorEnvelope {
     error: ApiErrorBody,
@@ -135,7 +242,23 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/v1/projects/{project}/memories", get(list_memories))
         .route("/api/v1/projects/{project}/recall", get(recall_project))
+        .route("/api/v1/projects/{project}/rules", get(list_rules))
+        .route(
+            "/api/v1/projects/{project}/bootstrap",
+            get(project_bootstrap),
+        )
+        .route(
+            "/api/v1/projects/{project}/plans/review-queue",
+            get(plan_review_queue),
+        )
         .route("/api/v1/sessions", post(store_session_log))
+        .route("/api/v1/sessions/start", post(create_session))
+        .route(
+            "/api/v1/sessions/{id}/messages",
+            post(append_session_message),
+        )
+        .route("/api/v1/sessions/{id}/finalize", post(finalize_session))
+        .route("/api/v1/plans/review", post(submit_plan_review))
         .with_state(state)
 }
 
@@ -155,6 +278,70 @@ async fn create_memory(
     let memory = state.app.store_memory(request).await?;
     Ok(Json(MemoryEnvelope {
         memory: memory.into(),
+    }))
+}
+
+async fn create_session(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSessionDto>,
+) -> Result<Json<SessionEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let session = state
+        .app
+        .create_session(CreateSessionRequest {
+            agent: request.agent,
+            cwd: request.cwd,
+            external_session_id: request.external_session_id,
+            project: request.project,
+        })
+        .await?;
+    Ok(Json(SessionEnvelope {
+        session: session.into(),
+    }))
+}
+
+async fn append_session_message(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<SessionPath>,
+    Json(request): Json<AppendSessionMessageDto>,
+) -> Result<Json<SessionMessageEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let message = state
+        .app
+        .append_session_message(AppendSessionMessageRequest {
+            agent: request.agent,
+            content: request.content,
+            kind: request.kind,
+            metadata: request.metadata,
+            role: request.role,
+            session_id: path.id,
+        })
+        .await?;
+    Ok(Json(SessionMessageEnvelope {
+        message: message.into(),
+    }))
+}
+
+async fn finalize_session(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<SessionPath>,
+    Json(request): Json<FinalizeSessionDto>,
+) -> Result<Json<FinalizeSessionEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let chunk_count = state
+        .app
+        .finalize_session(FinalizeSessionRequest {
+            session_id: path.id,
+            summary: request.summary,
+        })
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Session {} not found", path.id)))?;
+    Ok(Json(FinalizeSessionEnvelope {
+        chunk_count,
+        session_id: path.id,
     }))
 }
 
@@ -277,6 +464,77 @@ async fn store_session_log(
     }))
 }
 
+async fn plan_review_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<RecallPath>,
+    Query(query): Query<ReviewQueueQuery>,
+) -> Result<Json<MemoryListEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let memories = state
+        .app
+        .list_plan_review_queue(&path.project, limit)
+        .await?;
+    Ok(Json(MemoryListEnvelope {
+        memories: memories.into_iter().map(Into::into).collect(),
+    }))
+}
+
+async fn list_rules(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<RecallPath>,
+    Query(query): Query<RulesQuery>,
+) -> Result<Json<RuleListEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let rules = state
+        .app
+        .list_rules(&path.project, query.include_general.unwrap_or(true))
+        .await?;
+    Ok(Json(rules.into()))
+}
+
+async fn project_bootstrap(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<RecallPath>,
+    Query(query): Query<BootstrapQuery>,
+) -> Result<Json<BootstrapEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let payload = state
+        .app
+        .bootstrap_project(
+            &path.project,
+            query.include_general.unwrap_or(true),
+            query.include_recall.unwrap_or(true),
+        )
+        .await?;
+    Ok(Json(payload.into()))
+}
+
+async fn submit_plan_review(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<SubmitPlanReviewDto>,
+) -> Result<Json<MemoryEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let memory = state
+        .app
+        .submit_plan_review(
+            request.plan_id,
+            request.project,
+            request.reviewer,
+            request.verdict,
+            request.notes,
+        )
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("Plan {} not found", request.plan_id)))?;
+    Ok(Json(MemoryEnvelope {
+        memory: memory.into(),
+    }))
+}
+
 async fn list_memories(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -346,6 +604,30 @@ impl From<MemoryDto> for MemorySummary {
     }
 }
 
+impl From<RuleList> for RuleListEnvelope {
+    fn from(rules: RuleList) -> Self {
+        Self {
+            general_rules: rules.general_rules.into_iter().map(Into::into).collect(),
+            project_rules: rules.project_rules.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<BootstrapPayload> for BootstrapEnvelope {
+    fn from(payload: BootstrapPayload) -> Self {
+        Self {
+            general_rules: payload.general_rules.into_iter().map(Into::into).collect(),
+            project: payload.project,
+            project_rules: payload.project_rules.into_iter().map(Into::into).collect(),
+            recall_memories: payload
+                .recall_memories
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
 impl From<SessionLogSummary> for SessionLogDto {
     fn from(session_log: SessionLogSummary) -> Self {
         Self {
@@ -374,6 +656,66 @@ impl From<SessionLogDto> for SessionLogSummary {
     }
 }
 
+impl From<crate::model::SessionSummary> for SessionDto {
+    fn from(session: crate::model::SessionSummary) -> Self {
+        Self {
+            agent: session.agent,
+            created_at: session.created_at,
+            cwd: session.cwd,
+            ended_at: session.ended_at,
+            external_session_id: session.external_session_id,
+            id: session.id,
+            project: session.project,
+            updated_at: session.updated_at,
+        }
+    }
+}
+
+impl From<SessionDto> for crate::model::SessionSummary {
+    fn from(session: SessionDto) -> Self {
+        Self {
+            agent: session.agent,
+            created_at: session.created_at,
+            cwd: session.cwd,
+            ended_at: session.ended_at,
+            external_session_id: session.external_session_id,
+            id: session.id,
+            project: session.project,
+            updated_at: session.updated_at,
+        }
+    }
+}
+
+impl From<crate::model::SessionMessageSummary> for SessionMessageDto {
+    fn from(message: crate::model::SessionMessageSummary) -> Self {
+        Self {
+            agent: message.agent,
+            content: message.content,
+            created_at: message.created_at,
+            id: message.id,
+            kind: message.kind,
+            metadata: message.metadata,
+            role: message.role,
+            session_id: message.session_id,
+        }
+    }
+}
+
+impl From<SessionMessageDto> for crate::model::SessionMessageSummary {
+    fn from(message: SessionMessageDto) -> Self {
+        Self {
+            agent: message.agent,
+            content: message.content,
+            created_at: message.created_at,
+            id: message.id,
+            kind: message.kind,
+            metadata: message.metadata,
+            role: message.role,
+            session_id: message.session_id,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ApiError {
     code: &'static str,
@@ -384,7 +726,7 @@ struct ApiError {
 impl ApiError {
     fn not_found(message: String) -> Self {
         Self {
-            code: "memory_not_found",
+            code: "not_found",
             message,
             status: StatusCode::NOT_FOUND,
         }
@@ -413,7 +755,7 @@ impl From<Error> for ApiError {
                 status: StatusCode::BAD_GATEWAY,
             },
             Error::NotFound(message) => Self {
-                code: "memory_not_found",
+                code: "not_found",
                 message,
                 status: StatusCode::NOT_FOUND,
             },

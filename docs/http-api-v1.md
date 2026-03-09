@@ -80,8 +80,11 @@ Primary endpoints:
 - `GET /api/v1/projects/{project}/recall`
 - `GET /api/v1/projects/{project}/rules`
 - `POST /api/v1/sessions`
+- `POST /api/v1/sessions/start`
 - `POST /api/v1/sessions/{id}/messages`
 - `POST /api/v1/sessions/{id}/finalize`
+- `GET /api/v1/projects/{project}/plans/review-queue`
+- `POST /api/v1/plans/review`
 - `POST /api/v1/session-search`
 
 Notes:
@@ -471,8 +474,38 @@ Behavior:
 
 - include project-specific rules
 - optionally union with `project = "general"`
+- return general and project rules separately so callers can apply
+  precedence without reparsing a merged list
+
+### `GET /api/v1/projects/{project}/bootstrap`
+
+Purpose:
+
+- load the effective rules needed to start or resume a session
+
+Query parameters:
+
+- `include_general=true` optional, default `true`
+- `include_recall=true` optional, default `true`
+
+Behavior:
+
+- return `general_rules`
+- return `project_rules`
+- return non-rule `recall_memories` for the project
+- this is the preferred endpoint for session-start and first-prompt hooks
 
 ### `POST /api/v1/sessions`
+
+Purpose:
+
+- compatibility endpoint that stores a whole session log snapshot
+
+Behavior:
+
+- preserves the existing monolith/session-log ingestion path
+
+### `POST /api/v1/sessions/start`
 
 Purpose:
 
@@ -492,6 +525,7 @@ Behavior:
 
 - write append-only `session_messages` row
 - no embedding yet
+- include `agent`, `role`, optional `kind`, and optional `metadata`
 
 ### `POST /api/v1/sessions/{id}/finalize`
 
@@ -502,12 +536,36 @@ Purpose:
 Behavior:
 
 - mark `ended_at`
+- aggregate ordered `session_messages` into session text
 - chunk aggregated session text
 - embed chunks
-- refresh `session_chunks`
+- refresh `session_log_chunks`
 
 This endpoint is a better fit for hooks than trying to store curated
 memories automatically.
+
+### `GET /api/v1/projects/{project}/plans/review-queue`
+
+Purpose:
+
+- list `plan` memories tagged `review-needed`
+
+Behavior:
+
+- supports a `limit` query parameter
+- intended for cross-agent review handoff
+
+### `POST /api/v1/plans/review`
+
+Purpose:
+
+- store a review decision for a plan and mark the plan reviewed
+
+Behavior:
+
+- stores a `decision` memory linked to the original plan
+- updates the original plan tags by removing `review-needed`
+- adds reviewer/verdict tags for later auditing
 
 ### `POST /api/v1/session-search`
 
@@ -533,7 +591,13 @@ HTTP endpoint.
 | `memory_update`         | `PATCH /api/v1/memories/{id}`            |
 | `memory_delete`         | `DELETE /api/v1/memories/{id}`           |
 | `memory_recall`         | `GET /api/v1/projects/{project}/recall`  |
-| `memory_rules` future   | `GET /api/v1/projects/{project}/rules`   |
+| `memory_rules`          | `GET /api/v1/projects/{project}/rules`   |
+| `memory_bootstrap`      | `GET /api/v1/projects/{project}/bootstrap` |
+| `session_start`         | `POST /api/v1/sessions/start`            |
+| `session_message_append`| `POST /api/v1/sessions/{id}/messages`    |
+| `session_finalize`      | `POST /api/v1/sessions/{id}/finalize`    |
+| `plan_review_queue`     | `GET /api/v1/projects/{project}/plans/review-queue` |
+| `plan_review_submit`    | `POST /api/v1/plans/review`              |
 | transcript/session hook | `POST /api/v1/sessions/...`              |
 
 The MCP adapter should remain dumb:
@@ -575,3 +639,46 @@ The MCP adapter should remain dumb:
 - Whether `session_chunks` should reference only session-level chunks or also message-level chunks
 - Whether reranking should happen synchronously in v1 or be made configurable per endpoint
 - Whether project rules should support precedence/ordering metadata in v1
+
+## Rules Enforcement Flow
+
+Recommended split:
+
+- Hooks enforce deterministic, inspectable constraints:
+  destructive-command blocking, approval gates, bootstrap-required checks,
+  and end-of-session compliance reporting.
+- Rule memories carry durable policy and workflow guidance:
+  coding standards, repo conventions, review expectations, and
+  agent-behavior rules that need to persist across sessions.
+
+Recommended hook trigger points:
+
+- Session start or first prompt: call project bootstrap and
+  `POST /api/v1/sessions/start`, then inject the returned rules into
+  context.
+- Prompt/response/tool hooks: append each event through
+  `POST /api/v1/sessions/{id}/messages`.
+- Pre-tool or pre-command: re-check rules only when the action is risky or
+  when bootstrap state is missing/stale.
+- Pre-compact/finalize: call `POST /api/v1/sessions/{id}/finalize`, then
+  verify whether required rules were loaded and whether any blocked-action
+  attempts occurred.
+
+Compliance verification should be explicit:
+
+- log that bootstrap ran for `{project, session_id}`
+- log which rule IDs were injected
+- fail closed when a required hook cannot confirm bootstrap for risky
+  operations
+- keep hook logs searchable so later sessions can audit whether the agent
+  ignored or never received a rule
+
+## Cross-Agent Plan Review
+
+Recommended durable flow:
+
+- agent A stores a `plan` memory tagged `review-needed`
+- agent B polls `plan_review_queue`
+- agent B writes its review with `plan_review_submit`
+- both agents can search raw session chronology separately from durable
+  plan/review memories

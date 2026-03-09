@@ -14,6 +14,7 @@ use crate::{db, expand, rerank, transcript};
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;
 const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
+pub const GENERAL_RULE_PROJECT: &str = "general";
 
 #[derive(Clone)]
 pub struct MemoryApp {
@@ -67,6 +68,44 @@ pub struct StoreSessionLogRequest {
     pub project: Option<String>,
     pub session_id: String,
     pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateSessionRequest {
+    pub agent: Option<String>,
+    pub cwd: Option<String>,
+    pub external_session_id: String,
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AppendSessionMessageRequest {
+    pub agent: Option<String>,
+    pub content: String,
+    pub kind: Option<String>,
+    pub metadata: Option<String>,
+    pub role: String,
+    pub session_id: Uuid,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FinalizeSessionRequest {
+    pub session_id: Uuid,
+    pub summary: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct RuleList {
+    pub general_rules: Vec<model::MemorySummary>,
+    pub project_rules: Vec<model::MemorySummary>,
+}
+
+#[derive(Clone)]
+pub struct BootstrapPayload {
+    pub general_rules: Vec<model::MemorySummary>,
+    pub project: String,
+    pub project_rules: Vec<model::MemorySummary>,
+    pub recall_memories: Vec<model::MemorySummary>,
 }
 
 pub enum SearchOutcome {
@@ -130,6 +169,107 @@ impl MemoryApp {
         db::list_core(&self.pool, project)
             .await
             .map_err(Error::from)
+    }
+
+    pub async fn create_session(
+        &self,
+        request: CreateSessionRequest,
+    ) -> Result<model::SessionSummary, Error> {
+        let cwd = request.cwd.unwrap_or_default();
+        let project = request.project.unwrap_or_else(|| project_from_cwd(&cwd));
+        let now = Utc::now();
+        let session = model::Session {
+            agent: request.agent.unwrap_or_default(),
+            created_at: now,
+            cwd,
+            ended_at: None,
+            external_session_id: request.external_session_id,
+            id: Uuid::new_v4(),
+            project,
+            updated_at: now,
+        };
+        db::create_session(&self.pool, &session)
+            .await
+            .map_err(Error::from)
+    }
+
+    pub async fn append_session_message(
+        &self,
+        request: AppendSessionMessageRequest,
+    ) -> Result<model::SessionMessageSummary, Error> {
+        let message = model::SessionMessage {
+            agent: request.agent.unwrap_or_default(),
+            content: request.content,
+            created_at: Utc::now(),
+            id: Uuid::new_v4(),
+            kind: request.kind.unwrap_or_else(|| "message".to_owned()),
+            metadata: request.metadata,
+            role: request.role,
+            session_id: request.session_id,
+        };
+        db::append_session_message(&self.pool, &message)
+            .await
+            .map_err(Error::from)
+    }
+
+    pub async fn finalize_session(
+        &self,
+        request: FinalizeSessionRequest,
+    ) -> Result<Option<usize>, Error> {
+        let Some(session) = db::get_session(&self.pool, request.session_id)
+            .await
+            .map_err(Error::from)?
+        else {
+            return Ok(None);
+        };
+        let messages = db::list_session_messages(&self.pool, request.session_id)
+            .await
+            .map_err(Error::from)?;
+        let finalized = self
+            .materialize_session_log(&session, &messages, request.summary.as_deref())
+            .await?;
+        Ok(Some(finalized))
+    }
+
+    pub async fn list_rules(
+        &self,
+        project: &str,
+        include_general: bool,
+    ) -> Result<RuleList, Error> {
+        let rules = db::list_rules(&self.pool, project, include_general)
+            .await
+            .map_err(Error::from)?;
+        let (general_rules, project_rules): (Vec<_>, Vec<_>) = rules
+            .into_iter()
+            .partition(|memory| memory.project == GENERAL_RULE_PROJECT);
+        Ok(RuleList {
+            general_rules,
+            project_rules,
+        })
+    }
+
+    pub async fn bootstrap_project(
+        &self,
+        project: &str,
+        include_general: bool,
+        include_recall: bool,
+    ) -> Result<BootstrapPayload, Error> {
+        let rules = self.list_rules(project, include_general).await?;
+        let recall_memories = if include_recall {
+            self.recall_project(project)
+                .await?
+                .into_iter()
+                .filter(|memory| memory.category != Category::Rule)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(BootstrapPayload {
+            general_rules: rules.general_rules,
+            project: project.to_owned(),
+            project_rules: rules.project_rules,
+            recall_memories,
+        })
     }
 
     pub async fn search_memories(
@@ -276,29 +416,139 @@ impl MemoryApp {
 
     pub async fn store_session_log(&self, request: StoreSessionLogRequest) -> Result<usize, Error> {
         let cwd = request.cwd.unwrap_or_default();
-        let project = request.project.unwrap_or_else(|| {
-            cwd.rsplit('/')
-                .find(|segment| !segment.is_empty())
-                .unwrap_or("")
-                .to_owned()
-        });
-        let embedding = self.embed_client.embed(&request.summary, "").await?;
+        let project = request.project.unwrap_or_else(|| project_from_cwd(&cwd));
+        self.materialize_raw_session_log(
+            &request.session_id,
+            &cwd,
+            &project,
+            &request.content,
+            &request.summary,
+        )
+        .await
+    }
 
-        let text_chunks = transcript::chunk_text(&request.content, CHUNK_SIZE, CHUNK_OVERLAP);
+    pub async fn list_plan_review_queue(
+        &self,
+        project: &str,
+        limit: i64,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        db::list_plan_review_queue(&self.pool, project, limit)
+            .await
+            .map_err(Error::from)
+    }
+
+    pub async fn submit_plan_review(
+        &self,
+        plan_id: Uuid,
+        project: Option<String>,
+        reviewer: String,
+        verdict: String,
+        notes: String,
+    ) -> Result<Option<model::MemorySummary>, Error> {
+        let Some(plan) = db::get(&self.pool, plan_id).await.map_err(Error::from)? else {
+            return Ok(None);
+        };
+
+        let normalized_verdict = verdict.trim().to_lowercase();
+        let review_project = project.unwrap_or_else(|| plan.project.clone());
+        let review_summary = format!("Plan review by {}: {}", reviewer, plan.summary);
+        let review_content = format!(
+            "Plan ID: {}\nReviewer: {}\nVerdict: {}\n\nOriginal plan summary:\n{}\n\nOriginal plan content:\n{}\n\nReview notes:\n{}",
+            plan.id, reviewer, normalized_verdict, plan.summary, plan.content, notes
+        );
+        let mut updated_tags: Vec<String> = plan
+            .tags
+            .iter()
+            .filter(|tag| tag.as_str() != "review-needed")
+            .cloned()
+            .collect();
+        updated_tags.push("reviewed".to_owned());
+        updated_tags.push(format!("reviewed-by:{reviewer}"));
+        updated_tags.push(format!("review-verdict:{normalized_verdict}"));
+        updated_tags.sort();
+        updated_tags.dedup();
+
+        let review = self
+            .store_memory(StoreMemoryRequest {
+                category: Category::Decision,
+                content: review_content,
+                project: review_project,
+                summary: review_summary,
+                tags: Some(vec![
+                    "plan-review".to_owned(),
+                    format!("plan:{plan_id}"),
+                    format!("reviewer:{reviewer}"),
+                    format!("verdict:{normalized_verdict}"),
+                ]),
+            })
+            .await?;
+
+        self.update_memory(UpdateMemoryRequest {
+            content: None,
+            id: plan_id,
+            summary: None,
+            tags: Some(updated_tags),
+        })
+        .await?;
+
+        Ok(Some(review))
+    }
+}
+
+impl MemoryApp {
+    async fn materialize_raw_session_log(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        project: &str,
+        content: &str,
+        summary: &str,
+    ) -> Result<usize, Error> {
+        let embedding = self.embed_client.embed(summary, "").await?;
+        let text_chunks = transcript::chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP);
         let log = model::SessionLog {
             id: Uuid::new_v4(),
-            content: request.content,
+            content: content.to_owned(),
             created_at: Utc::now(),
-            cwd,
+            cwd: cwd.to_owned(),
             embedding,
-            project,
-            session_id: request.session_id,
-            summary: request.summary,
+            project: project.to_owned(),
+            session_id: session_id.to_owned(),
+            summary: summary.to_owned(),
         };
         let stored_id = db::session_log_upsert(&self.pool, &log)
             .await
             .map_err(Error::from)?;
+        self.store_session_chunks(stored_id, &text_chunks).await
+    }
 
+    async fn materialize_session_log(
+        &self,
+        session: &model::SessionSummary,
+        messages: &[model::SessionMessageSummary],
+        summary_override: Option<&str>,
+    ) -> Result<usize, Error> {
+        let (content, summary) = aggregate_session_messages(messages, summary_override);
+        let chunk_count = self
+            .materialize_raw_session_log(
+                &session.external_session_id,
+                &session.cwd,
+                &session.project,
+                &content,
+                &summary,
+            )
+            .await?;
+        db::update_session_finalized(&self.pool, session.id, Utc::now())
+            .await
+            .map_err(Error::from)?;
+        Ok(chunk_count)
+    }
+
+    async fn store_session_chunks(
+        &self,
+        stored_id: Uuid,
+        text_chunks: &[String],
+    ) -> Result<usize, Error> {
         let mut chunks = Vec::with_capacity(text_chunks.len());
         for (index, text) in text_chunks.iter().enumerate() {
             let chunk_embedding = self.embed_client.embed(text, "").await?;
@@ -317,6 +567,64 @@ impl MemoryApp {
             .map_err(Error::from)?;
         Ok(chunks.len())
     }
+}
+
+fn aggregate_session_messages(
+    messages: &[model::SessionMessageSummary],
+    summary_override: Option<&str>,
+) -> (String, String) {
+    let mut content = String::new();
+    let mut prompts = Vec::new();
+
+    for message in messages {
+        let label = format_session_label(message);
+        if message.role == "user" {
+            prompts.push(message.content.clone());
+        }
+        content.push_str(&label);
+        content.push_str(": ");
+        content.push_str(&message.content);
+        content.push('\n');
+    }
+
+    let mut summary = summary_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| prompts.join(" | "));
+    truncate_to_char_boundary(&mut summary, 2_000);
+    truncate_to_char_boundary(&mut content, 50_000);
+    (content, summary)
+}
+
+fn format_session_label(message: &model::SessionMessageSummary) -> String {
+    let base = match message.role.as_str() {
+        "assistant" => "Assistant",
+        "system" => "System",
+        "tool" => "Tool",
+        _ => "User",
+    };
+    if message.agent.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base} ({})", message.agent)
+    }
+}
+
+fn project_from_cwd(cwd: &str) -> String {
+    cwd.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn truncate_to_char_boundary(s: &mut String, max_len: usize) {
+    if s.len() <= max_len {
+        return;
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 pub(crate) fn outer_rrf(

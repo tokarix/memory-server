@@ -4,7 +4,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    Category, Memory, MemorySummary, SessionLog, SessionLogChunk, SessionLogSummary,
+    Category, Memory, MemorySummary, Session, SessionLog, SessionLogChunk, SessionLogSummary,
+    SessionMessage, SessionMessageSummary, SessionSummary,
 };
 
 pub async fn all_embeddings(
@@ -33,12 +34,75 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .await
 }
 
+pub async fn create_session(
+    pool: &PgPool,
+    session: &Session,
+) -> Result<SessionSummary, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO sessions (id, created_at, updated_at, ended_at, cwd, project, external_session_id, agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (external_session_id) DO UPDATE SET
+            updated_at = EXCLUDED.updated_at,
+            cwd = EXCLUDED.cwd,
+            project = EXCLUDED.project,
+            agent = CASE
+                WHEN EXCLUDED.agent = '' THEN sessions.agent
+                ELSE EXCLUDED.agent
+            END
+         RETURNING id, created_at, updated_at, ended_at, cwd, project, external_session_id, agent",
+    )
+    .bind(session.id)
+    .bind(session.created_at)
+    .bind(session.updated_at)
+    .bind(session.ended_at)
+    .bind(&session.cwd)
+    .bind(&session.project)
+    .bind(&session.external_session_id)
+    .bind(&session.agent)
+    .fetch_one(pool)
+    .await?;
+    row_to_session_summary(&row)
+}
+
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM memories WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn append_session_message(
+    pool: &PgPool,
+    message: &SessionMessage,
+) -> Result<SessionMessageSummary, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO session_messages (id, session_id, created_at, agent, role, kind, content, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, session_id, created_at, agent, role, kind, content, metadata",
+    )
+    .bind(message.id)
+    .bind(message.session_id)
+    .bind(message.created_at)
+    .bind(&message.agent)
+    .bind(&message.role)
+    .bind(&message.kind)
+    .bind(&message.content)
+    .bind(&message.metadata)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query(
+        "UPDATE sessions
+         SET updated_at = GREATEST(updated_at, $2)
+         WHERE id = $1",
+    )
+    .bind(message.session_id)
+    .bind(message.created_at)
+    .execute(pool)
+    .await?;
+
+    row_to_session_message_summary(&row)
 }
 
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx::Error> {
@@ -50,6 +114,18 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx:
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(row_to_summary).transpose()
+}
+
+pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Option<SessionSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, created_at, updated_at, ended_at, cwd, project, external_session_id, agent
+         FROM sessions
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_session_summary).transpose()
 }
 
 pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
@@ -94,6 +170,61 @@ pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary
     .bind(&categories)
     .fetch_all(pool)
     .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
+pub async fn list_plan_review_queue(
+    pool: &PgPool,
+    project: &str,
+    limit: i64,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+         FROM memories
+         WHERE project = $1
+           AND category = $2
+           AND tags @> ARRAY['review-needed']::TEXT[]
+         ORDER BY updated_at DESC
+         LIMIT $3",
+    )
+    .bind(project)
+    .bind(Category::Plan)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
+pub async fn list_rules(
+    pool: &PgPool,
+    project: &str,
+    include_general: bool,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let rows = if include_general && project != crate::app::GENERAL_RULE_PROJECT {
+        sqlx::query(
+            "SELECT id, category, content, created_at, project, summary, tags, updated_at
+             FROM memories
+             WHERE category = $1
+               AND (project = $2 OR project = $3)
+             ORDER BY CASE WHEN project = $3 THEN 0 ELSE 1 END, updated_at DESC",
+        )
+        .bind(Category::Rule)
+        .bind(project)
+        .bind(crate::app::GENERAL_RULE_PROJECT)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT id, category, content, created_at, project, summary, tags, updated_at
+             FROM memories
+             WHERE category = $1 AND project = $2
+             ORDER BY updated_at DESC",
+        )
+        .bind(Category::Rule)
+        .bind(project)
+        .fetch_all(pool)
+        .await?
+    };
     rows.iter().map(row_to_summary).collect()
 }
 
@@ -147,6 +278,22 @@ pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
 
 pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
+}
+
+pub async fn list_session_messages(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<SessionMessageSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, session_id, created_at, agent, role, kind, content, metadata
+         FROM session_messages
+         WHERE session_id = $1
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_session_message_summary).collect()
 }
 
 pub async fn session_log_search(
@@ -265,6 +412,23 @@ pub async fn session_log_upsert(pool: &PgPool, log: &SessionLog) -> Result<Uuid,
     .fetch_one(pool)
     .await?;
     row.try_get("id")
+}
+
+pub async fn update_session_finalized(
+    pool: &PgPool,
+    id: Uuid,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET updated_at = $2, ended_at = COALESCE(ended_at, $2)
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(updated_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn update(
@@ -412,6 +576,34 @@ fn row_to_session_log_summary(
         project: row.try_get("project")?,
         session_id: row.try_get("session_id")?,
         summary: row.try_get("summary")?,
+    })
+}
+
+fn row_to_session_message_summary(
+    row: &sqlx::postgres::PgRow,
+) -> Result<SessionMessageSummary, sqlx::Error> {
+    Ok(SessionMessageSummary {
+        agent: row.try_get("agent")?,
+        content: row.try_get("content")?,
+        created_at: row.try_get("created_at")?,
+        id: row.try_get("id")?,
+        kind: row.try_get("kind")?,
+        metadata: row.try_get("metadata")?,
+        role: row.try_get("role")?,
+        session_id: row.try_get("session_id")?,
+    })
+}
+
+fn row_to_session_summary(row: &sqlx::postgres::PgRow) -> Result<SessionSummary, sqlx::Error> {
+    Ok(SessionSummary {
+        agent: row.try_get("agent")?,
+        created_at: row.try_get("created_at")?,
+        cwd: row.try_get("cwd")?,
+        ended_at: row.try_get("ended_at")?,
+        external_session_id: row.try_get("external_session_id")?,
+        id: row.try_get("id")?,
+        project: row.try_get("project")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
