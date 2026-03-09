@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         embed_client,
         config.expand_model,
+        config.generate_num_ctx,
         http,
         config.ollama_url,
         config.rerank_model,

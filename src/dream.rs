@@ -41,6 +41,7 @@ pub async fn run(
     ollama_url: &str,
     dream_model: &str,
     dry_run: bool,
+    num_ctx: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let projects = db::list_projects(pool).await?;
     tracing::info!(count = projects.len(), "discovered projects");
@@ -71,6 +72,7 @@ pub async fn run(
             ollama_url,
             dream_model,
             dry_run,
+            num_ctx,
             &merge_candidates,
         )
         .await?;
@@ -80,6 +82,7 @@ pub async fn run(
             ollama_url,
             dream_model,
             dry_run,
+            num_ctx,
             &stale_candidates,
             &merged_ids,
         )
@@ -97,6 +100,7 @@ async fn apply_merges(
     ollama_url: &str,
     dream_model: &str,
     dry_run: bool,
+    num_ctx: u32,
     candidates: &[MergeCandidate],
 ) -> Result<HashSet<Uuid>, Box<dyn std::error::Error>> {
     let mut merged_ids: HashSet<Uuid> = HashSet::new();
@@ -136,7 +140,7 @@ async fn apply_merges(
             continue;
         }
 
-        match llm_merge(http, ollama_url, dream_model, &mem_a, &mem_b).await {
+        match llm_merge(http, ollama_url, dream_model, num_ctx, &mem_a, &mem_b).await {
             Ok(merged) => {
                 let embedding = embed_client.embed(&merged.summary, &merged.content).await?;
                 db::update(
@@ -178,6 +182,7 @@ async fn apply_prunes(
     ollama_url: &str,
     dream_model: &str,
     dry_run: bool,
+    num_ctx: u32,
     candidates: &[StaleCandidate],
     merged_ids: &HashSet<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -209,7 +214,7 @@ async fn apply_prunes(
             continue;
         }
 
-        match llm_prune(http, ollama_url, dream_model, &memory).await {
+        match llm_prune(http, ollama_url, dream_model, num_ctx, &memory).await {
             Ok(decision) => {
                 if decision.keep {
                     tracing::info!(
@@ -327,6 +332,7 @@ async fn llm_merge(
     http: &reqwest::Client,
     url: &str,
     model: &str,
+    num_ctx: u32,
     a: &crate::model::MemorySummary,
     b: &crate::model::MemorySummary,
 ) -> Result<MergeResponse, Box<dyn std::error::Error>> {
@@ -347,7 +353,7 @@ Respond with ONLY a JSON object (no markdown, no explanation):
         a.summary, a.content, b.summary, b.content
     );
 
-    let response = ollama::generate(http, url, model, &prompt).await?;
+    let response = ollama::generate(http, url, model, num_ctx, &prompt).await?;
     let merged: MergeResponse = serde_json::from_str(response.trim())?;
     Ok(merged)
 }
@@ -356,6 +362,7 @@ async fn llm_prune(
     http: &reqwest::Client,
     url: &str,
     model: &str,
+    num_ctx: u32,
     memory: &crate::model::MemorySummary,
 ) -> Result<PruneResponse, Box<dyn std::error::Error>> {
     let prompt = format!(
@@ -377,7 +384,7 @@ Respond with ONLY a JSON object (no markdown, no explanation):
         memory.updated_at.format("%Y-%m-%d"),
     );
 
-    let response = ollama::generate(http, url, model, &prompt).await?;
+    let response = ollama::generate(http, url, model, num_ctx, &prompt).await?;
     let decision: PruneResponse = serde_json::from_str(response.trim())?;
     Ok(decision)
 }

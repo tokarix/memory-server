@@ -10,10 +10,11 @@ pub async fn expand_query(
     http: &reqwest::Client,
     ollama_url: &str,
     model: &str,
+    num_ctx: u32,
     query: &str,
 ) -> Vec<String> {
     let prompt = PROMPT_TEMPLATE.replace("{query}", query);
-    let response = match ollama::generate(http, ollama_url, model, &prompt).await {
+    let response = match ollama::generate(http, ollama_url, model, num_ctx, &prompt).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("query expansion failed: {e:#?}");

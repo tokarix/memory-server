@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-const NUM_CTX: u32 = 8192;
-
 #[derive(Serialize)]
 struct GenerateOptions {
     num_ctx: u32,
@@ -26,11 +24,12 @@ pub async fn generate(
     http: &reqwest::Client,
     url: &str,
     model: &str,
+    num_ctx: u32,
     prompt: &str,
 ) -> Result<String, Error> {
     let request = GenerateRequest {
         model,
-        options: GenerateOptions { num_ctx: NUM_CTX },
+        options: GenerateOptions { num_ctx },
         prompt,
         stream: false,
     };

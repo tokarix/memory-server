@@ -24,6 +24,7 @@ const DEFAULT_MIN_SIMILARITY: f64 = 0.5;
 pub struct MemoryServer {
     embed_client: Arc<embed::Client>,
     expand_model: String,
+    generate_num_ctx: u32,
     http: reqwest::Client,
     ollama_url: String,
     pool: PgPool,
@@ -121,6 +122,7 @@ impl MemoryServer {
         pool: PgPool,
         embed_client: Arc<embed::Client>,
         expand_model: String,
+        generate_num_ctx: u32,
         http: reqwest::Client,
         ollama_url: String,
         rerank_model: String,
@@ -128,6 +130,7 @@ impl MemoryServer {
         Self {
             embed_client,
             expand_model,
+            generate_num_ctx,
             http,
             ollama_url,
             pool,
@@ -246,6 +249,7 @@ impl MemoryServer {
             &self.http,
             &self.ollama_url,
             &self.expand_model,
+            self.generate_num_ctx,
             &params.query,
         )
         .await;
@@ -284,6 +288,7 @@ impl MemoryServer {
             &self.http,
             &self.ollama_url,
             &self.rerank_model,
+            self.generate_num_ctx,
             &params.query,
             results,
         )

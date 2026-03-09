@@ -20,6 +20,7 @@ pub async fn rerank(
     http: &reqwest::Client,
     ollama_url: &str,
     model: &str,
+    num_ctx: u32,
     query: &str,
     results: Vec<(model::MemorySummary, f64)>,
 ) -> Vec<(model::MemorySummary, f64)> {
@@ -40,7 +41,7 @@ pub async fn rerank(
         .replace("{query}", query)
         .replace("{candidates}", &candidates);
 
-    let response = match ollama::generate(http, ollama_url, model, &prompt).await {
+    let response = match ollama::generate(http, ollama_url, model, num_ctx, &prompt).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("rerank LLM call failed: {e:#?}");

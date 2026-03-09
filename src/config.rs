@@ -10,6 +10,8 @@ pub struct Config {
     pub dream_model: String,
     #[serde(default = "default_expand_model")]
     pub expand_model: String,
+    #[serde(default = "default_generate_num_ctx")]
+    pub generate_num_ctx: u32,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
     #[serde(default = "default_ollama_url")]
@@ -32,6 +34,7 @@ impl Default for Config {
             database_url: default_database_url(),
             dream_model: default_dream_model(),
             expand_model: default_expand_model(),
+            generate_num_ctx: default_generate_num_ctx(),
             ollama_model: default_ollama_model(),
             ollama_url: default_ollama_url(),
             rerank_model: default_rerank_model(),
@@ -41,6 +44,10 @@ impl Default for Config {
 
 fn default_database_url() -> String {
     "postgres://memory:memory@localhost/memory".to_owned()
+}
+
+fn default_generate_num_ctx() -> u32 {
+    8192
 }
 
 fn default_dream_model() -> String {
@@ -76,6 +83,7 @@ mod tests {
         );
         assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.expand_model, "llama3.1");
+        assert_eq!(config.generate_num_ctx, 8192);
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.rerank_model, "llama3.1");
@@ -101,6 +109,7 @@ mod tests {
         );
         assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.expand_model, "llama3.1");
+        assert_eq!(config.generate_num_ctx, 8192);
         assert_eq!(config.ollama_model, "bge-m3");
         assert_eq!(config.ollama_url, "http://localhost:11434");
         assert_eq!(config.rerank_model, "llama3.1");
