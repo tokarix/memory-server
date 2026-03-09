@@ -1,24 +1,27 @@
 # memory-server
 
-Semantic memory MCP server backed by PostgreSQL, pgvector, and local
-Ollama models.
+Semantic memory service and MCP adapter backed by PostgreSQL, pgvector,
+and local Ollama models.
 
 Current layout:
 
 ```text
-agent client <--stdio--> memory-server / memory-mcp
-                                     |
-                                     +--> shared app core <---> PostgreSQL + pgvector
-                                                          |
-                                                          +--> Ollama
-
-web/admin/other clients <--HTTP--> memoryd
+agent client <--stdio--> memory-mcp <--HTTP--> memoryd
+                                          |
+                                          +--> memory-common
+                                          |
+                                          +--> PostgreSQL + pgvector
+                                          |
+                                          +--> Ollama
 ```
 
-Planned HTTP split:
-- [`docs/http-api-v1.md`](docs/http-api-v1.md): proposed `memoryd` +
-  `memory-mcp` architecture with `/api/v1`, generated OpenAPI, and
-  Scalar docs
+Workspace crates:
+
+- `memory-common`: shared config, models, transcript parsing, error
+  types, and HTTP/MCP payload types
+- `memoryd`: the HTTP service plus `dream` and `ingest` maintenance
+  binaries
+- `memory-mcp`: the stdio MCP adapter that talks to `memoryd` over HTTP
 
 ## Current features
 
@@ -114,19 +117,12 @@ cargo build --release
 ### 5. Run
 
 ```sh
-RUST_LOG=info ./target/release/memory-server ./config.toml
-```
-
-Alternative binaries:
-
-```sh
 RUST_LOG=info ./target/release/memory-mcp ./config.toml
 RUST_LOG=info ./target/release/memoryd ./config.toml
 ```
 
-`memory-server` remains the monolith entrypoint and runs migrations
-locally. `memoryd` runs the HTTP service on `http_bind`, and
-`memory-mcp` is the stdio adapter that calls `memoryd_url`.
+`memoryd` runs the HTTP service on `http_bind`. `memory-mcp` is the
+stdio adapter that calls `memoryd_url`.
 
 ## MCP client setup
 
