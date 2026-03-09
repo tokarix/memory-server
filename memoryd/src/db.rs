@@ -163,6 +163,26 @@ pub async fn get_session(pool: &PgPool, id: Uuid) -> Result<Option<SessionSummar
     row.as_ref().map(row_to_session_summary).transpose()
 }
 
+/// Fetch one finalized session log by ID.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn get_session_log(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<SessionLogSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, content, created_at, cwd, project, session_id, summary
+         FROM session_logs
+         WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_session_log_summary).transpose()
+}
+
 /// Insert a new memory row.
 ///
 /// # Errors
@@ -335,10 +355,73 @@ pub async fn list(
 ///
 /// Returns an error if the query fails.
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    let rows = sqlx::query("SELECT DISTINCT project FROM memories ORDER BY project")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT project
+         FROM (
+             SELECT project FROM memories
+             UNION
+             SELECT project FROM session_logs
+             UNION
+             SELECT project FROM sessions
+         ) AS projects
+         WHERE project <> ''
+         ORDER BY project",
+    )
+    .fetch_all(pool)
+    .await?;
     rows.iter().map(|row| row.try_get("project")).collect()
+}
+
+/// List finalized session logs for a project.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_session_logs(
+    pool: &PgPool,
+    project: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SessionLogSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, content, created_at, cwd, project, session_id, summary
+         FROM session_logs
+         WHERE project = $1
+         ORDER BY created_at DESC, id DESC
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(project)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_session_log_summary).collect()
+}
+
+/// List normalized sessions for a project.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_sessions(
+    pool: &PgPool,
+    project: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<SessionSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, created_at, updated_at, ended_at, cwd, project, external_session_id, agent
+         FROM sessions
+         WHERE project = $1
+         ORDER BY updated_at DESC, id DESC
+         LIMIT $2 OFFSET $3",
+    )
+    .bind(project)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_session_summary).collect()
 }
 
 /// Run all SQL migrations.

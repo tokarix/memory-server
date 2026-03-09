@@ -1,0 +1,23 @@
+{% extends "ui/base.html" %}
+
+{% block title %}memoryd projects{% endblock %}
+
+{% block content %}
+<div class="stack">
+  <section class="panel stack">
+    <div class="eyebrow">Projects</div>
+    <h1>Browse stored projects</h1>
+    <p class="muted">Each project page shows recent memories, finalized session logs, normalized sessions, and server-side search.</p>
+  </section>
+
+  <section class="grid">
+    {% for project in projects %}
+    <a class="panel stack" href="/ui/projects/{{ project.name }}">
+      <div class="eyebrow">Project</div>
+      <h2>{{ project.name }}</h2>
+      <p class="muted">Open the project browser and search its stored records.</p>
+    </a>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

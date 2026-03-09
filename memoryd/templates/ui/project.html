@@ -1,0 +1,85 @@
+{% extends "ui/base.html" %}
+
+{% block title %}memoryd {{ project }}{% endblock %}
+
+{% block content %}
+<div class="stack">
+  <section class="panel stack">
+    <div class="eyebrow">Project</div>
+    <h1>{{ project }}</h1>
+    <p class="muted">Search memories and finalized session logs, then browse the latest stored records below.</p>
+  </section>
+
+  <section class="panel stack">
+    <form
+      class="searchbar"
+      action="/ui/projects/{{ project }}"
+      method="get"
+      hx-get="/ui/projects/{{ project }}/search"
+      hx-target="#search-results"
+      hx-push-url="true"
+      hx-trigger="submit"
+    >
+      <input type="search" name="q" value="{{ query }}" placeholder="Search this project's memories and session logs">
+      <select name="category">
+        <option value=""{% if selected_category == "" %} selected{% endif %}>All memory categories</option>
+        <option value="context"{% if selected_category == "context" %} selected{% endif %}>context</option>
+        <option value="decision"{% if selected_category == "decision" %} selected{% endif %}>decision</option>
+        <option value="error_fix"{% if selected_category == "error_fix" %} selected{% endif %}>error_fix</option>
+        <option value="plan"{% if selected_category == "plan" %} selected{% endif %}>plan</option>
+        <option value="rule"{% if selected_category == "rule" %} selected{% endif %}>rule</option>
+      </select>
+      <button type="submit">Search</button>
+    </form>
+    <div id="search-results">
+      {{ search_results|safe }}
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel stack">
+      <div class="eyebrow">Memories</div>
+      <h2>Recent memories</h2>
+      <div class="card-list">
+        {% for memory in memories %}
+        <article class="card">
+          <div class="badge">{{ memory.category }}</div>
+          <h3><a href="/ui/memories/{{ memory.id }}">{{ memory.summary }}</a></h3>
+          <p class="muted">{{ memory.updated_at }} | tags: {{ memory.tags }}</p>
+          <p>{{ memory.preview }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="panel stack">
+      <div class="eyebrow">Session Logs</div>
+      <h2>Recent finalized logs</h2>
+      <div class="card-list">
+        {% for session_log in session_logs %}
+        <article class="card">
+          <h3><a href="/ui/session-logs/{{ session_log.id }}">{{ session_log.summary }}</a></h3>
+          <p class="muted">{{ session_log.created_at }} | session {{ session_log.session_id }}</p>
+          <p class="muted">{{ session_log.cwd }}</p>
+          <p>{{ session_log.preview }}</p>
+        </article>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="panel stack">
+    <div class="eyebrow">Sessions</div>
+    <h2>Recent normalized sessions</h2>
+    <div class="card-list">
+      {% for session in sessions %}
+      <article class="card">
+        <h3><a href="/ui/sessions/{{ session.id }}">{{ session.external_session_id }}</a></h3>
+        <p class="muted">agent: {{ session.agent }} | created: {{ session.created_at }} | updated: {{ session.updated_at }} | ended: {{ session.ended_at }}</p>
+        <p class="muted">{{ session.cwd }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}

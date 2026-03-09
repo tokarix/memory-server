@@ -1,0 +1,33 @@
+<div class="stack">
+  {% if query != "" %}
+  <div class="eyebrow">Search</div>
+  <h2>Results for "{{ query }}"</h2>
+  {% if fallback %}
+  <p class="muted">No memory hits cleared reranking. Showing finalized session logs instead.</p>
+  {% endif %}
+  {% if has_results %}
+  <div class="card-list">
+    {% for memory in memories %}
+    <article class="card">
+      <div class="badge">{{ memory.category }}</div>
+      <h3><a href="/ui/memories/{{ memory.id }}">{{ memory.summary }}</a></h3>
+      <p class="muted">score: {{ memory.similarity }} | tags: {{ memory.tags }}</p>
+      <p>{{ memory.preview }}</p>
+    </article>
+    {% endfor %}
+    {% for session_log in session_logs %}
+    <article class="card">
+      <div class="badge">session_log</div>
+      <h3><a href="/ui/session-logs/{{ session_log.id }}">{{ session_log.summary }}</a></h3>
+      <p class="muted">score: {{ session_log.similarity }} | {{ session_log.created_at }} | session {{ session_log.session_id }}</p>
+      <p>{{ session_log.preview }}</p>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">No matches found.</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">Enter a search query to run hybrid memory search for this project.</p>
+  {% endif %}
+</div>

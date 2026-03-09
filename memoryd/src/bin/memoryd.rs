@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Router;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
-use memoryd::{api, app::MemoryApp, config, db, embed};
+use memoryd::{api, app::MemoryApp, config, db, embed, ui};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listener = tokio::net::TcpListener::bind(&config.http_bind).await?;
-    let router: Router = api::router(state).layer(
+    let router: Router = api::router(state.clone()).merge(ui::router(state)).layer(
         TraceLayer::new_for_http()
             .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
             .on_request(DefaultOnRequest::new().level(tracing::Level::INFO))

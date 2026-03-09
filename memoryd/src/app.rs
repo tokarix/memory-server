@@ -159,6 +159,20 @@ impl MemoryApp {
         db::get(&self.pool, id).await.map_err(Error::from)
     }
 
+    /// Fetch one finalized session log by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn get_session_log(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<model::SessionLogSummary>, Error> {
+        db::get_session_log(&self.pool, id)
+            .await
+            .map_err(Error::from)
+    }
+
     /// List memories for a project.
     ///
     /// # Errors
@@ -179,6 +193,51 @@ impl MemoryApp {
         )
         .await
         .map_err(Error::from)
+    }
+
+    /// List all known projects across memories and sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn list_projects(&self) -> Result<Vec<String>, Error> {
+        db::list_projects(&self.pool).await.map_err(Error::from)
+    }
+
+    /// List finalized session logs for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn list_session_logs(
+        &self,
+        project: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<model::SessionLogSummary>, Error> {
+        let limit = limit.unwrap_or(20).clamp(1, 100);
+        let offset = offset.unwrap_or(0).max(0);
+        db::list_session_logs(&self.pool, project, limit, offset)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// List normalized sessions for a project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn list_sessions(
+        &self,
+        project: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<model::SessionSummary>, Error> {
+        let limit = limit.unwrap_or(20).clamp(1, 100);
+        let offset = offset.unwrap_or(0).max(0);
+        db::list_sessions(&self.pool, project, limit, offset)
+            .await
+            .map_err(Error::from)
     }
 
     /// Load core memories for a project.
@@ -265,6 +324,29 @@ impl MemoryApp {
             .materialize_session_log(&session, &messages, request.summary.as_deref())
             .await?;
         Ok(Some(finalized))
+    }
+
+    /// Fetch one normalized session by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn get_session(&self, id: Uuid) -> Result<Option<model::SessionSummary>, Error> {
+        db::get_session(&self.pool, id).await.map_err(Error::from)
+    }
+
+    /// Fetch all messages for one normalized session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn list_session_messages(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<model::SessionMessageSummary>, Error> {
+        db::list_session_messages(&self.pool, session_id)
+            .await
+            .map_err(Error::from)
     }
 
     /// Load durable rules for a project.

@@ -8,5 +8,6 @@ pub mod embed;
 pub mod expand;
 pub mod ollama;
 pub mod rerank;
+pub mod ui;
 
 pub use memory_common::{config, error, model, protocol, transcript};

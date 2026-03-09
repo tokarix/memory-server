@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}memoryd{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f3ea;
+      --panel: #fffdf8;
+      --ink: #1f1b16;
+      --muted: #6b6256;
+      --line: #d9cfbe;
+      --accent: #0f766e;
+      --accent-soft: #d7f3ef;
+      --danger: #7f1d1d;
+      --shadow: 0 10px 30px rgba(31, 27, 22, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 28rem),
+        linear-gradient(180deg, #fbf7ef 0%, var(--bg) 100%);
+      color: var(--ink);
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .shell {
+      width: min(1100px, calc(100vw - 2rem));
+      margin: 0 auto;
+      padding: 1.5rem 0 4rem;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .brand {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: lowercase;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      padding: 1rem 1.1rem;
+    }
+
+    .stack {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .eyebrow {
+      color: var(--muted);
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.35rem;
+    }
+
+    h1, h2, h3 {
+      margin: 0 0 0.6rem;
+      line-height: 1.1;
+    }
+
+    p {
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    code, pre {
+      font-family: "Iosevka Fixed", "SFMono-Regular", Consolas, monospace;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #f6efe2;
+      padding: 1rem;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+    }
+
+    .meta {
+      display: grid;
+      gap: 0.4rem;
+      font-size: 0.94rem;
+    }
+
+    .meta strong {
+      display: inline-block;
+      min-width: 8rem;
+    }
+
+    .card-list {
+      display: grid;
+      gap: 0.9rem;
+    }
+
+    .card {
+      display: grid;
+      gap: 0.5rem;
+      padding: 0.95rem;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #fffaf2;
+    }
+
+    .badge {
+      display: inline-block;
+      width: fit-content;
+      padding: 0.22rem 0.55rem;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 700;
+    }
+
+    .searchbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 180px auto;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    input, select, button {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      padding: 0.8rem 0.9rem;
+      font: inherit;
+      color: inherit;
+      background: #fff;
+    }
+
+    button {
+      cursor: pointer;
+      background: var(--ink);
+      color: #fff;
+      border-color: var(--ink);
+    }
+
+    .danger {
+      background: var(--danger);
+      border-color: var(--danger);
+    }
+
+    @media (max-width: 760px) {
+      .searchbar {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>
+        <div class="brand"><a href="/ui">memoryd</a></div>
+        <div class="muted">Browsable storage for memories, session logs, and sessions.</div>
+      </div>
+      <form action="/ui/logout" method="post">
+        <button type="submit" class="danger">Log out</button>
+      </form>
+    </div>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

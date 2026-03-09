@@ -1,0 +1,25 @@
+{% extends "ui/base.html" %}
+
+{% block title %}memory {{ memory.id }}{% endblock %}
+
+{% block content %}
+<div class="stack">
+  <section class="panel stack">
+    <div class="eyebrow">Memory</div>
+    <h1>{{ memory.summary }}</h1>
+    <div class="meta">
+      <div><strong>ID</strong> {{ memory.id }}</div>
+      <div><strong>Project</strong> <a href="/ui/projects/{{ memory.project }}">{{ memory.project }}</a></div>
+      <div><strong>Category</strong> {{ memory.category }}</div>
+      <div><strong>Created</strong> {{ memory.created_at }}</div>
+      <div><strong>Updated</strong> {{ memory.updated_at }}</div>
+      <div><strong>Tags</strong> {{ memory.tags }}</div>
+    </div>
+  </section>
+
+  <section class="panel stack">
+    <div class="eyebrow">Content</div>
+    <pre>{{ memory.content }}</pre>
+  </section>
+</div>
+{% endblock %}

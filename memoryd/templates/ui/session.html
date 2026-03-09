@@ -1,0 +1,35 @@
+{% extends "ui/base.html" %}
+
+{% block title %}session {{ session.id }}{% endblock %}
+
+{% block content %}
+<div class="stack">
+  <section class="panel stack">
+    <div class="eyebrow">Normalized Session</div>
+    <h1>{{ session.external_session_id }}</h1>
+    <div class="meta">
+      <div><strong>ID</strong> {{ session.id }}</div>
+      <div><strong>Project</strong> <a href="/ui/projects/{{ session.project }}">{{ session.project }}</a></div>
+      <div><strong>Agent</strong> {{ session.agent }}</div>
+      <div><strong>Created</strong> {{ session.created_at }}</div>
+      <div><strong>Updated</strong> {{ session.updated_at }}</div>
+      <div><strong>Ended</strong> {{ session.ended_at }}</div>
+      <div><strong>CWD</strong> {{ session.cwd }}</div>
+    </div>
+  </section>
+
+  <section class="panel stack">
+    <div class="eyebrow">Messages</div>
+    <h2>Session transcript</h2>
+    <div class="card-list">
+      {% for message in messages %}
+      <article class="card">
+        <p class="muted">{{ message.created_at }} | role: {{ message.role }} | kind: {{ message.kind }} | agent: {{ message.agent }}</p>
+        <p class="muted">metadata: {{ message.metadata }}</p>
+        <pre>{{ message.content }}</pre>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}
