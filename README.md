@@ -367,6 +367,34 @@ and session events as the raw chronology.
 - `plan_review_submit` stores a `decision` memory linked to the plan and
   updates the original plan tags from `review-needed` to `reviewed`.
 
+## Skills
+
+Repo-managed skills live under [`skills/`](skills/).
+
+Current shared skill:
+
+- [`skills/plan-review/SKILL.md`](skills/plan-review/SKILL.md): reusable
+  workflow for storing plans tagged `review-needed` and reviewing them
+  with `plan_review_queue` and `plan_review_submit`
+
+Install symlink(s) for local clients with:
+
+```sh
+./scripts/install-skills.sh all
+```
+
+Or target one client:
+
+```sh
+./scripts/install-skills.sh codex
+./scripts/install-skills.sh claude
+```
+
+This symlinks the repo-managed skill into:
+
+- `~/.codex/skills/plan-review`
+- `~/.claude/skills/plan-review`
+
 ## Development
 
 Run tests with:
