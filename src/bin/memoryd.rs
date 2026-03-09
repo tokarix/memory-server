@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
 use memory_server::{api, app::MemoryApp, config, db, embed};
 
@@ -51,7 +51,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let listener = tokio::net::TcpListener::bind(&config.http_bind).await?;
-    let router: Router = api::router(state).layer(TraceLayer::new_for_http());
+    let router: Router = api::router(state).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+            .on_request(DefaultOnRequest::new().level(tracing::Level::INFO))
+            .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+    );
     tracing::info!("starting memoryd HTTP server on {}", config.http_bind);
     axum::serve(listener, router).await?;
 
