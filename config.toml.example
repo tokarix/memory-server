@@ -1,3 +1,7 @@
 database_url = "postgres://memory:memory@localhost/memory"
-ollama_model = "bge-m3"
 ollama_url = "http://localhost:11434"
+ollama_model = "bge-m3"
+expand_model = "llama3.1"
+rerank_model = "llama3.1"
+dream_model = "llama3.1"
+generate_num_ctx = 8192
