@@ -3,6 +3,10 @@
 Semantic memory MCP server for Claude Code. Provides persistent,
 searchable memory across sessions using vector similarity search.
 
+See `docs/http-api-v1.md` for the planned split into `memoryd` plus a
+thin `memory-mcp` adapter, with a versioned `/api/v1` HTTP API and
+Scalar docs.
+
 Claude Code loses context between sessions and within long
 conversations. Rules get forgotten, past decisions aren't referenced,
 errors get re-debugged. This server gives Claude Code a structured,
