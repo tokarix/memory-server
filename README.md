@@ -387,14 +387,11 @@ manage the workflow.
 
 Repo-managed skills live under [`skills/`](skills/).
 
-Current shared skills:
+Current shared skill:
 
-- [`skills/code-review/SKILL.md`](skills/code-review/SKILL.md): reusable
-  workflow for requesting and performing code reviews with
+- [`skills/review/SKILL.md`](skills/review/SKILL.md): unified workflow
+  for requesting and performing reviews (plans, code, etc.) with
   `review_queue` and `review_submit`
-- [`skills/plan-review/SKILL.md`](skills/plan-review/SKILL.md): reusable
-  workflow for storing plans tagged `review-needed` and reviewing them
-  with `review_queue` and `review_submit`
 
 Install symlink(s) for local clients with:
 
@@ -409,12 +406,10 @@ Or target one client:
 ./scripts/install-skills.sh claude
 ```
 
-This symlinks the repo-managed skills into:
+This symlinks the repo-managed skill into:
 
-- `~/.codex/skills/code-review`
-- `~/.codex/skills/plan-review`
-- `~/.claude/skills/code-review`
-- `~/.claude/skills/plan-review`
+- `~/.codex/skills/review`
+- `~/.claude/skills/review`
 
 ## Development
 

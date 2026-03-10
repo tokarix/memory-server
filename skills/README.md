@@ -5,11 +5,8 @@ clients.
 
 Current layout:
 
-- `code-review/`: shared workflow for requesting and performing code
-  reviews through the memory server's review tools
-- `plan-review/`: shared workflow for storing plans tagged
-  `review-needed` and reviewing them through the memory server's
-  review tools
+- `review/`: shared workflow for requesting and performing reviews
+  (plans, code, etc.) through the memory server's review tools
 
 Install local symlinks with:
 
