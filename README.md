@@ -206,8 +206,8 @@ require `Authorization: Bearer <token>`.
 | `session_message_append` | Append a prompt/response/tool event to a shared session |
 | `session_finalize` | Finalize a shared session into searchable chunks |
 | `session_log_store` | Store a full session transcript for archival/search |
-| `plan_review_queue` | List plan memories tagged `review-needed` |
-| `plan_review_submit` | Store a plan review and mark the plan reviewed |
+| `review_queue` | List memories tagged `review-needed`, with optional category filter |
+| `review_submit` | Store a review decision and mark the original reviewed |
 
 `memory_search` behavior:
 - expands the user query with the configured LLM
@@ -359,26 +359,42 @@ duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
 - Keep memory rules focused on durable intent and policy that the model
   must follow but that a shell hook cannot reliably derive on its own.
 
-## Plan Review Workflow
+## Review Workflow
 
-For cross-agent collaboration, use `plan` memories as the handoff object
-and session events as the raw chronology.
+For cross-agent collaboration, use the `review-needed` tag on any memory
+to request review, and the `review_queue`/`review_submit` tools to
+manage the workflow.
+
+### Plan reviews
 
 - Claude stores a `plan` memory tagged `review-needed`.
-- Codex calls `plan_review_queue(project)` to find pending plan reviews.
-- Codex reviews the plan and calls `plan_review_submit(...)`.
-- `plan_review_submit` stores a `decision` memory linked to the plan and
+- Codex calls `review_queue(project, category: "plan")` to find pending
+  plan reviews.
+- Codex reviews the plan and calls `review_submit(...)`.
+- `review_submit` stores a `decision` memory linked to the plan and
   updates the original plan tags from `review-needed` to `reviewed`.
+
+### Code reviews
+
+- An agent stores a `context` memory tagged `review-needed` and
+  `code-review`, with git range and description in the content.
+- Another agent calls `review_queue(project)` or
+  `review_queue(project, category: "context")` to find pending reviews.
+- The reviewer inspects the code and calls `review_submit(...)`.
+- `review_submit` stores a `decision` memory and retags the original.
 
 ## Skills
 
 Repo-managed skills live under [`skills/`](skills/).
 
-Current shared skill:
+Current shared skills:
 
+- [`skills/code-review/SKILL.md`](skills/code-review/SKILL.md): reusable
+  workflow for requesting and performing code reviews with
+  `review_queue` and `review_submit`
 - [`skills/plan-review/SKILL.md`](skills/plan-review/SKILL.md): reusable
   workflow for storing plans tagged `review-needed` and reviewing them
-  with `plan_review_queue` and `plan_review_submit`
+  with `review_queue` and `review_submit`
 
 Install symlink(s) for local clients with:
 
@@ -393,9 +409,11 @@ Or target one client:
 ./scripts/install-skills.sh claude
 ```
 
-This symlinks the repo-managed skill into:
+This symlinks the repo-managed skills into:
 
+- `~/.codex/skills/code-review`
 - `~/.codex/skills/plan-review`
+- `~/.claude/skills/code-review`
 - `~/.claude/skills/plan-review`
 
 ## Development

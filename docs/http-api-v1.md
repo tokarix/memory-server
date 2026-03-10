@@ -83,8 +83,8 @@ Primary endpoints:
 - `POST /api/v1/sessions/start`
 - `POST /api/v1/sessions/{id}/messages`
 - `POST /api/v1/sessions/{id}/finalize`
-- `GET /api/v1/projects/{project}/plans/review-queue`
-- `POST /api/v1/plans/review`
+- `GET /api/v1/projects/{project}/review-queue`
+- `POST /api/v1/review`
 - `POST /api/v1/session-search`
 
 Notes:
@@ -544,27 +544,36 @@ Behavior:
 This endpoint is a better fit for hooks than trying to store curated
 memories automatically.
 
-### `GET /api/v1/projects/{project}/plans/review-queue`
+### `GET /api/v1/projects/{project}/review-queue`
 
 Purpose:
 
-- list `plan` memories tagged `review-needed`
+- list memories tagged `review-needed`, with optional category filter
 
 Behavior:
 
-- supports a `limit` query parameter
-- intended for cross-agent review handoff
+- supports `category` and `limit` query parameters
+- when `category` is provided, only returns memories of that category
+- intended for cross-agent review handoff (plan reviews, code reviews)
 
-### `POST /api/v1/plans/review`
+### `POST /api/v1/review`
 
 Purpose:
 
-- store a review decision for a plan and mark the plan reviewed
+- store a review decision for a memory and mark it reviewed
+
+Request body:
+
+- `memory_id`: UUID of the memory to review
+- `reviewer`: reviewer identity
+- `verdict`: e.g. `approved`, `changes-requested`, `rejected`
+- `notes`: review notes
+- `project`: optional override project
 
 Behavior:
 
-- stores a `decision` memory linked to the original plan
-- updates the original plan tags by removing `review-needed`
+- stores a `decision` memory linked to the original memory
+- updates the original memory tags by removing `review-needed`
 - adds reviewer/verdict tags for later auditing
 
 ### `POST /api/v1/session-search`
@@ -596,8 +605,8 @@ HTTP endpoint.
 | `session_start`         | `POST /api/v1/sessions/start`            |
 | `session_message_append`| `POST /api/v1/sessions/{id}/messages`    |
 | `session_finalize`      | `POST /api/v1/sessions/{id}/finalize`    |
-| `plan_review_queue`     | `GET /api/v1/projects/{project}/plans/review-queue` |
-| `plan_review_submit`    | `POST /api/v1/plans/review`              |
+| `review_queue`          | `GET /api/v1/projects/{project}/review-queue` |
+| `review_submit`         | `POST /api/v1/review`                    |
 | transcript/session hook | `POST /api/v1/sessions/...`              |
 
 The MCP adapter should remain dumb:
@@ -673,12 +682,12 @@ Compliance verification should be explicit:
 - keep hook logs searchable so later sessions can audit whether the agent
   ignored or never received a rule
 
-## Cross-Agent Plan Review
+## Cross-Agent Review
 
 Recommended durable flow:
 
-- agent A stores a `plan` memory tagged `review-needed`
-- agent B polls `plan_review_queue`
-- agent B writes its review with `plan_review_submit`
+- agent A stores a memory tagged `review-needed` (plan, code review, etc.)
+- agent B polls `review_queue`, optionally filtering by category
+- agent B writes its review with `review_submit`
 - both agents can search raw session chronology separately from durable
-  plan/review memories
+  review memories

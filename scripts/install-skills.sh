@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SKILL_SOURCE="${REPO_ROOT}/skills/plan-review"
+SKILLS=(code-review plan-review)
 
 usage() {
     cat <<'EOF'
@@ -21,12 +21,14 @@ EOF
 
 install_one() {
     local target_root="$1"
-    local target_dir="${target_root}/plan-review"
-
     mkdir -p "$target_root"
-    rm -f "$target_dir"
-    ln -s "$SKILL_SOURCE" "$target_dir"
-    printf 'Installed %s -> %s\n' "$target_dir" "$SKILL_SOURCE"
+    for skill in "${SKILLS[@]}"; do
+        local source="${REPO_ROOT}/skills/${skill}"
+        local target="${target_root}/${skill}"
+        rm -f "$target"
+        ln -s "$source" "$target"
+        printf 'Installed %s -> %s\n' "$target" "$source"
+    done
 }
 
 target="${1:-all}"
