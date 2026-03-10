@@ -18,7 +18,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INGEST="${SCRIPT_DIR}/../target/release/ingest"
-CONFIG="${SCRIPT_DIR}/../config.toml"
 # shellcheck source=hooks/_common.sh
 source "${SCRIPT_DIR}/_common.sh"
 
@@ -36,8 +35,9 @@ if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
 fi
 
 ingest_args=()
-if [ -f "$CONFIG" ]; then
-    ingest_args+=("$CONFIG")
+config="$(config_path)"
+if [ -f "$config" ]; then
+    ingest_args+=("$config")
 fi
 ingest_args+=("$transcript_path")
 
