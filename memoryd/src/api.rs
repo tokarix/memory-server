@@ -14,6 +14,7 @@ use crate::app::{
 };
 use crate::error::Error;
 use crate::model::{Category, MemorySummary, SessionLogSummary};
+use crate::protocol::SubmitReviewDto;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -211,15 +212,6 @@ pub struct AppendSessionMessageDto {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct FinalizeSessionDto {
     pub summary: Option<String>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SubmitReviewDto {
-    pub memory_id: Uuid,
-    pub notes: String,
-    pub project: Option<String>,
-    pub reviewer: String,
-    pub verdict: String,
 }
 
 #[derive(Serialize)]
