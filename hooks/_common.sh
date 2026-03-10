@@ -127,7 +127,7 @@ extract_text() {
                 ""
             end;
 
-        (.message.content // .content // .prompt // .response // .text // .message.text // "")
+        (.last_assistant_message // .message.content // .content // .prompt // .response // .text // .message.text // "")
         | textify
     '
 }
@@ -194,7 +194,7 @@ ensure_remote_session() {
         --arg cwd "$cwd" \
         --arg external_session_id "$session_id" \
         --arg project "$project" \
-        '{agent:($agent|select(length>0)),cwd:$cwd,external_session_id:$external_session_id,project:$project}')"
+        '{agent:($agent|if length>0 then . else null end),cwd:$cwd,external_session_id:$external_session_id,project:$project}')"
     url="$(memoryd_url)/api/v1/sessions/start"
 
     local curl_args=()
@@ -202,12 +202,18 @@ ensure_remote_session() {
         curl_args+=("$arg")
     done < <(auth_args)
 
-    local response
-    response="$(printf '%s' "$payload" | curl -fsS "${curl_args[@]}" \
+    local response http_code
+    response="$(printf '%s' "$payload" | curl -sS "${curl_args[@]}" \
         -H "Content-Type: application/json" \
         -X POST \
         --data-binary @- \
+        -w '\n%{http_code}' \
         "$url")"
+    http_code="$(printf '%s' "$response" | tail -n1)"
+    response="$(printf '%s' "$response" | sed '$d')"
+    if [ "$http_code" != "200" ] && [ "$http_code" != "201" ]; then
+        echo "ensure_remote_session: HTTP ${http_code} from ${url}" >&2
+    fi
     internal_id="$(printf '%s' "$response" | jq -r '.session.id // empty')"
     if [ -n "$internal_id" ]; then
         update_state_file "$session_id" \
@@ -230,13 +236,12 @@ append_remote_message() {
     local metadata="$7"
 
     local payload url
-    payload="$(jq -cn \
+    payload="$(printf '%s' "$content" | jq -Rsc \
         --arg agent "$agent" \
-        --arg content "$content" \
         --arg kind "$kind" \
         --arg metadata "$metadata" \
         --arg role "$role" \
-        '{agent:($agent|select(length>0)),content:$content,kind:$kind,metadata:($metadata|select(length>0)),role:$role}')"
+        '{agent:($agent|if length>0 then . else null end),content:.,kind:$kind,metadata:($metadata|if length>0 then . else null end),role:$role}')"
     url="$(memoryd_url)/api/v1/sessions/${internal_id}/messages"
 
     local curl_args=()
@@ -244,11 +249,17 @@ append_remote_message() {
         curl_args+=("$arg")
     done < <(auth_args)
 
-    printf '%s' "$payload" | curl -fsS "${curl_args[@]}" \
+    local http_code
+    http_code="$(printf '%s' "$payload" | curl -sS "${curl_args[@]}" \
         -H "Content-Type: application/json" \
         -X POST \
         --data-binary @- \
-        "$url" >/dev/null
+        -o /dev/null \
+        -w '%{http_code}' \
+        "$url")"
+    if [ "$http_code" != "200" ] && [ "$http_code" != "201" ]; then
+        echo "append_remote_message: HTTP ${http_code} from ${url}" >&2
+    fi
 }
 
 finalize_remote_session() {
@@ -268,11 +279,17 @@ finalize_remote_session() {
         curl_args+=("$arg")
     done < <(auth_args)
 
-    printf '%s' "$payload" | curl -fsS "${curl_args[@]}" \
+    local http_code
+    http_code="$(printf '%s' "$payload" | curl -sS "${curl_args[@]}" \
         -H "Content-Type: application/json" \
         -X POST \
         --data-binary @- \
-        "$url" >/dev/null
+        -o /dev/null \
+        -w '%{http_code}' \
+        "$url")"
+    if [ "$http_code" != "200" ] && [ "$http_code" != "201" ]; then
+        echo "finalize_remote_session: HTTP ${http_code} from ${url}" >&2
+    fi
 }
 
 summarize_bootstrap() {
