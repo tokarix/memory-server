@@ -238,30 +238,49 @@ pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary
     rows.iter().map(row_to_summary).collect()
 }
 
-/// List plans awaiting review.
+/// List memories awaiting review, optionally filtered by category.
 ///
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn list_plan_review_queue(
+pub async fn list_review_queue(
     pool: &PgPool,
     project: &str,
+    category: Option<&Category>,
     limit: i64,
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at
-         FROM memories
-         WHERE project = $1
-           AND category = $2
-           AND tags @> ARRAY['review-needed']::TEXT[]
-         ORDER BY updated_at DESC
-         LIMIT $3",
-    )
-    .bind(project)
-    .bind(Category::Plan)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let rows = match category {
+        Some(cat) => {
+            sqlx::query(
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                 FROM memories
+                 WHERE project = $1
+                   AND category = $2
+                   AND tags @> ARRAY['review-needed']::TEXT[]
+                 ORDER BY updated_at DESC
+                 LIMIT $3",
+            )
+            .bind(project)
+            .bind(cat)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query(
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                 FROM memories
+                 WHERE project = $1
+                   AND tags @> ARRAY['review-needed']::TEXT[]
+                 ORDER BY updated_at DESC
+                 LIMIT $2",
+            )
+            .bind(project)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+    };
     rows.iter().map(row_to_summary).collect()
 }
 

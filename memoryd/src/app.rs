@@ -585,7 +585,7 @@ impl MemoryApp {
         project: &str,
         limit: i64,
     ) -> Result<Vec<model::MemorySummary>, Error> {
-        db::list_plan_review_queue(&self.pool, project, limit)
+        db::list_review_queue(&self.pool, project, Some(&Category::Plan), limit)
             .await
             .map_err(Error::from)
     }
