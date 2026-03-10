@@ -8,7 +8,7 @@ use crate::protocol::{
     AppendSessionMessageDto, BootstrapEnvelope, CreateSessionDto, DeleteEnvelope,
     FinalizeSessionDto, FinalizeSessionEnvelope, HealthResponse, MemoryEnvelope,
     MemoryListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope, SessionEnvelope,
-    SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitPlanReviewDto,
+    SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitReviewDto,
 };
 use crate::protocol::{
     AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
@@ -243,31 +243,37 @@ impl HttpMemoryClient {
         }
     }
 
-    /// List plans waiting for review.
+    /// List memories waiting for review.
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    pub async fn list_plan_review_queue(
+    pub async fn list_review_queue(
         &self,
         project: &str,
+        category: Option<&model::Category>,
         limit: i64,
     ) -> Result<Vec<model::MemorySummary>, Error> {
-        let mut url = self.url(&["api", "v1", "projects", project, "plans", "review-queue"])?;
-        url.query_pairs_mut()
-            .append_pair("limit", &limit.to_string());
+        let mut url = self.url(&["api", "v1", "projects", project, "review-queue"])?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(cat) = category {
+                query.append_pair("category", &cat.to_string());
+            }
+            query.append_pair("limit", &limit.to_string());
+        }
         let response: MemoryListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(response.memories.into_iter().map(Into::into).collect())
     }
 
-    /// Submit a plan review decision.
+    /// Submit a review decision.
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    pub async fn submit_plan_review(
+    pub async fn submit_review(
         &self,
-        plan_id: Uuid,
+        memory_id: Uuid,
         project: Option<String>,
         reviewer: String,
         verdict: String,
@@ -276,10 +282,10 @@ impl HttpMemoryClient {
         match self
             .request_with_body::<_, MemoryEnvelope>(
                 Method::POST,
-                &["api", "v1", "plans", "review"],
-                &SubmitPlanReviewDto {
+                &["api", "v1", "review"],
+                &SubmitReviewDto {
+                    memory_id,
                     notes,
-                    plan_id,
                     project,
                     reviewer,
                     verdict,

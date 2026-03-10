@@ -141,19 +141,21 @@ pub struct SessionFinalizeParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct PlanReviewQueueParams {
-    /// Maximum number of plans to return (default: 20, max: 100)
+pub struct ReviewQueueParams {
+    /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
+    category: Option<Category>,
+    /// Maximum number of items to return (default: 20, max: 100)
     limit: Option<i64>,
     /// Project name
     project: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SubmitPlanReviewParams {
+pub struct SubmitReviewParams {
+    /// Memory UUID to review
+    memory_id: Uuid,
     /// Review notes
     notes: String,
-    /// Plan memory UUID
-    plan_id: Uuid,
     /// Optional override project for the review memory
     project: Option<String>,
     /// Reviewer identity
@@ -516,20 +518,22 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "List plan memories in a project that are tagged review-needed")]
-    async fn plan_review_queue(
+    #[tool(
+        description = "List memories in a project that are tagged review-needed, with optional category filter"
+    )]
+    async fn review_queue(
         &self,
-        Parameters(params): Parameters<PlanReviewQueueParams>,
+        Parameters(params): Parameters<ReviewQueueParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let limit = params.limit.unwrap_or(20).clamp(1, 100);
         let memories = self
             .backend
-            .list_plan_review_queue(&params.project, limit)
+            .list_review_queue(&params.project, params.category.as_ref(), limit)
             .await
             .map_err(rmcp::ErrorData::from)?;
         if memories.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No plans awaiting review.",
+                "No items awaiting review.",
             )]));
         }
         Ok(CallToolResult::success(vec![Content::text(
@@ -537,17 +541,15 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(
-        description = "Store a review decision for a plan memory and mark the original plan reviewed"
-    )]
-    async fn plan_review_submit(
+    #[tool(description = "Store a review decision for a memory and mark the original reviewed")]
+    async fn review_submit(
         &self,
-        Parameters(params): Parameters<SubmitPlanReviewParams>,
+        Parameters(params): Parameters<SubmitReviewParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let review = self
             .backend
-            .submit_plan_review(
-                params.plan_id,
+            .submit_review(
+                params.memory_id,
                 params.project,
                 params.reviewer,
                 params.verdict,
@@ -557,12 +559,12 @@ impl MemoryServer {
             .map_err(rmcp::ErrorData::from)?;
         match review {
             Some(memory) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Stored plan review {} for plan {}",
-                memory.id, params.plan_id
+                "Stored review {} for memory {}",
+                memory.id, params.memory_id
             ))])),
             None => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Plan {} not found",
-                params.plan_id
+                "Memory {} not found",
+                params.memory_id
             ))])),
         }
     }
@@ -683,19 +685,20 @@ impl MemoryBackend {
         }
     }
 
-    async fn list_plan_review_queue(
+    async fn list_review_queue(
         &self,
         project: &str,
+        category: Option<&model::Category>,
         limit: i64,
     ) -> Result<Vec<model::MemorySummary>, Error> {
         match self {
-            Self::Http(client) => client.list_plan_review_queue(project, limit).await,
+            Self::Http(client) => client.list_review_queue(project, category, limit).await,
         }
     }
 
-    async fn submit_plan_review(
+    async fn submit_review(
         &self,
-        plan_id: Uuid,
+        memory_id: Uuid,
         project: Option<String>,
         reviewer: String,
         verdict: String,
@@ -704,7 +707,7 @@ impl MemoryBackend {
         match self {
             Self::Http(client) => {
                 client
-                    .submit_plan_review(plan_id, project, reviewer, verdict, notes)
+                    .submit_review(memory_id, project, reviewer, verdict, notes)
                     .await
             }
         }

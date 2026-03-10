@@ -247,9 +247,9 @@ pub struct FinalizeSessionDto {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub struct SubmitPlanReviewDto {
+pub struct SubmitReviewDto {
+    pub memory_id: Uuid,
     pub notes: String,
-    pub plan_id: Uuid,
     pub project: Option<String>,
     pub reviewer: String,
     pub verdict: String,
