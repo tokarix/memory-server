@@ -41,6 +41,7 @@ struct BootstrapQuery {
 
 #[derive(Deserialize)]
 struct ReviewQueueQuery {
+    category: Option<Category>,
     limit: Option<i64>,
 }
 
@@ -213,9 +214,9 @@ pub struct FinalizeSessionDto {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub struct SubmitPlanReviewDto {
+pub struct SubmitReviewDto {
+    pub memory_id: Uuid,
     pub notes: String,
-    pub plan_id: Uuid,
     pub project: Option<String>,
     pub reviewer: String,
     pub verdict: String,
@@ -248,10 +249,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/projects/{project}/bootstrap",
             get(project_bootstrap),
         )
-        .route(
-            "/api/v1/projects/{project}/plans/review-queue",
-            get(plan_review_queue),
-        )
+        .route("/api/v1/projects/{project}/review-queue", get(review_queue))
         .route("/api/v1/sessions", post(store_session_log))
         .route("/api/v1/sessions/start", post(create_session))
         .route(
@@ -259,7 +257,7 @@ pub fn router(state: ApiState) -> Router {
             post(append_session_message),
         )
         .route("/api/v1/sessions/{id}/finalize", post(finalize_session))
-        .route("/api/v1/plans/review", post(submit_plan_review))
+        .route("/api/v1/review", post(submit_review))
         .with_state(state)
 }
 
@@ -465,7 +463,7 @@ async fn store_session_log(
     }))
 }
 
-async fn plan_review_queue(
+async fn review_queue(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(path): Path<RecallPath>,
@@ -475,7 +473,7 @@ async fn plan_review_queue(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let memories = state
         .app
-        .list_review_queue(&path.project, Some(&Category::Plan), limit)
+        .list_review_queue(&path.project, query.category.as_ref(), limit)
         .await?;
     Ok(Json(MemoryListEnvelope {
         memories: memories.into_iter().map(Into::into).collect(),
@@ -514,23 +512,23 @@ async fn project_bootstrap(
     Ok(Json(payload.into()))
 }
 
-async fn submit_plan_review(
+async fn submit_review(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    LoggedJson(request): LoggedJson<SubmitPlanReviewDto>,
+    LoggedJson(request): LoggedJson<SubmitReviewDto>,
 ) -> Result<Json<MemoryEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let memory = state
         .app
         .submit_review(
-            request.plan_id,
+            request.memory_id,
             request.project,
             request.reviewer,
             request.verdict,
             request.notes,
         )
         .await?
-        .ok_or_else(|| ApiError::not_found(format!("Plan {} not found", request.plan_id)))?;
+        .ok_or_else(|| ApiError::not_found(format!("Memory {} not found", request.memory_id)))?;
     Ok(Json(MemoryEnvelope {
         memory: memory.into(),
     }))
