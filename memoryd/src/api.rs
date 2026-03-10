@@ -1,4 +1,5 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -272,7 +273,7 @@ async fn health(State(state): State<ApiState>) -> Json<HealthResponse> {
 async fn create_memory(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<StoreMemoryRequest>,
+    LoggedJson(request): LoggedJson<StoreMemoryRequest>,
 ) -> Result<Json<MemoryEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let memory = state.app.store_memory(request).await?;
@@ -284,7 +285,7 @@ async fn create_memory(
 async fn create_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<CreateSessionDto>,
+    LoggedJson(request): LoggedJson<CreateSessionDto>,
 ) -> Result<Json<SessionEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let session = state
@@ -305,7 +306,7 @@ async fn append_session_message(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(path): Path<SessionPath>,
-    Json(request): Json<AppendSessionMessageDto>,
+    LoggedJson(request): LoggedJson<AppendSessionMessageDto>,
 ) -> Result<Json<SessionMessageEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let message = state
@@ -328,7 +329,7 @@ async fn finalize_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(path): Path<SessionPath>,
-    Json(request): Json<FinalizeSessionDto>,
+    LoggedJson(request): LoggedJson<FinalizeSessionDto>,
 ) -> Result<Json<FinalizeSessionEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let chunk_count = state
@@ -348,7 +349,7 @@ async fn finalize_session(
 async fn search_memories(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<SearchMemoriesRequest>,
+    LoggedJson(request): LoggedJson<SearchMemoriesRequest>,
 ) -> Result<Json<SearchEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let response = match state.app.search_memories(request).await? {
@@ -403,7 +404,7 @@ async fn update_memory(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(path): Path<MemoryPath>,
-    Json(request): Json<PatchMemoryRequest>,
+    LoggedJson(request): LoggedJson<PatchMemoryRequest>,
 ) -> Result<Json<MemoryEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let request = UpdateMemoryRequest {
@@ -453,7 +454,7 @@ async fn recall_project(
 async fn store_session_log(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<StoreSessionLogRequest>,
+    LoggedJson(request): LoggedJson<StoreSessionLogRequest>,
 ) -> Result<Json<StoreSessionLogEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let session_id = request.session_id.clone();
@@ -516,7 +517,7 @@ async fn project_bootstrap(
 async fn submit_plan_review(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Json(request): Json<SubmitPlanReviewDto>,
+    LoggedJson(request): LoggedJson<SubmitPlanReviewDto>,
 ) -> Result<Json<MemoryEnvelope>, ApiError> {
     authorize(&state, &headers)?;
     let memory = state
@@ -724,6 +725,14 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            code: "bad_request",
+            message: message.into(),
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
+
     fn not_found(message: String) -> Self {
         Self {
             code: "not_found",
@@ -737,6 +746,27 @@ impl ApiError {
             code: "unauthorized",
             message: message.into(),
             status: StatusCode::UNAUTHORIZED,
+        }
+    }
+}
+
+/// A [`Json`] wrapper that logs deserialization failures before returning 400.
+struct LoggedJson<T>(T);
+
+impl<S, T> FromRequest<S> for LoggedJson<T>
+where
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => {
+                tracing::warn!("JSON rejection: {rejection}");
+                Err(ApiError::bad_request(rejection.body_text()))
+            }
         }
     }
 }
