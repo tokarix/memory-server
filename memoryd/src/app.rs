@@ -575,46 +575,51 @@ impl MemoryApp {
         .await
     }
 
-    /// List plans that are waiting for review.
+    /// List memories that are waiting for review.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn list_plan_review_queue(
+    pub async fn list_review_queue(
         &self,
         project: &str,
+        category: Option<&Category>,
         limit: i64,
     ) -> Result<Vec<model::MemorySummary>, Error> {
-        db::list_review_queue(&self.pool, project, Some(&Category::Plan), limit)
+        db::list_review_queue(&self.pool, project, category, limit)
             .await
             .map_err(Error::from)
     }
 
-    /// Submit a plan review and retag the reviewed plan.
+    /// Submit a review and retag the reviewed memory.
     ///
     /// # Errors
     ///
-    /// Returns an error if loading or updating the plan fails.
-    pub async fn submit_plan_review(
+    /// Returns an error if loading or updating the memory fails.
+    pub async fn submit_review(
         &self,
-        plan_id: Uuid,
+        memory_id: Uuid,
         project: Option<String>,
         reviewer: String,
         verdict: String,
         notes: String,
     ) -> Result<Option<model::MemorySummary>, Error> {
-        let Some(plan) = db::get(&self.pool, plan_id).await.map_err(Error::from)? else {
+        let Some(original) = db::get(&self.pool, memory_id).await.map_err(Error::from)? else {
             return Ok(None);
         };
 
         let normalized_verdict = verdict.trim().to_lowercase();
-        let review_project = project.unwrap_or_else(|| plan.project.clone());
-        let review_summary = format!("Plan review by {}: {}", reviewer, plan.summary);
-        let review_content = format!(
-            "Plan ID: {}\nReviewer: {}\nVerdict: {}\n\nOriginal plan summary:\n{}\n\nOriginal plan content:\n{}\n\nReview notes:\n{}",
-            plan.id, reviewer, normalized_verdict, plan.summary, plan.content, notes
+        let review_project = project.unwrap_or_else(|| original.project.clone());
+        let category_label = capitalize_category(&original.category);
+        let review_summary = format!(
+            "{category_label} review by {reviewer}: {}",
+            original.summary
         );
-        let mut updated_tags: Vec<String> = plan
+        let review_content = format!(
+            "Memory ID: {}\nReviewer: {}\nVerdict: {}\n\nOriginal summary:\n{}\n\nOriginal content:\n{}\n\nReview notes:\n{}",
+            original.id, reviewer, normalized_verdict, original.summary, original.content, notes
+        );
+        let mut updated_tags: Vec<String> = original
             .tags
             .iter()
             .filter(|tag| tag.as_str() != "review-needed")
@@ -633,8 +638,8 @@ impl MemoryApp {
                 project: review_project,
                 summary: review_summary,
                 tags: Some(vec![
-                    "plan-review".to_owned(),
-                    format!("plan:{plan_id}"),
+                    "review".to_owned(),
+                    format!("reviewed-item:{memory_id}"),
                     format!("reviewer:{reviewer}"),
                     format!("verdict:{normalized_verdict}"),
                 ]),
@@ -643,7 +648,7 @@ impl MemoryApp {
 
         self.update_memory(UpdateMemoryRequest {
             content: None,
-            id: plan_id,
+            id: memory_id,
             summary: None,
             tags: Some(updated_tags),
         })
@@ -762,6 +767,15 @@ fn format_session_label(message: &model::SessionMessageSummary) -> String {
         base.to_owned()
     } else {
         format!("{base} ({})", message.agent)
+    }
+}
+
+fn capitalize_category(category: &Category) -> String {
+    let s = category.to_string();
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => s,
     }
 }
 

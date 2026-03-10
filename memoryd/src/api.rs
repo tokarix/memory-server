@@ -475,7 +475,7 @@ async fn plan_review_queue(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let memories = state
         .app
-        .list_plan_review_queue(&path.project, limit)
+        .list_review_queue(&path.project, Some(&Category::Plan), limit)
         .await?;
     Ok(Json(MemoryListEnvelope {
         memories: memories.into_iter().map(Into::into).collect(),
@@ -522,7 +522,7 @@ async fn submit_plan_review(
     authorize(&state, &headers)?;
     let memory = state
         .app
-        .submit_plan_review(
+        .submit_review(
             request.plan_id,
             request.project,
             request.reviewer,
