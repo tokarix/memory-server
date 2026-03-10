@@ -39,7 +39,7 @@ The content should include:
 
 ## Review a queued plan
 
-1. Call `plan_review_queue(project)` to find plans tagged `review-needed`.
+1. Call `review_queue(project, category: "plan")` to find plans tagged `review-needed`.
 2. Select the relevant plan.
 3. Review it with a code-review mindset:
    - bugs
@@ -51,13 +51,13 @@ The content should include:
    - `approved`
    - `changes-requested`
    - `rejected`
-5. Call `plan_review_submit(...)` with:
-   - `plan_id`
+5. Call `review_submit(...)` with:
+   - `memory_id`
    - `reviewer`
    - `verdict`
    - `notes`
 
-`plan_review_submit` stores the review as a `decision` memory and updates the original plan from `review-needed` to `reviewed`.
+`review_submit` stores the review as a `decision` memory and updates the original plan from `review-needed` to `reviewed`.
 
 ## Review style
 

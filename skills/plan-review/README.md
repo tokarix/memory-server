@@ -15,8 +15,8 @@ Use this workflow when:
 The workflow relies on memory MCP tools, not raw HTTP:
 
 - `memory_store` for the initial `plan` memory
-- `plan_review_queue` to find plans tagged `review-needed`
-- `plan_review_submit` to store the review and retag the plan
+- `review_queue` to find plans tagged `review-needed`
+- `review_submit` to store the review and retag the plan
 - `memory_get` to verify the final state
 
 ## Plan format
@@ -43,7 +43,7 @@ The plan content should include:
 ## Review flow
 
 1. Create or locate the `plan` memory that needs review.
-2. Call `plan_review_queue(project="<project>")`.
+2. Call `review_queue(project="<project>", category="plan")`.
 3. Select the relevant queued plan.
 4. Review it with a code-review mindset:
    - bugs
@@ -51,10 +51,10 @@ The plan content should include:
    - risky assumptions
    - behavioral regressions
    - rollout or verification gaps
-5. Submit the review with `plan_review_submit(...)`.
+5. Submit the review with `review_submit(...)`.
 6. Verify the plan tags changed from `review-needed` to `reviewed`.
 
-`plan_review_submit` stores the review as a `decision` memory and updates the original plan tags.
+`review_submit` stores the review as a `decision` memory and updates the original plan tags.
 
 ## Verdicts
 
@@ -110,7 +110,7 @@ memory_store(
   - Tool schema may be stale.
 
   verification or test plan:
-  - Confirm the plan appears in plan_review_queue.
+  - Confirm the plan appears in review_queue.
   - Confirm the plan is retagged to reviewed after submission.
   """
 )
@@ -119,11 +119,11 @@ memory_store(
 Queue and review it:
 
 ```text
-plan_review_queue(project="memory-server")
+review_queue(project="memory-server", category="plan")
 
-plan_review_submit(
+review_submit(
   project="memory-server",
-  plan_id="<plan-id>",
+  memory_id="<plan-id>",
   reviewer="codex",
   verdict="approved",
   notes="""
@@ -142,7 +142,7 @@ memory_get(id="<plan-id>")
 
 Expected result:
 
-- the plan no longer appears in `plan_review_queue`
+- the plan no longer appears in `review_queue`
 - the plan tags include `reviewed`
 - the plan tags no longer include `review-needed`
 
