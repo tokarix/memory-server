@@ -5,8 +5,10 @@ clients.
 
 Current layout:
 
-- `review/`: shared workflow for requesting and performing reviews
-  (plans, code, etc.) through the memory server's review tools
+- `review/`: full guide for the cross-agent review workflow
+- `review-queue/`: `/review-queue` — check pending reviews
+- `review-request/`: `/review-request` — request a review for recent work
+- `review-submit/`: `/review-submit` — submit a review verdict
 
 Install local symlinks with:
 
