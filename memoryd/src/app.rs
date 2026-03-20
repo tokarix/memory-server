@@ -466,8 +466,29 @@ impl MemoryApp {
             variant_results.push(results);
         }
 
-        let results = outer_rrf(&variant_results, limit);
-        let results = rerank::rerank(
+        let mut results = outer_rrf(&variant_results, limit);
+
+        // Graph expansion: insert between outer RRF and rerank.
+        let policy = edges::ExpansionPolicy {
+            cross_project: request.cross_project.unwrap_or(false),
+            graph_hops: request.graph_hops.unwrap_or(1),
+            include_general: request.include_general.unwrap_or(false),
+            project_allowlist: request.project_allowlist,
+            source_project: request.project.clone(),
+        };
+        match edges::graph_expand(&self.pool, &results, &policy).await {
+            Ok(expanded) => {
+                if !expanded.is_empty() {
+                    tracing::debug!(count = expanded.len(), "graph expansion added neighbors");
+                    results.extend(expanded);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "graph expansion failed, proceeding with seeds only");
+            }
+        }
+
+        let mut results = rerank::rerank(
             &self.http,
             &self.ollama_url,
             &self.rerank_model,
@@ -476,6 +497,10 @@ impl MemoryApp {
             results,
         )
         .await;
+
+        // Enforce the requested limit after graph expansion + rerank.
+        let final_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        results.truncate(final_limit);
 
         if !results.is_empty() {
             return Ok(SearchOutcome::Memories(results));
