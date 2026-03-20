@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::embed;
 use crate::error::Error;
 use crate::model::{self, Category, MemoryEdgeSummary};
-use crate::{db, expand, rerank, transcript};
+use crate::{db, edges, expand, rerank, transcript};
 
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;
@@ -522,7 +522,7 @@ impl MemoryApp {
             updated_at: now,
         };
         db::insert(&self.pool, &memory).await.map_err(Error::from)?;
-        Ok(model::MemorySummary {
+        let summary = model::MemorySummary {
             id: memory.id,
             category: memory.category,
             content: memory.content,
@@ -531,7 +531,13 @@ impl MemoryApp {
             summary: memory.summary,
             tags: memory.tags,
             updated_at: memory.updated_at,
-        })
+        };
+
+        if let Err(e) = edges::build_write_time_edges(&self.pool, &summary).await {
+            tracing::warn!(id = %summary.id, error = %e, "failed to build write-time edges");
+        }
+
+        Ok(summary)
     }
 
     /// Update a memory and re-embed when needed.
@@ -570,7 +576,13 @@ impl MemoryApp {
             return Ok(None);
         }
 
-        db::get(&self.pool, request.id).await.map_err(Error::from)
+        let result = db::get(&self.pool, request.id).await.map_err(Error::from)?;
+        if let Some(ref memory) = result
+            && let Err(e) = edges::build_write_time_edges(&self.pool, memory).await
+        {
+            tracing::warn!(id = %request.id, error = %e, "failed to rebuild edges after update");
+        }
+        Ok(result)
     }
 
     /// Store a full transcript as a searchable session log.

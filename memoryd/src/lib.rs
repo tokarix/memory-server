@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod dream;
+pub mod edges;
 pub mod embed;
 pub mod expand;
 pub mod ollama;

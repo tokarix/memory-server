@@ -107,6 +107,26 @@ pub async fn delete_edges_for_memory(pool: &PgPool, memory_id: Uuid) -> Result<u
     Ok(result.rows_affected())
 }
 
+/// Delete edges originating from a memory with specific origins.
+///
+/// Used to clear stale write-time edges before rebuilding.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn delete_edges_by_origins(
+    pool: &PgPool,
+    src_id: Uuid,
+    origins: &[crate::model::EdgeOrigin],
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM memory_edges WHERE src_id = $1 AND origin = ANY($2)")
+        .bind(src_id)
+        .bind(origins)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 /// List active neighbor memories reachable from a given memory via edges.
 ///
 /// Returns the neighbor memory summaries along with the edge weight.
