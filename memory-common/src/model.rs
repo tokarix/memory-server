@@ -39,6 +39,58 @@ impl Category {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "edge_origin", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeOrigin {
+    ContentUuidRef,
+    EmbeddingNeighbor,
+    Manual,
+    SharedTag,
+    StructuralTagRef,
+    UsageReinforcement,
+}
+
+impl fmt::Display for EdgeOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ContentUuidRef => write!(f, "content_uuid_ref"),
+            Self::EmbeddingNeighbor => write!(f, "embedding_neighbor"),
+            Self::Manual => write!(f, "manual"),
+            Self::SharedTag => write!(f, "shared_tag"),
+            Self::StructuralTagRef => write!(f, "structural_tag_ref"),
+            Self::UsageReinforcement => write!(f, "usage_reinforcement"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "edge_relation", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeRelation {
+    References,
+    RelatedTag,
+    Similar,
+}
+
+impl fmt::Display for EdgeRelation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::References => write!(f, "references"),
+            Self::RelatedTag => write!(f, "related_tag"),
+            Self::Similar => write!(f, "similar"),
+        }
+    }
+}
+
 impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -74,6 +126,40 @@ pub struct MemorySummary {
     pub summary: String,
     pub tags: Vec<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+pub struct MemoryEdge {
+    pub id: Uuid,
+    pub confidence: f64,
+    pub created_at: DateTime<Utc>,
+    pub dst_id: Uuid,
+    pub dst_project: String,
+    pub evidence: Option<String>,
+    pub origin: EdgeOrigin,
+    pub relation: EdgeRelation,
+    pub src_id: Uuid,
+    pub src_project: String,
+    pub suppressed: bool,
+    pub updated_at: DateTime<Utc>,
+    pub weight: f64,
+}
+
+/// Edge without full metadata, for list/inspection queries.
+#[derive(Clone)]
+pub struct MemoryEdgeSummary {
+    pub id: Uuid,
+    pub confidence: f64,
+    pub created_at: DateTime<Utc>,
+    pub dst_id: Uuid,
+    pub dst_project: String,
+    pub evidence: Option<String>,
+    pub origin: EdgeOrigin,
+    pub relation: EdgeRelation,
+    pub src_id: Uuid,
+    pub src_project: String,
+    pub suppressed: bool,
+    pub updated_at: DateTime<Utc>,
+    pub weight: f64,
 }
 
 pub struct SessionLog {
@@ -216,6 +302,107 @@ mod tests {
         assert!(Category::ErrorFix.is_core());
         assert!(Category::Plan.is_core());
         assert!(Category::Rule.is_core());
+    }
+
+    #[test]
+    fn edge_origin_display() {
+        assert_eq!(EdgeOrigin::ContentUuidRef.to_string(), "content_uuid_ref");
+        assert_eq!(
+            EdgeOrigin::EmbeddingNeighbor.to_string(),
+            "embedding_neighbor"
+        );
+        assert_eq!(EdgeOrigin::Manual.to_string(), "manual");
+        assert_eq!(EdgeOrigin::SharedTag.to_string(), "shared_tag");
+        assert_eq!(
+            EdgeOrigin::StructuralTagRef.to_string(),
+            "structural_tag_ref"
+        );
+        assert_eq!(
+            EdgeOrigin::UsageReinforcement.to_string(),
+            "usage_reinforcement"
+        );
+    }
+
+    #[test]
+    fn edge_origin_serde_roundtrip() {
+        for (variant, expected) in [
+            (EdgeOrigin::ContentUuidRef, r#""content_uuid_ref""#),
+            (EdgeOrigin::EmbeddingNeighbor, r#""embedding_neighbor""#),
+            (EdgeOrigin::Manual, r#""manual""#),
+            (EdgeOrigin::SharedTag, r#""shared_tag""#),
+            (EdgeOrigin::StructuralTagRef, r#""structural_tag_ref""#),
+            (EdgeOrigin::UsageReinforcement, r#""usage_reinforcement""#),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let parsed: EdgeOrigin = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn edge_origin_alphabetical_order() {
+        let names: Vec<&str> = [
+            EdgeOrigin::ContentUuidRef,
+            EdgeOrigin::EmbeddingNeighbor,
+            EdgeOrigin::Manual,
+            EdgeOrigin::SharedTag,
+            EdgeOrigin::StructuralTagRef,
+            EdgeOrigin::UsageReinforcement,
+        ]
+        .iter()
+        .map(|o| match o {
+            EdgeOrigin::ContentUuidRef => "content_uuid_ref",
+            EdgeOrigin::EmbeddingNeighbor => "embedding_neighbor",
+            EdgeOrigin::Manual => "manual",
+            EdgeOrigin::SharedTag => "shared_tag",
+            EdgeOrigin::StructuralTagRef => "structural_tag_ref",
+            EdgeOrigin::UsageReinforcement => "usage_reinforcement",
+        })
+        .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn edge_relation_display() {
+        assert_eq!(EdgeRelation::References.to_string(), "references");
+        assert_eq!(EdgeRelation::RelatedTag.to_string(), "related_tag");
+        assert_eq!(EdgeRelation::Similar.to_string(), "similar");
+    }
+
+    #[test]
+    fn edge_relation_serde_roundtrip() {
+        for (variant, expected) in [
+            (EdgeRelation::References, r#""references""#),
+            (EdgeRelation::RelatedTag, r#""related_tag""#),
+            (EdgeRelation::Similar, r#""similar""#),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let parsed: EdgeRelation = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn edge_relation_alphabetical_order() {
+        let names: Vec<&str> = [
+            EdgeRelation::References,
+            EdgeRelation::RelatedTag,
+            EdgeRelation::Similar,
+        ]
+        .iter()
+        .map(|r| match r {
+            EdgeRelation::References => "references",
+            EdgeRelation::RelatedTag => "related_tag",
+            EdgeRelation::Similar => "similar",
+        })
+        .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
     }
 
     #[test]
