@@ -18,9 +18,17 @@ pub struct ListMemoriesRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SearchMemoriesRequest {
     pub category: Option<Category>,
+    /// Allow graph expansion into foreign projects (default: false)
+    pub cross_project: Option<bool>,
+    /// Number of graph hops for expansion (default: 1)
+    pub graph_hops: Option<u32>,
+    /// Include edges to/from the `general` project during expansion (default: false)
+    pub include_general: Option<bool>,
     pub limit: Option<i64>,
     pub min_similarity: Option<f64>,
     pub project: String,
+    /// Restrict cross-project expansion to these projects only
+    pub project_allowlist: Option<Vec<String>>,
     pub query: String,
 }
 

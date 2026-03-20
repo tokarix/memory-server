@@ -390,9 +390,13 @@ async fn render_search_results(
             .app
             .search_memories(SearchMemoriesRequest {
                 category: query.category.clone(),
+                cross_project: None,
+                graph_hops: None,
+                include_general: None,
                 limit: Some(SEARCH_LIMIT),
                 min_similarity: None,
                 project: project.to_owned(),
+                project_allowlist: None,
                 query: trimmed.to_owned(),
             })
             .await?

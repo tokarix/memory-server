@@ -38,9 +38,13 @@ pub struct ListMemoriesRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SearchMemoriesRequest {
     pub category: Option<Category>,
+    pub cross_project: Option<bool>,
+    pub graph_hops: Option<u32>,
+    pub include_general: Option<bool>,
     pub limit: Option<i64>,
     pub min_similarity: Option<f64>,
     pub project: String,
+    pub project_allowlist: Option<Vec<String>>,
     pub query: String,
 }
 

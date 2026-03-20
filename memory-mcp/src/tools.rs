@@ -88,12 +88,20 @@ pub struct BootstrapParams {
 pub struct SearchParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
     category: Option<Category>,
+    /// Allow graph expansion into foreign projects (default: false)
+    cross_project: Option<bool>,
+    /// Number of graph hops for expansion (default: 1)
+    graph_hops: Option<u32>,
+    /// Include edges to/from the `general` project during expansion (default: false)
+    include_general: Option<bool>,
     /// Maximum number of results (default: 5, max: 100)
     limit: Option<i64>,
     /// Minimum similarity threshold (default: 0.5, range: 0.0-1.0)
     min_similarity: Option<f64>,
     /// Project name to search within
     project: String,
+    /// Restrict cross-project expansion to these projects only
+    project_allowlist: Option<Vec<String>>,
     /// Natural language search query
     query: String,
 }
@@ -377,9 +385,13 @@ impl MemoryServer {
             .backend
             .search_memories(SearchMemoriesRequest {
                 category: params.category,
+                cross_project: params.cross_project,
+                graph_hops: params.graph_hops,
+                include_general: params.include_general,
                 limit: params.limit,
                 min_similarity: params.min_similarity,
                 project: params.project,
+                project_allowlist: params.project_allowlist,
                 query: params.query,
             })
             .await
