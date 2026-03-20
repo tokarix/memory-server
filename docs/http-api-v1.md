@@ -85,6 +85,7 @@ Primary endpoints:
 - `POST /api/v1/sessions/{id}/finalize`
 - `GET /api/v1/projects/{project}/review-queue`
 - `POST /api/v1/review`
+- `GET /api/v1/memories/{id}/neighbors`
 - `POST /api/v1/session-search`
 
 Notes:
@@ -576,6 +577,22 @@ Behavior:
 - updates the original memory tags by removing `review-needed`
 - adds reviewer/verdict tags for later auditing
 
+### `GET /api/v1/memories/{id}/neighbors`
+
+Purpose:
+
+- list neighbor memories reachable via graph edges
+
+Query parameters:
+
+- `limit` optional, default 20
+
+Behavior:
+
+- returns non-suppressed edges and the connected memory summaries
+- follows edges in both directions (src or dst matches the given ID)
+- results ordered by edge weight descending
+
 ### `POST /api/v1/session-search`
 
 Purpose:
@@ -599,6 +616,7 @@ HTTP endpoint.
 | `memory_get`            | `GET /api/v1/memories/{id}`              |
 | `memory_update`         | `PATCH /api/v1/memories/{id}`            |
 | `memory_delete`         | `DELETE /api/v1/memories/{id}`           |
+| `memory_neighbors`      | `GET /api/v1/memories/{id}/neighbors`    |
 | `memory_recall`         | `GET /api/v1/projects/{project}/recall`  |
 | `memory_rules`          | `GET /api/v1/projects/{project}/rules`   |
 | `memory_bootstrap`      | `GET /api/v1/projects/{project}/bootstrap` |

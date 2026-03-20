@@ -30,6 +30,8 @@ Workspace crates:
 - Query expansion and LLM reranking for `memory_search`
 - Core-memory recall at session start with `memory_recall`
 - CRUD tools: store, search, list, get, update, delete
+- Memory graph: weighted edges between memories for cross-reference
+  traversal and search expansion
 - Session transcript archival via `session_log_store`
 - Session-log fallback search when no durable memories match
 - Maintenance binaries for transcript ingest and dream/prune passes
@@ -201,6 +203,7 @@ require `Authorization: Bearer <token>`.
 | `memory_list` | Browse memories by project/category |
 | `memory_get` | Fetch a single memory by UUID |
 | `memory_update` | Update summary/content/tags and re-embed if needed |
+| `memory_neighbors` | List neighbor memories reachable via graph edges |
 | `memory_delete` | Delete a memory by UUID |
 | `session_start` | Create or upsert a normalized shared session |
 | `session_message_append` | Append a prompt/response/tool event to a shared session |
@@ -212,7 +215,8 @@ require `Authorization: Bearer <token>`.
 `memory_search` behavior:
 - expands the user query with the configured LLM
 - runs hybrid vector + FTS retrieval against durable memories
-- reranks results with the configured rerank model
+- expands seed results via graph edges (same-project by default)
+- reranks the combined set with the configured rerank model
 - falls back to session-log search if no durable memories match
 
 ## Additional binaries
@@ -358,6 +362,53 @@ duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
   bootstrap to have happened, and recording compliance failures.
 - Keep memory rules focused on durable intent and policy that the model
   must follow but that a shell hook cannot reliably derive on its own.
+
+## Memory Graph
+
+Memories are connected by weighted edges stored in the `memory_edges`
+table. Edges enable graph-aware search expansion and cross-reference
+navigation.
+
+### Edge types
+
+| Relation | Direction | Description |
+|----------|-----------|-------------|
+| `references` | directed | Explicit reference from one memory to another |
+| `related_tag` | undirected | Shared non-structural tags between memories |
+| `similar` | undirected | Embedding cosine similarity neighborhood |
+
+### Edge origins
+
+| Origin | When created |
+|--------|-------------|
+| `content_uuid_ref` | Write-time: UUID found in memory content |
+| `structural_tag_ref` | Write-time: structural tag like `plan:<uuid>` |
+| `shared_tag` | Dream maintenance: shared topical tags |
+| `embedding_neighbor` | Dream maintenance: cosine similarity 0.75–0.92 |
+| `usage_reinforcement` | Future: successful retrieval signals |
+| `manual` | Future: explicit user/admin edits |
+
+### Search expansion
+
+`memory_search` expands results via graph edges between outer RRF and
+LLM reranking. Expansion follows non-suppressed edges with weight ≥ 0.5.
+
+Scope policy (all conservative by default):
+
+- Same-project edges: always followed
+- `general` project: only when `include_general=true`
+- Foreign projects: only when `cross_project=true`, optionally filtered
+  by `project_allowlist`
+
+Score decay per hop: 0.7×, with additional discounts for `general`
+(0.9×) and foreign projects (0.5×).
+
+### Graph maintenance
+
+The `dream` binary includes a graph refresh phase that runs before
+merge/prune. It builds `similar` and `related_tag` edges using
+idempotent upserts. `ON DELETE CASCADE` on both foreign keys ensures
+edges are cleaned up when memories are deleted.
 
 ## Review Workflow
 
