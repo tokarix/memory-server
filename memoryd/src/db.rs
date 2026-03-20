@@ -239,6 +239,32 @@ pub async fn reinforce_edge(pool: &PgPool, edge_id: Uuid, boost: f64) -> Result<
     Ok(result.rows_affected() > 0)
 }
 
+/// Suppress maintenance-generated edges that were not refreshed.
+///
+/// Targets all `embedding_neighbor` and `shared_tag` origin edges
+/// where `updated_at` is older than the current cycle timestamp.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn suppress_stale_maintenance_edges(
+    pool: &PgPool,
+    cycle_start: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE memory_edges SET
+            suppressed = TRUE,
+            updated_at = NOW()
+         WHERE NOT suppressed
+           AND origin IN ('embedding_neighbor', 'shared_tag')
+           AND updated_at < $1",
+    )
+    .bind(cycle_start)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Suppress an edge (soft-delete, excluded from traversal).
 ///
 /// # Errors

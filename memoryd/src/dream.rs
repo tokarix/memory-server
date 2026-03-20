@@ -70,6 +70,23 @@ pub async fn run(
     let projects = db::list_projects(pool).await?;
     tracing::info!(count = projects.len(), "discovered projects");
 
+    // Global graph refresh: load all embeddings and memories across all
+    // projects so maintenance edges can cross project boundaries.
+    let mut all_embeddings: Vec<(Uuid, Vec<f32>)> = Vec::new();
+    let mut all_memories: Vec<crate::model::MemorySummary> = Vec::new();
+    for project in &projects {
+        all_embeddings.extend(db::all_embeddings(pool, project).await?);
+        all_memories.extend(db::list(pool, project, None, 10_000, 0).await?);
+    }
+    tracing::info!(
+        embeddings = all_embeddings.len(),
+        memories = all_memories.len(),
+        "loaded global embeddings and memories for graph refresh"
+    );
+    let graph_count = refresh_graph_edges(&context, &all_embeddings, &all_memories).await?;
+    tracing::info!(count = graph_count, "global graph edges refreshed");
+
+    // Per-project merge/prune pass.
     for project in &projects {
         tracing::info!(project, "processing project");
         let embeddings = db::all_embeddings(pool, project).await?;
@@ -257,6 +274,177 @@ async fn apply_prunes(
     Ok(())
 }
 
+/// Minimum embedding cosine similarity to create a `similar` edge.
+const SIMILAR_EDGE_THRESHOLD: f32 = 0.75;
+/// Minimum number of shared non-structural tags to create a `related_tag` edge.
+const SHARED_TAG_MIN: usize = 2;
+/// Tag prefixes that encode structural references (not topical).
+const STRUCTURAL_PREFIXES: &[&str] = &[
+    "author:",
+    "plan:",
+    "review",
+    "reviewed-by:",
+    "reviewed-item:",
+    "reviewer:",
+    "session:",
+    "verdict:",
+];
+
+fn is_structural_tag(tag: &str) -> bool {
+    STRUCTURAL_PREFIXES.iter().any(|p| tag.starts_with(p))
+}
+
+fn topical_tags(memory: &crate::model::MemorySummary) -> Vec<&str> {
+    memory
+        .tags
+        .iter()
+        .filter(|t| !is_structural_tag(t))
+        .map(String::as_str)
+        .collect()
+}
+
+async fn refresh_graph_edges(
+    context: &DreamContext<'_>,
+    embeddings: &[(Uuid, Vec<f32>)],
+    memories: &[crate::model::MemorySummary],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let now = Utc::now();
+    let mut count = 0;
+
+    count += refresh_similar_edges(context, embeddings, memories, now).await?;
+    count += refresh_related_tag_edges(context, memories, now).await?;
+
+    // Suppress maintenance edges that were not refreshed this cycle.
+    if !context.dry_run {
+        let suppressed = db::suppress_stale_maintenance_edges(context.pool, now).await?;
+        if suppressed > 0 {
+            tracing::info!(count = suppressed, "suppressed stale maintenance edges");
+        }
+    }
+
+    Ok(count)
+}
+
+async fn refresh_similar_edges(
+    context: &DreamContext<'_>,
+    embeddings: &[(Uuid, Vec<f32>)],
+    memories: &[crate::model::MemorySummary],
+    now: chrono::DateTime<Utc>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let project_map: std::collections::HashMap<Uuid, &str> = memories
+        .iter()
+        .map(|m| (m.id, m.project.as_str()))
+        .collect();
+    let mut count = 0;
+    for i in 0..embeddings.len() {
+        for j in (i + 1)..embeddings.len() {
+            let similarity = embed::cosine_similarity(&embeddings[i].1, &embeddings[j].1);
+            if (SIMILAR_EDGE_THRESHOLD..DUPLICATE_THRESHOLD).contains(&similarity) {
+                if context.dry_run {
+                    tracing::info!(
+                        src = %embeddings[i].0,
+                        dst = %embeddings[j].0,
+                        similarity,
+                        "would create similar edge"
+                    );
+                    continue;
+                }
+                let src_project = project_map.get(&embeddings[i].0).copied().unwrap_or("");
+                let dst_project = project_map.get(&embeddings[j].0).copied().unwrap_or("");
+                let edge = crate::model::MemoryEdge {
+                    id: Uuid::new_v4(),
+                    confidence: f64::from(similarity),
+                    created_at: now,
+                    dst_id: embeddings[j].0,
+                    dst_project: dst_project.to_owned(),
+                    evidence: Some(format!("cosine similarity {similarity:.3}")),
+                    origin: crate::model::EdgeOrigin::EmbeddingNeighbor,
+                    relation: crate::model::EdgeRelation::Similar,
+                    src_id: embeddings[i].0,
+                    src_project: src_project.to_owned(),
+                    suppressed: false,
+                    updated_at: now,
+                    weight: f64::from(similarity),
+                };
+                db::upsert_edge(context.pool, &edge).await?;
+                let reverse = crate::model::MemoryEdge {
+                    id: Uuid::new_v4(),
+                    dst_id: embeddings[i].0,
+                    dst_project: src_project.to_owned(),
+                    src_id: embeddings[j].0,
+                    src_project: dst_project.to_owned(),
+                    ..edge
+                };
+                db::upsert_edge(context.pool, &reverse).await?;
+                count += 2;
+            }
+        }
+    }
+    Ok(count)
+}
+
+async fn refresh_related_tag_edges(
+    context: &DreamContext<'_>,
+    memories: &[crate::model::MemorySummary],
+    now: chrono::DateTime<Utc>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0;
+    for i in 0..memories.len() {
+        let tags_i = topical_tags(&memories[i]);
+        if tags_i.len() < SHARED_TAG_MIN {
+            continue;
+        }
+        for j in (i + 1)..memories.len() {
+            let tags_j = topical_tags(&memories[j]);
+            let shared: Vec<&&str> = tags_i.iter().filter(|t| tags_j.contains(t)).collect();
+            if shared.len() >= SHARED_TAG_MIN {
+                if context.dry_run {
+                    tracing::info!(
+                        src = %memories[i].id,
+                        dst = %memories[j].id,
+                        shared_tags = shared.len(),
+                        "would create related_tag edge"
+                    );
+                    continue;
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let weight = (shared.len() as f64) / (tags_i.len().max(tags_j.len()) as f64);
+                let evidence = format!(
+                    "shared tags: {}",
+                    shared.iter().map(|t| **t).collect::<Vec<_>>().join(", ")
+                );
+                let edge = crate::model::MemoryEdge {
+                    id: Uuid::new_v4(),
+                    confidence: weight,
+                    created_at: now,
+                    dst_id: memories[j].id,
+                    dst_project: memories[j].project.clone(),
+                    evidence: Some(evidence.clone()),
+                    origin: crate::model::EdgeOrigin::SharedTag,
+                    relation: crate::model::EdgeRelation::RelatedTag,
+                    src_id: memories[i].id,
+                    src_project: memories[i].project.clone(),
+                    suppressed: false,
+                    updated_at: now,
+                    weight,
+                };
+                db::upsert_edge(context.pool, &edge).await?;
+                let reverse = crate::model::MemoryEdge {
+                    id: Uuid::new_v4(),
+                    dst_id: memories[i].id,
+                    dst_project: memories[i].project.clone(),
+                    src_id: memories[j].id,
+                    src_project: memories[j].project.clone(),
+                    ..edge
+                };
+                db::upsert_edge(context.pool, &reverse).await?;
+                count += 2;
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn find_merge_candidates(embeddings: &[(Uuid, Vec<f32>)]) -> Vec<MergeCandidate> {
     let mut candidates = Vec::new();
     for i in 0..embeddings.len() {
@@ -405,6 +593,37 @@ Respond with ONLY a JSON object (no markdown, no explanation):
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_structural_tag_identifies_prefixes() {
+        assert!(is_structural_tag("author:claude"));
+        assert!(is_structural_tag(
+            "plan:550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(is_structural_tag("reviewed-by:codex"));
+        assert!(is_structural_tag("reviewed-item:some-id"));
+        assert!(is_structural_tag("reviewer:codex"));
+        assert!(is_structural_tag("review-needed"));
+        assert!(is_structural_tag("session:abc"));
+        assert!(is_structural_tag("verdict:approved"));
+    }
+
+    #[test]
+    fn is_structural_tag_rejects_topical() {
+        assert!(!is_structural_tag("sqlx"));
+        assert!(!is_structural_tag("rmcp"));
+        assert!(!is_structural_tag("database"));
+        assert!(!is_structural_tag("architecture"));
+        // topic: is the standard topical tag format — not structural
+        assert!(!is_structural_tag("topic:memory-graph"));
+    }
+
+    #[test]
+    fn structural_prefixes_sorted() {
+        let mut sorted = STRUCTURAL_PREFIXES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(STRUCTURAL_PREFIXES, sorted.as_slice());
+    }
 
     #[test]
     fn find_merge_candidates_above_threshold() {
