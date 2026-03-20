@@ -41,6 +41,14 @@ pub struct GetParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListNeighborsParams {
+    /// UUID of the memory to find neighbors for
+    id: Uuid,
+    /// Maximum number of neighbors to return (default: 20, max: 100)
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
     category: Option<Category>,
@@ -279,6 +287,26 @@ impl MemoryServer {
 
         let text = format_memory_list(&memories);
         Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "List neighbor memories reachable via graph edges from a given memory")]
+    async fn memory_neighbors(
+        &self,
+        Parameters(params): Parameters<ListNeighborsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let neighbors = self
+            .backend
+            .list_neighbors(params.id, params.limit)
+            .await
+            .map_err(rmcp::ErrorData::from)?;
+        if neighbors.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No neighbors found.",
+            )]));
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            format_neighbor_list(&neighbors),
+        )]))
     }
 
     #[tool(description = "Recall core memories (importance >= 0.7) for a project at session start")]
@@ -589,6 +617,16 @@ impl MemoryBackend {
         }
     }
 
+    async fn list_neighbors(
+        &self,
+        memory_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<(model::MemoryEdgeSummary, model::MemorySummary)>, Error> {
+        match self {
+            Self::Http(client) => client.list_neighbors(memory_id, limit).await,
+        }
+    }
+
     async fn list_memories(
         &self,
         request: ListMemoriesRequest,
@@ -804,6 +842,28 @@ fn append_memory_section(out: &mut String, title: &str, memories: &[model::Memor
             memory.content,
         );
     }
+}
+
+fn format_neighbor_list(neighbors: &[(model::MemoryEdgeSummary, model::MemorySummary)]) -> String {
+    let mut out = format!("## Neighbors ({} results)\n", neighbors.len());
+    for (i, (edge, memory)) in neighbors.iter().enumerate() {
+        let _ = write!(
+            out,
+            "\n### {}. [{}] {} (weight: {:.2})\nID: {}\nEdge: {} via {} (confidence: {:.2})\nProject: {}\nTags: {}\n\n{}\n\n---\n",
+            i + 1,
+            memory.category,
+            memory.summary,
+            edge.weight,
+            memory.id,
+            edge.relation,
+            edge.origin,
+            edge.confidence,
+            memory.project,
+            memory.tags.join(", "),
+            memory.content,
+        );
+    }
+    out
 }
 
 fn format_session_log_results(results: &[(model::SessionLogSummary, f64)]) -> String {

@@ -4,8 +4,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::model::{
-    Category, Memory, MemorySummary, Session, SessionLog, SessionLogChunk, SessionLogSummary,
-    SessionMessage, SessionMessageSummary, SessionSummary,
+    Category, Memory, MemoryEdge, MemoryEdgeSummary, MemorySummary, Session, SessionLog,
+    SessionLogChunk, SessionLogSummary, SessionMessage, SessionMessageSummary, SessionSummary,
 };
 
 /// Load all embeddings for one project.
@@ -90,6 +90,191 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Delete all edges involving a specific memory.
+///
+/// This is a safety net; `ON DELETE CASCADE` should handle this automatically.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn delete_edges_for_memory(pool: &PgPool, memory_id: Uuid) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM memory_edges WHERE src_id = $1 OR dst_id = $1")
+        .bind(memory_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// List active neighbor memories reachable from a given memory via edges.
+///
+/// Returns the neighbor memory summaries along with the edge weight.
+/// Only follows non-suppressed edges.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_neighbors(
+    pool: &PgPool,
+    memory_id: Uuid,
+    limit: i64,
+) -> Result<Vec<(MemoryEdgeSummary, MemorySummary)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT e.id AS edge_id, e.confidence, e.created_at AS edge_created_at,
+                e.dst_id, e.dst_project, e.evidence, e.origin, e.relation,
+                e.src_id, e.src_project, e.suppressed, e.updated_at AS edge_updated_at,
+                e.weight,
+                m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at
+         FROM memory_edges e
+         JOIN memories m ON m.id = CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END
+         WHERE (e.src_id = $1 OR e.dst_id = $1)
+           AND NOT e.suppressed
+         ORDER BY e.weight DESC
+         LIMIT $2",
+    )
+    .bind(memory_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let edge = row_to_edge_summary(row)?;
+            let memory = row_to_summary(row)?;
+            Ok((edge, memory))
+        })
+        .collect()
+}
+
+/// List edges originating from a specific memory.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_edges_from(
+    pool: &PgPool,
+    src_id: Uuid,
+    limit: i64,
+) -> Result<Vec<MemoryEdgeSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id AS edge_id, confidence, created_at AS edge_created_at,
+                dst_id, dst_project, evidence, origin, relation,
+                src_id, src_project, suppressed, updated_at AS edge_updated_at,
+                weight
+         FROM memory_edges
+         WHERE src_id = $1
+         ORDER BY weight DESC
+         LIMIT $2",
+    )
+    .bind(src_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_edge_summary).collect()
+}
+
+/// List edges pointing to a specific memory.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_edges_to(
+    pool: &PgPool,
+    dst_id: Uuid,
+    limit: i64,
+) -> Result<Vec<MemoryEdgeSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id AS edge_id, confidence, created_at AS edge_created_at,
+                dst_id, dst_project, evidence, origin, relation,
+                src_id, src_project, suppressed, updated_at AS edge_updated_at,
+                weight
+         FROM memory_edges
+         WHERE dst_id = $1
+         ORDER BY weight DESC
+         LIMIT $2",
+    )
+    .bind(dst_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_edge_summary).collect()
+}
+
+/// Reinforce an existing edge by increasing its weight.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn reinforce_edge(pool: &PgPool, edge_id: Uuid, boost: f64) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE memory_edges SET
+            weight = weight + $2,
+            updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(edge_id)
+    .bind(boost)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Suppress an edge (soft-delete, excluded from traversal).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn suppress_edge(pool: &PgPool, edge_id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE memory_edges SET
+            suppressed = TRUE,
+            updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(edge_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Upsert an edge between two memories.
+///
+/// Uses `(src_id, dst_id, relation, origin)` as the idempotent key.
+/// On conflict, updates weight, confidence, evidence, and timestamps.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn upsert_edge(pool: &PgPool, edge: &MemoryEdge) -> Result<Uuid, sqlx::Error> {
+    let row = sqlx::query(
+        "INSERT INTO memory_edges
+            (id, src_id, dst_id, src_project, dst_project, relation, origin,
+             weight, confidence, evidence, suppressed, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         ON CONFLICT (src_id, dst_id, relation, origin) DO UPDATE SET
+            weight = EXCLUDED.weight,
+            confidence = EXCLUDED.confidence,
+            evidence = EXCLUDED.evidence,
+            suppressed = EXCLUDED.suppressed,
+            updated_at = EXCLUDED.updated_at
+         RETURNING id",
+    )
+    .bind(edge.id)
+    .bind(edge.src_id)
+    .bind(edge.dst_id)
+    .bind(&edge.src_project)
+    .bind(&edge.dst_project)
+    .bind(&edge.relation)
+    .bind(&edge.origin)
+    .bind(edge.weight)
+    .bind(edge.confidence)
+    .bind(&edge.evidence)
+    .bind(edge.suppressed)
+    .bind(edge.created_at)
+    .bind(edge.updated_at)
+    .fetch_one(pool)
+    .await?;
+    row.try_get("id")
 }
 
 /// Append one message to a normalized session.
@@ -770,6 +955,24 @@ fn parse_pgvector_text(text: &str) -> Vec<f32> {
         .split(',')
         .filter_map(|s| s.trim().parse::<f32>().ok())
         .collect()
+}
+
+fn row_to_edge_summary(row: &sqlx::postgres::PgRow) -> Result<MemoryEdgeSummary, sqlx::Error> {
+    Ok(MemoryEdgeSummary {
+        id: row.try_get("edge_id")?,
+        confidence: row.try_get("confidence")?,
+        created_at: row.try_get("edge_created_at")?,
+        dst_id: row.try_get("dst_id")?,
+        dst_project: row.try_get("dst_project")?,
+        evidence: row.try_get("evidence")?,
+        origin: row.try_get("origin")?,
+        relation: row.try_get("relation")?,
+        src_id: row.try_get("src_id")?,
+        src_project: row.try_get("src_project")?,
+        suppressed: row.try_get("suppressed")?,
+        updated_at: row.try_get("edge_updated_at")?,
+        weight: row.try_get("weight")?,
+    })
 }
 
 fn row_to_session_log_summary(

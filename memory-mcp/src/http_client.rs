@@ -7,8 +7,8 @@ use crate::model;
 use crate::protocol::{
     AppendSessionMessageDto, BootstrapEnvelope, CreateSessionDto, DeleteEnvelope,
     FinalizeSessionDto, FinalizeSessionEnvelope, HealthResponse, MemoryEnvelope,
-    MemoryListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope, SessionEnvelope,
-    SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitReviewDto,
+    MemoryListEnvelope, NeighborListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope,
+    SessionEnvelope, SessionMessageEnvelope, StoreSessionLogEnvelope, SubmitReviewDto,
 };
 use crate::protocol::{
     AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
@@ -103,6 +103,31 @@ impl HttpMemoryClient {
         }
         let response: MemoryListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(response.memories.into_iter().map(Into::into).collect())
+    }
+
+    /// List neighbor memories reachable via graph edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn list_neighbors(
+        &self,
+        memory_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<(model::MemoryEdgeSummary, model::MemorySummary)>, Error> {
+        let id = memory_id.to_string();
+        let mut url = self.url(&["api", "v1", "memories", &id, "neighbors"])?;
+        if let Some(limit) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        let response: NeighborListEnvelope =
+            self.request_url(Method::GET, url, None::<&()>).await?;
+        Ok(response
+            .neighbors
+            .into_iter()
+            .map(|n| (n.edge.into(), n.memory.into()))
+            .collect())
     }
 
     /// Load core memories for a project.

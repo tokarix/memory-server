@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::embed;
 use crate::error::Error;
-use crate::model::{self, Category};
+use crate::model::{self, Category, MemoryEdgeSummary};
 use crate::{db, expand, rerank, transcript};
 
 const CHUNK_OVERLAP: usize = 200;
@@ -202,6 +202,22 @@ impl MemoryApp {
     /// Returns an error if the database operation fails.
     pub async fn list_projects(&self) -> Result<Vec<String>, Error> {
         db::list_projects(&self.pool).await.map_err(Error::from)
+    }
+
+    /// List neighbor memories reachable via graph edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub async fn list_neighbors(
+        &self,
+        memory_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<(MemoryEdgeSummary, model::MemorySummary)>, Error> {
+        let limit = limit.unwrap_or(20).clamp(1, 100);
+        db::list_neighbors(&self.pool, memory_id, limit)
+            .await
+            .map_err(Error::from)
     }
 
     /// List finalized session logs for a project.

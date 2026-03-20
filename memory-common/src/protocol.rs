@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::model::{
-    Category, MemorySummary, SessionLogSummary, SessionMessageSummary, SessionSummary,
+    Category, EdgeOrigin, EdgeRelation, MemoryEdgeSummary, MemorySummary, SessionLogSummary,
+    SessionMessageSummary, SessionSummary,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -166,6 +167,34 @@ pub struct DeleteEnvelope {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub struct EdgeDto {
+    pub confidence: f64,
+    pub created_at: DateTime<Utc>,
+    pub dst_id: Uuid,
+    pub dst_project: String,
+    pub evidence: Option<String>,
+    pub id: Uuid,
+    pub origin: EdgeOrigin,
+    pub relation: EdgeRelation,
+    pub src_id: Uuid,
+    pub src_project: String,
+    pub suppressed: bool,
+    pub updated_at: DateTime<Utc>,
+    pub weight: f64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct NeighborDto {
+    pub edge: EdgeDto,
+    pub memory: MemoryDto,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct NeighborListEnvelope {
+    pub neighbors: Vec<NeighborDto>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct MemoryMatchDto {
     pub memory: MemoryDto,
     pub similarity: f64,
@@ -253,6 +282,46 @@ pub struct SubmitReviewDto {
     pub project: Option<String>,
     pub reviewer: String,
     pub verdict: String,
+}
+
+impl From<MemoryEdgeSummary> for EdgeDto {
+    fn from(edge: MemoryEdgeSummary) -> Self {
+        Self {
+            confidence: edge.confidence,
+            created_at: edge.created_at,
+            dst_id: edge.dst_id,
+            dst_project: edge.dst_project,
+            evidence: edge.evidence,
+            id: edge.id,
+            origin: edge.origin,
+            relation: edge.relation,
+            src_id: edge.src_id,
+            src_project: edge.src_project,
+            suppressed: edge.suppressed,
+            updated_at: edge.updated_at,
+            weight: edge.weight,
+        }
+    }
+}
+
+impl From<EdgeDto> for MemoryEdgeSummary {
+    fn from(edge: EdgeDto) -> Self {
+        Self {
+            confidence: edge.confidence,
+            created_at: edge.created_at,
+            dst_id: edge.dst_id,
+            dst_project: edge.dst_project,
+            evidence: edge.evidence,
+            id: edge.id,
+            origin: edge.origin,
+            relation: edge.relation,
+            src_id: edge.src_id,
+            src_project: edge.src_project,
+            suppressed: edge.suppressed,
+            updated_at: edge.updated_at,
+            weight: edge.weight,
+        }
+    }
 }
 
 impl From<MemorySummary> for MemoryDto {

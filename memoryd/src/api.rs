@@ -13,7 +13,9 @@ use crate::app::{
     StoreMemoryRequest, StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use crate::error::Error;
-use crate::model::{Category, MemorySummary, SessionLogSummary};
+use crate::model::{
+    Category, EdgeOrigin, EdgeRelation, MemoryEdgeSummary, MemorySummary, SessionLogSummary,
+};
 use crate::protocol::SubmitReviewDto;
 
 #[derive(Clone)]
@@ -134,6 +136,39 @@ pub struct DeleteEnvelope {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub struct EdgeDto {
+    pub confidence: f64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub dst_id: Uuid,
+    pub dst_project: String,
+    pub evidence: Option<String>,
+    pub id: Uuid,
+    pub origin: EdgeOrigin,
+    pub relation: EdgeRelation,
+    pub src_id: Uuid,
+    pub src_project: String,
+    pub suppressed: bool,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub weight: f64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct NeighborDto {
+    pub edge: EdgeDto,
+    pub memory: MemoryDto,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct NeighborListEnvelope {
+    pub neighbors: Vec<NeighborDto>,
+}
+
+#[derive(Deserialize)]
+struct NeighborQuery {
+    limit: Option<i64>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct MemoryMatchDto {
     pub memory: MemoryDto,
     pub similarity: f64,
@@ -234,6 +269,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/memories/{id}",
             get(get_memory).patch(update_memory).delete(delete_memory),
         )
+        .route("/api/v1/memories/{id}/neighbors", get(list_neighbors))
         .route("/api/v1/projects/{project}/memories", get(list_memories))
         .route("/api/v1/projects/{project}/recall", get(recall_project))
         .route("/api/v1/projects/{project}/rules", get(list_rules))
@@ -547,6 +583,25 @@ async fn list_memories(
     }))
 }
 
+async fn list_neighbors(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<MemoryPath>,
+    Query(query): Query<NeighborQuery>,
+) -> Result<Json<NeighborListEnvelope>, ApiError> {
+    authorize(&state, &headers)?;
+    let neighbors = state.app.list_neighbors(path.id, query.limit).await?;
+    Ok(Json(NeighborListEnvelope {
+        neighbors: neighbors
+            .into_iter()
+            .map(|(edge, memory)| NeighborDto {
+                edge: edge.into(),
+                memory: memory.into(),
+            })
+            .collect(),
+    }))
+}
+
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
     let Some(expected) = state.bearer_token.as_deref() else {
         return Ok(());
@@ -562,6 +617,26 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::unauthorized("invalid bearer token"))
+    }
+}
+
+impl From<MemoryEdgeSummary> for EdgeDto {
+    fn from(edge: MemoryEdgeSummary) -> Self {
+        Self {
+            confidence: edge.confidence,
+            created_at: edge.created_at,
+            dst_id: edge.dst_id,
+            dst_project: edge.dst_project,
+            evidence: edge.evidence,
+            id: edge.id,
+            origin: edge.origin,
+            relation: edge.relation,
+            src_id: edge.src_id,
+            src_project: edge.src_project,
+            suppressed: edge.suppressed,
+            updated_at: edge.updated_at,
+            weight: edge.weight,
+        }
     }
 }
 
