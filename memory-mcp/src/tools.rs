@@ -412,7 +412,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Store a new memory with category, project, summary, content, and optional tags"
+        description = "Store a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance."
     )]
     async fn memory_store(
         &self,
@@ -436,7 +436,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Partial update of memory content/summary/tags, re-embeds using full stored text if any text field changes"
+        description = "Update a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead."
     )]
     async fn memory_update(
         &self,
