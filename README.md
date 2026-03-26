@@ -279,9 +279,8 @@ per-message session capture:
   normalized remote session row
 - [`hooks/capture-message.sh`](hooks/capture-message.sh): append a user or
   assistant message to the normalized remote session stream
-- [`hooks/pre-command.sh`](hooks/pre-command.sh): blocks obviously risky
-  commands, fails closed when bootstrap is missing, and records command
-  attempts as session events
+- [`hooks/pre-command.sh`](hooks/pre-command.sh): ensures bootstrap state
+  exists for the session and records command attempts as session events
 - [`hooks/session-stop.sh`](hooks/session-stop.sh): final flush of the
   normalized session into searchable chunks
 
@@ -357,9 +356,9 @@ duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
   non-rule recall memories.
 - Call `memory_rules(project)` from pre-action hooks when only the
   enforceable rule set is needed.
-- Keep hooks focused on deterministic enforcement and verification:
-  blocking destructive commands, requiring explicit approvals, requiring
-  bootstrap to have happened, and recording compliance failures.
+- Keep hooks focused on deterministic enforcement and verification that
+  does not preempt the client's own permission flow: ensuring bootstrap
+  has happened where needed and recording compliance failures.
 - Keep memory rules focused on durable intent and policy that the model
   must follow but that a shell hook cannot reliably derive on its own.
 

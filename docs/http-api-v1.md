@@ -671,8 +671,8 @@ The MCP adapter should remain dumb:
 
 Recommended split:
 
-- Hooks enforce deterministic, inspectable constraints:
-  destructive-command blocking, approval gates, bootstrap-required checks,
+- Hooks enforce deterministic, inspectable constraints that do not
+  preempt the client's own permission flow: bootstrap-required checks
   and end-of-session compliance reporting.
 - Rule memories carry durable policy and workflow guidance:
   coding standards, repo conventions, review expectations, and
@@ -685,8 +685,8 @@ Recommended hook trigger points:
   context.
 - Prompt/response/tool hooks: append each event through
   `POST /api/v1/sessions/{id}/messages`.
-- Pre-tool or pre-command: re-check rules only when the action is risky or
-  when bootstrap state is missing/stale.
+- Pre-tool or pre-command: re-check rules only when bootstrap state is
+  missing or stale.
 - Pre-compact/finalize: call `POST /api/v1/sessions/{id}/finalize`, then
   verify whether required rules were loaded and whether any blocked-action
   attempts occurred.

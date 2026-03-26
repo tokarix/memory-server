@@ -303,15 +303,3 @@ summarize_bootstrap() {
         ] | join("\n")
     ' "$file"
 }
-
-risky_command() {
-    local command="$1"
-    case "$command" in
-        *"rm -rf "*|*" git reset --hard"*|*"git reset --hard"*|*" git checkout -- "*|*"git checkout -- "*|*"git clean -fd"*|*"git clean -xdf"*|*"mkfs "*)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}

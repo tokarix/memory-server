@@ -34,20 +34,4 @@ if [ -n "$internal_id" ]; then
     append_remote_message "$session_id" "$internal_id" "$agent" "tool" "command" "$command" "$metadata" || true
 fi
 
-if risky_command "$command"; then
-    if [ ! -f "$bootstrap_path" ]; then
-        echo "Blocked risky command because durable rules were not bootstrapped for this session." >&2
-        exit 2
-    fi
-
-    echo "Blocked risky command: ${command}" >&2
-    echo "Active rule summaries:" >&2
-    jq -r '
-        (.general_rules + .project_rules)
-        | .[]
-        | "- " + .summary
-    ' "$bootstrap_path" >&2 || true
-    exit 2
-fi
-
 exit 0
