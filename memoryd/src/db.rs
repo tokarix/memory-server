@@ -141,16 +141,29 @@ pub async fn list_neighbors(
     limit: i64,
 ) -> Result<Vec<(MemoryEdgeSummary, MemorySummary)>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT e.id AS edge_id, e.confidence, e.created_at AS edge_created_at,
-                e.dst_id, e.dst_project, e.evidence, e.origin, e.relation,
-                e.src_id, e.src_project, e.suppressed, e.updated_at AS edge_updated_at,
-                e.weight,
-                m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at
-         FROM memory_edges e
-         JOIN memories m ON m.id = CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END
-         WHERE (e.src_id = $1 OR e.dst_id = $1)
-           AND NOT e.suppressed
-         ORDER BY e.weight DESC
+        "WITH ranked AS (
+            SELECT e.id AS edge_id, e.confidence, e.created_at AS edge_created_at,
+                   e.dst_id, e.dst_project, e.evidence, e.origin, e.relation,
+                   e.src_id, e.src_project, e.suppressed, e.updated_at AS edge_updated_at,
+                   e.weight,
+                   CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS neighbor_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END,
+                                    e.relation, e.origin
+                       ORDER BY e.weight DESC
+                   ) AS rn
+            FROM memory_edges e
+            WHERE (e.src_id = $1 OR e.dst_id = $1)
+              AND NOT e.suppressed
+        )
+        SELECT r.edge_id, r.confidence, r.edge_created_at, r.dst_id, r.dst_project,
+               r.evidence, r.origin, r.relation, r.src_id, r.src_project, r.suppressed,
+               r.edge_updated_at, r.weight,
+               m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at
+         FROM ranked r
+         JOIN memories m ON m.id = r.neighbor_id
+         WHERE r.rn = 1
+         ORDER BY r.weight DESC
          LIMIT $2",
     )
     .bind(memory_id)
@@ -1074,4 +1087,125 @@ fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Er
         tags: row.try_get("tags")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::model::{Category, EdgeOrigin, EdgeRelation, Memory, MemoryEdge};
+
+    use super::*;
+
+    fn test_memory(id: Uuid, project: &str) -> Memory {
+        Memory {
+            id,
+            category: Category::Context,
+            content: "test content".to_owned(),
+            created_at: Utc::now(),
+            embedding: vec![0.0; 1024],
+            project: project.to_owned(),
+            summary: "test summary".to_owned(),
+            tags: vec![],
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn test_edge(
+        src_id: Uuid,
+        src_project: &str,
+        dst_id: Uuid,
+        dst_project: &str,
+        relation: EdgeRelation,
+        origin: EdgeOrigin,
+        weight: f64,
+    ) -> MemoryEdge {
+        let now = Utc::now();
+        MemoryEdge {
+            id: Uuid::new_v4(),
+            confidence: 1.0,
+            created_at: now,
+            dst_id,
+            dst_project: dst_project.to_owned(),
+            evidence: None,
+            origin,
+            relation,
+            src_id,
+            src_project: src_project.to_owned(),
+            suppressed: false,
+            updated_at: now,
+            weight,
+        }
+    }
+
+    #[ignore = "requires DATABASE_URL"]
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn list_neighbors_dedup_symmetric_same_edge(pool: PgPool) {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        insert(&pool, &test_memory(id_a, "test")).await.unwrap();
+        insert(&pool, &test_memory(id_b, "test")).await.unwrap();
+
+        // Insert symmetric pair: A→B and B→A with same relation+origin.
+        let edge_ab = test_edge(
+            id_a,
+            "test",
+            id_b,
+            "test",
+            EdgeRelation::Similar,
+            EdgeOrigin::EmbeddingNeighbor,
+            0.8,
+        );
+        let edge_ba = test_edge(
+            id_b,
+            "test",
+            id_a,
+            "test",
+            EdgeRelation::Similar,
+            EdgeOrigin::EmbeddingNeighbor,
+            0.8,
+        );
+        upsert_edge(&pool, &edge_ab).await.unwrap();
+        upsert_edge(&pool, &edge_ba).await.unwrap();
+
+        // Should return B exactly once from A's perspective.
+        let neighbors = list_neighbors(&pool, id_a, 20).await.unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].1.id, id_b);
+    }
+
+    #[ignore = "requires DATABASE_URL"]
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn list_neighbors_preserves_distinct_edge_types(pool: PgPool) {
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        insert(&pool, &test_memory(id_a, "test")).await.unwrap();
+        insert(&pool, &test_memory(id_b, "test")).await.unwrap();
+
+        // Insert three edge types between the same pair, each with symmetric reverse.
+        for (relation, origin) in [
+            (EdgeRelation::References, EdgeOrigin::ContentUuidRef),
+            (EdgeRelation::Similar, EdgeOrigin::EmbeddingNeighbor),
+            (EdgeRelation::RelatedTag, EdgeOrigin::SharedTag),
+        ] {
+            let forward = test_edge(
+                id_a,
+                "test",
+                id_b,
+                "test",
+                relation.clone(),
+                origin.clone(),
+                0.8,
+            );
+            let reverse = test_edge(id_b, "test", id_a, "test", relation, origin, 0.8);
+            upsert_edge(&pool, &forward).await.unwrap();
+            upsert_edge(&pool, &reverse).await.unwrap();
+        }
+
+        // Should return 3 edges (one per relation+origin), not 6 or 1.
+        let neighbors = list_neighbors(&pool, id_a, 20).await.unwrap();
+        assert_eq!(neighbors.len(), 3);
+        assert!(neighbors.iter().all(|(_, m)| m.id == id_b));
+    }
 }
