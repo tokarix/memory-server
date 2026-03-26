@@ -10,7 +10,7 @@ struct GenerateOptions {
 #[derive(Serialize)]
 struct GenerateRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<&'a str>,
+    format: Option<serde_json::Value>,
     model: &'a str,
     options: GenerateOptions,
     prompt: &'a str,
@@ -37,19 +37,23 @@ pub async fn generate(
     generate_inner(http, url, model, num_ctx, prompt, None).await
 }
 
-/// Request one text generation from `Ollama` with JSON-mode output.
+/// Request one text generation from `Ollama` with structured JSON output.
+///
+/// Pass a JSON schema to constrain the output shape via grammar-based
+/// decoding. The schema is passed directly in the `format` field.
 ///
 /// # Errors
 ///
 /// Returns an error if the HTTP request fails or the response cannot be parsed.
-pub async fn generate_json(
+pub async fn generate_schema(
     http: &reqwest::Client,
     url: &str,
     model: &str,
     num_ctx: u32,
     prompt: &str,
+    schema: serde_json::Value,
 ) -> Result<String, Error> {
-    generate_inner(http, url, model, num_ctx, prompt, Some("json")).await
+    generate_inner(http, url, model, num_ctx, prompt, Some(schema)).await
 }
 
 async fn generate_inner(
@@ -58,7 +62,7 @@ async fn generate_inner(
     model: &str,
     num_ctx: u32,
     prompt: &str,
-    format: Option<&str>,
+    format: Option<serde_json::Value>,
 ) -> Result<String, Error> {
     let request = GenerateRequest {
         format,
@@ -115,16 +119,24 @@ mod tests {
     }
 
     #[test]
-    fn generate_request_json_format() {
+    fn generate_request_schema_format() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        });
         let request = GenerateRequest {
-            format: Some("json"),
+            format: Some(schema),
             model: "llama3.1",
             options: GenerateOptions { num_ctx: 8192 },
             prompt: "hello",
             stream: false,
         };
         let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["format"], "json");
+        assert_eq!(json["format"]["type"], "object");
+        assert_eq!(json["format"]["properties"]["name"]["type"], "string");
     }
 
     #[test]
