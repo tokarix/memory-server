@@ -9,6 +9,8 @@ struct GenerateOptions {
 
 #[derive(Serialize)]
 struct GenerateRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a str>,
     model: &'a str,
     options: GenerateOptions,
     prompt: &'a str,
@@ -32,7 +34,34 @@ pub async fn generate(
     num_ctx: u32,
     prompt: &str,
 ) -> Result<String, Error> {
+    generate_inner(http, url, model, num_ctx, prompt, None).await
+}
+
+/// Request one text generation from `Ollama` with JSON-mode output.
+///
+/// # Errors
+///
+/// Returns an error if the HTTP request fails or the response cannot be parsed.
+pub async fn generate_json(
+    http: &reqwest::Client,
+    url: &str,
+    model: &str,
+    num_ctx: u32,
+    prompt: &str,
+) -> Result<String, Error> {
+    generate_inner(http, url, model, num_ctx, prompt, Some("json")).await
+}
+
+async fn generate_inner(
+    http: &reqwest::Client,
+    url: &str,
+    model: &str,
+    num_ctx: u32,
+    prompt: &str,
+    format: Option<&str>,
+) -> Result<String, Error> {
     let request = GenerateRequest {
+        format,
         model,
         options: GenerateOptions { num_ctx },
         prompt,
@@ -71,6 +100,7 @@ mod tests {
     #[test]
     fn generate_request_serialization() {
         let request = GenerateRequest {
+            format: None,
             model: "llama3.1",
             options: GenerateOptions { num_ctx: 8192 },
             prompt: "hello",
@@ -81,6 +111,20 @@ mod tests {
         assert_eq!(json["options"]["num_ctx"], 8192);
         assert_eq!(json["prompt"], "hello");
         assert_eq!(json["stream"], false);
+        assert!(json.get("format").is_none());
+    }
+
+    #[test]
+    fn generate_request_json_format() {
+        let request = GenerateRequest {
+            format: Some("json"),
+            model: "llama3.1",
+            options: GenerateOptions { num_ctx: 8192 },
+            prompt: "hello",
+            stream: false,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["format"], "json");
     }
 
     #[test]

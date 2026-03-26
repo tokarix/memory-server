@@ -554,7 +554,7 @@ Respond with ONLY a JSON object (no markdown, no explanation):
         a.summary, a.content, b.summary, b.content
     );
 
-    let response = ollama::generate(http, url, model, num_ctx, &prompt).await?;
+    let response = ollama::generate_json(http, url, model, num_ctx, &prompt).await?;
     let merged: MergeResponse = serde_json::from_str(response.trim())?;
     Ok(merged)
 }
@@ -585,7 +585,7 @@ Respond with ONLY a JSON object (no markdown, no explanation):
         memory.updated_at.format("%Y-%m-%d"),
     );
 
-    let response = ollama::generate(http, url, model, num_ctx, &prompt).await?;
+    let response = ollama::generate_json(http, url, model, num_ctx, &prompt).await?;
     let decision: PruneResponse = serde_json::from_str(response.trim())?;
     Ok(decision)
 }
