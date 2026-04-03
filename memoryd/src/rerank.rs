@@ -69,9 +69,31 @@ fn parse_scores(response: &str) -> Option<Vec<(Uuid, u8)>> {
 
     let mut scores = Vec::with_capacity(raw.len());
     for item in &raw {
-        let id_str = item.get("id")?.as_str()?;
-        let id: Uuid = id_str.parse().ok()?;
-        let score_val = item.get("score")?.as_u64()?;
+        let Some(id) = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<Uuid>().ok())
+        else {
+            tracing::warn!("rerank: skipping item with missing/invalid id: {item}");
+            continue;
+        };
+
+        let score_val = match item.get("score") {
+            Some(v) if v.is_u64() => v.as_u64(),
+            Some(v) if v.is_f64() => v.as_f64().map(|f| {
+                // Scores are 0–10; clamp first so truncation and sign loss cannot occur.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    f.clamp(0.0, 10.0) as u64
+                }
+            }),
+            Some(v) => v.as_str().and_then(|s| s.parse::<u64>().ok()),
+            None => None,
+        };
+        let Some(score_val) = score_val else {
+            tracing::warn!("rerank: skipping item with missing/invalid score: {item}");
+            continue;
+        };
         #[allow(clippy::cast_possible_truncation)]
         let score = (score_val.min(10)) as u8;
         scores.push((id, score));
@@ -169,6 +191,55 @@ mod tests {
         assert!(parse_scores("not json at all").is_none());
         assert!(parse_scores("[invalid]").is_none());
         assert!(parse_scores("[]").is_none());
+    }
+
+    #[test]
+    fn parse_scores_stringified_numeric_score() {
+        let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": "7"}]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 7));
+    }
+
+    #[test]
+    fn parse_scores_float_score() {
+        let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": 7.5}]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 7));
+    }
+
+    #[test]
+    fn parse_scores_skips_malformed_row_keeps_valid() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            {"id": "not-a-uuid", "score": 5},
+            {"id": "00000000-0000-0000-0000-000000000003", "score": "invalid"},
+            {"id": "00000000-0000-0000-0000-000000000004", "score": 6}
+        ]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(4), 6));
+    }
+
+    #[test]
+    fn parse_scores_all_malformed_returns_none() {
+        let response = r#"[
+            {"id": "not-a-uuid", "score": 5},
+            {"id": "00000000-0000-0000-0000-000000000001"}
+        ]"#;
+        assert!(parse_scores(response).is_none());
+    }
+
+    #[test]
+    fn parse_scores_prefix_text_with_partial_malformed() {
+        let response = r#"Here are the relevance scores:
+        [{"id": "00000000-0000-0000-0000-000000000001", "score": 9}, {"id": "00000000-0000-0000-0000-000000000002", "score": "3"}]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 9));
+        assert_eq!(scores[1], (Uuid::from_u128(2), 3));
     }
 
     #[test]
