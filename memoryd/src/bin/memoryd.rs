@@ -40,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(embed::Client::new(
             config.ollama_url.clone(),
             config.embedding_model,
+            config.embedding_tokenizer_repo,
+            config.embedding_tokenizer_revision,
         )),
         config.expand_model,
         config.generate_num_ctx,

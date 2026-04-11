@@ -105,6 +105,8 @@ Configuration fields:
 | `memoryd_url` | `http://127.0.0.1:8080` | Base URL used by `memory-mcp` |
 | `ollama_url` | `http://localhost:11434` | Ollama base URL |
 | `embedding_model` | `bge-m3` | Embedding model |
+| `embedding_tokenizer_repo` | `None` | HF hub repo (e.g. `BAAI/bge-m3`) to download tokenizer from for guided truncation |
+| `embedding_tokenizer_revision` | `main` | HF hub repo revision (branch/tag/SHA) |
 | `expand_model` | `llama3.1` | Query expansion model |
 | `rerank_model` | `llama3.1` | Search reranking model |
 | `dream_model` | `llama3.1` | Dream/prune maintenance model |

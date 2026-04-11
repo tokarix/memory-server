@@ -1,17 +1,23 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use tokenizers::Tokenizer;
 use tokio::sync::RwLock;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::error::Error;
 
 const DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK: usize = 4000;
+/// Margin to account for possible drift between our tokenizer and Ollama's,
+/// since we must decode tokens back to text for the API request.
+const TOKENIZER_SAFETY_MARGIN: usize = 32;
 
 pub struct Client {
     context_limit: Arc<RwLock<Option<usize>>>,
     http: reqwest::Client,
     model: String,
+    tokenizer: Option<Tokenizer>,
     url: String,
 }
 
@@ -53,11 +59,60 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 impl Client {
     #[must_use]
-    pub fn new(url: String, model: String) -> Self {
+    pub fn new(
+        url: String,
+        model: String,
+        tokenizer_repo: Option<String>,
+        tokenizer_revision: Option<String>,
+    ) -> Self {
+        let tokenizer = {
+            if let Some(repo_id) = tokenizer_repo {
+                let revision = tokenizer_revision.unwrap_or_else(|| "main".to_owned());
+                // Use Api::new() to respect environment variables like HF_HOME/HF_ENDPOINT
+                match hf_hub::api::sync::Api::new() {
+                    Ok(api) => {
+                        let repo = api.repo(hf_hub::Repo::with_revision(
+                            repo_id.clone(),
+                            hf_hub::RepoType::Model,
+                            revision.clone(),
+                        ));
+                        match repo.get("tokenizer.json") {
+                            Ok(path) => match Tokenizer::from_file(path.as_path()) {
+                                Ok(t) => {
+                                    info!(
+                                        repo = %repo_id,
+                                        revision = %revision,
+                                        path = %path.display(),
+                                        "Downloaded and loaded tokenizer from HF hub"
+                                    );
+                                    Some(t)
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "Failed to load downloaded tokenizer");
+                                    None
+                                }
+                            },
+                            Err(e) => {
+                                error!(repo = %repo_id, error = %e, "Failed to download tokenizer.json from HF hub");
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to build HF hub API");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
         Self {
             context_limit: Arc::new(RwLock::new(None)),
             http: reqwest::Client::new(),
             model,
+            tokenizer,
             url,
         }
     }
@@ -126,19 +181,50 @@ impl Client {
         let input = format!("{summary}\n\n{content}");
         let limit = self.get_context_limit().await;
 
-        // Approximate token budget: conservative 1 token ≈ 4 bytes
-        let cap = limit * 4;
-        let mut final_input = input.clone();
+        let final_input = if let Some(tokenizer) = &self.tokenizer {
+            // Tokenizer-guided truncation (approximate due to re-tokenization drift)
+            let budget = limit.saturating_sub(TOKENIZER_SAFETY_MARGIN);
+            let encoding = tokenizer
+                .encode(input.as_str(), true)
+                .map_err(|e| Error::Embedding(format!("tokenizer error: {e:#}")))?;
 
-        if final_input.len() > cap {
-            warn!(
-                model = %self.model,
-                original_size = final_input.len(),
-                limit = cap,
-                "Truncating input to avoid silent model truncation as an explicit memory-server safety measure."
-            );
-            final_input.truncate(cap);
-        }
+            let token_count = encoding.get_ids().len();
+            if token_count > budget {
+                warn!(
+                    model = %self.model,
+                    tokens = token_count,
+                    limit = budget,
+                    "Truncating input using tokenizer to avoid silent model truncation."
+                );
+                // Truncate to the token budget.
+                let truncated_ids = &encoding.get_ids()[..budget];
+                tokenizer
+                    .decode(truncated_ids, true)
+                    .map_err(|e| Error::Embedding(format!("tokenizer decode error: {e:#}")))?
+            } else {
+                input
+            }
+        } else {
+            // Fallback to approximate byte budget: conservative 1 token ≈ 4 bytes
+            let cap = limit * 4;
+            let mut final_input = input;
+
+            if final_input.len() > cap {
+                warn!(
+                    model = %self.model,
+                    original_size = final_input.len(),
+                    limit = cap,
+                    "Truncating input (byte-based fallback) to avoid silent model truncation."
+                );
+                // Find nearest char boundary at or before cap.
+                let mut truncate_at = cap;
+                while truncate_at > 0 && !final_input.is_char_boundary(truncate_at) {
+                    truncate_at -= 1;
+                }
+                final_input.truncate(truncate_at);
+            }
+            final_input
+        };
 
         let request = EmbedRequest {
             input: &final_input,
@@ -232,7 +318,12 @@ mod tests {
 
     #[test]
     fn embed_truncation_logic() {
-        let _client = Client::new("http://localhost".to_owned(), "test-model".to_owned());
+        let _client = Client::new(
+            "http://localhost".to_owned(),
+            "test-model".to_owned(),
+            None,
+            None,
+        );
         // Force a limit that triggers truncation
         let limit = 10;
         let cap = limit * 4;
@@ -242,11 +333,15 @@ mod tests {
 
         let mut final_input = input.clone();
         if final_input.len() > cap {
-            final_input.truncate(cap);
+            // Find nearest char boundary at or before cap.
+            let mut truncate_at = cap;
+            while truncate_at > 0 && !final_input.is_char_boundary(truncate_at) {
+                truncate_at -= 1;
+            }
+            final_input.truncate(truncate_at);
         }
 
         assert!(final_input.len() <= cap);
-        assert_eq!(final_input.len(), cap);
         assert!(final_input.starts_with(&summary));
     }
 }

@@ -80,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let embed_client = Arc::new(embed::Client::new(
         config.ollama_url,
         config.embedding_model,
+        config.embedding_tokenizer_repo,
+        config.embedding_tokenizer_revision,
     ));
 
     // Embed summary only for parent session log

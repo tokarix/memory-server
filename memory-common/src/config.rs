@@ -12,6 +12,10 @@ pub struct Config {
     pub dream_model: String,
     #[serde(default = "default_embedding_model", alias = "ollama_model")]
     pub embedding_model: String,
+    #[serde(default)]
+    pub embedding_tokenizer_repo: Option<String>,
+    #[serde(default)]
+    pub embedding_tokenizer_revision: Option<String>,
     #[serde(default = "default_expand_model")]
     pub expand_model: String,
     #[serde(default = "default_generate_num_ctx")]
@@ -46,7 +50,10 @@ impl Default for Config {
             database_url: default_database_url(),
             dream_model: default_dream_model(),
             embedding_model: default_embedding_model(),
+            embedding_tokenizer_repo: None,
+            embedding_tokenizer_revision: None,
             expand_model: default_expand_model(),
+
             generate_num_ctx: default_generate_num_ctx(),
             ollama_url: default_ollama_url(),
             http_bind: default_http_bind(),
@@ -108,6 +115,8 @@ mod tests {
         assert_eq!(config.api_token, None);
         assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.embedding_model, "bge-m3");
+        assert_eq!(config.embedding_tokenizer_repo, None);
+        assert_eq!(config.embedding_tokenizer_revision, None);
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.generate_num_ctx, 8192);
         assert_eq!(config.ollama_url, "http://localhost:11434");
@@ -146,6 +155,8 @@ mod tests {
         assert_eq!(config.api_token, None);
         assert_eq!(config.dream_model, "llama3.1");
         assert_eq!(config.embedding_model, "bge-m3");
+        assert_eq!(config.embedding_tokenizer_repo, None);
+        assert_eq!(config.embedding_tokenizer_revision, None);
         assert_eq!(config.expand_model, "llama3.1");
         assert_eq!(config.generate_num_ctx, 8192);
         assert_eq!(config.ollama_url, "http://localhost:11434");
