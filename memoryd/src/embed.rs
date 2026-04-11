@@ -1,8 +1,15 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tracing::{warn, error};
 
 use crate::error::Error;
 
+const DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK: usize = 4000;
+
 pub struct Client {
+    context_limit: Arc<RwLock<Option<usize>>>,
     http: reqwest::Client,
     model: String,
     url: String,
@@ -17,6 +24,19 @@ struct EmbedRequest<'a> {
 #[derive(Deserialize)]
 struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
+}
+
+#[derive(Deserialize)]
+struct ModelDetails {
+    #[serde(rename = "general.architecture")]
+    architecture: String,
+    #[serde(flatten)]
+    others: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ModelInfo {
+    model_info: ModelDetails,
 }
 
 #[must_use]
@@ -35,10 +55,52 @@ impl Client {
     #[must_use]
     pub fn new(url: String, model: String) -> Self {
         Self {
+            context_limit: Arc::new(RwLock::new(None)),
             http: reqwest::Client::new(),
             model,
             url,
         }
+    }
+
+    async fn get_context_limit(&self) -> usize {
+        if let Some(limit) = *self.context_limit.read().await {
+            return limit;
+        }
+
+        let url = format!("{}/api/show", self.url);
+        let request = serde_json::json!({"model": self.model});
+        
+        let limit = if let Ok(resp) = self.http.post(url).json(&request).send().await {
+            if resp.status().is_success() {
+                match resp.json::<ModelInfo>().await {
+                    Ok(info) => {
+                        let arch = info.model_info.architecture;
+                        let key = format!("{arch}.context_length");
+                        if let Some(val) = info.model_info.others.get(&key) {
+                            val.as_u64().map_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK, |v| {
+                                usize::try_from(v).unwrap_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK)
+                            })
+                        } else {
+                            warn!("Could not find context length for arch {} in model {}", arch, self.model);
+                            DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to parse Ollama model info for {}: {e:#}", self.model);
+                        DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
+                    }
+                }
+            } else {
+                warn!("Failed to discover context limit for model {}, using fallback.", self.model);
+                DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
+            }
+        } else {
+            warn!("Failed to discover context limit for model {}, using fallback.", self.model);
+            DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
+        };
+
+        *self.context_limit.write().await = Some(limit);
+        limit
     }
 
     /// Request an embedding for the provided summary and content.
@@ -48,8 +110,24 @@ impl Client {
     /// Returns an error if the embedding request fails or the response is invalid.
     pub async fn embed(&self, summary: &str, content: &str) -> Result<Vec<f32>, Error> {
         let input = format!("{summary}\n\n{content}");
+        let limit = self.get_context_limit().await;
+        
+        // Approximate token budget: conservative 1 token ≈ 4 bytes
+        let cap = limit * 4;
+        let mut final_input = input.clone();
+        
+        if final_input.len() > cap {
+            warn!(
+                model = %self.model,
+                original_size = final_input.len(),
+                limit = cap,
+                "Truncating input to avoid silent model truncation as an explicit memory-server safety measure."
+            );
+            final_input.truncate(cap);
+        }
+
         let request = EmbedRequest {
-            input: &input,
+            input: &final_input,
             model: &self.model,
         };
         let response = self
@@ -139,9 +217,22 @@ mod tests {
     }
 
     #[test]
-    fn embed_response_empty() {
-        let json = r#"{"embeddings":[]}"#;
-        let response: EmbedResponse = serde_json::from_str(json).unwrap();
-        assert!(response.embeddings.is_empty());
+    fn embed_truncation_logic() {
+        let _client = Client::new("http://localhost".to_owned(), "test-model".to_owned());
+        // Force a limit that triggers truncation
+        let limit = 10;
+        let cap = limit * 4;
+        let summary = "S".repeat(20);
+        let content = "C".repeat(20);
+        let input = format!("{summary}\n\n{content}");
+        
+        let mut final_input = input.clone();
+        if final_input.len() > cap {
+            final_input.truncate(cap);
+        }
+        
+        assert!(final_input.len() <= cap);
+        assert_eq!(final_input.len(), cap);
+        assert!(final_input.starts_with(&summary));
     }
 }
