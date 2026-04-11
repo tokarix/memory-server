@@ -1,0 +1,49 @@
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+
+steps:
+  fmt:
+    image: rust:1.94-slim
+    commands:
+      - rustup component add rustfmt
+      - cargo fmt --check
+
+  check:
+    image: rust:1.94-slim
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+    commands:
+      - cargo check --all-features --all-targets
+    depends_on:
+      - fmt
+
+  clippy:
+    image: rust:1.94-slim
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+    commands:
+      - rustup component add clippy
+      - cargo clippy --all-features --all-targets --no-deps -- -D clippy::pedantic -D warnings
+    depends_on:
+      - fmt
+
+  test:
+    image: rust:1.94-slim
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+    commands:
+      - cargo test --all-features --all-targets
+    depends_on:
+      - check
+      - clippy
+
+  build:
+    image: rust:1.94-slim
+    environment:
+      CARGO_TARGET_DIR: /tmp/target
+    commands:
+      - cargo build --all-features --all-targets
+    depends_on:
+      - test
