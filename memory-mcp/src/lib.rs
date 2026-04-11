@@ -37,7 +37,9 @@ mod tests {
 
     #[test]
     fn test_instructions_contain_key_phrases() {
-        let server = MemoryServer::new(crate::tools::MemoryBackend::Http(crate::http_client::HttpMemoryClient::new("http://localhost:8080", None).unwrap()));
+        let server = MemoryServer::new(crate::tools::MemoryBackend::Http(
+            crate::http_client::HttpMemoryClient::new("http://localhost:8080", None).unwrap(),
+        ));
         let info = server.get_info();
         let instructions = info
             .instructions

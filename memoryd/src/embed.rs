@@ -1,8 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{warn, error};
+use tracing::{error, warn};
 
 use crate::error::Error;
 
@@ -69,7 +69,7 @@ impl Client {
 
         let url = format!("{}/api/show", self.url);
         let request = serde_json::json!({"model": self.model});
-        
+
         let limit = if let Ok(resp) = self.http.post(url).json(&request).send().await {
             if resp.status().is_success() {
                 match resp.json::<ModelInfo>().await {
@@ -77,25 +77,39 @@ impl Client {
                         let arch = info.model_info.architecture;
                         let key = format!("{arch}.context_length");
                         if let Some(val) = info.model_info.others.get(&key) {
-                            val.as_u64().map_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK, |v| {
-                                usize::try_from(v).unwrap_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK)
-                            })
+                            val.as_u64()
+                                .map_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK, |v| {
+                                    usize::try_from(v)
+                                        .unwrap_or(DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK)
+                                })
                         } else {
-                            warn!("Could not find context length for arch {} in model {}", arch, self.model);
+                            warn!(
+                                "Could not find context length for arch {} in model {}",
+                                arch, self.model
+                            );
                             DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
                         }
                     }
                     Err(e) => {
-                        error!("Failed to parse Ollama model info for {}: {e:#}", self.model);
+                        error!(
+                            "Failed to parse Ollama model info for {}: {e:#}",
+                            self.model
+                        );
                         DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
                     }
                 }
             } else {
-                warn!("Failed to discover context limit for model {}, using fallback.", self.model);
+                warn!(
+                    "Failed to discover context limit for model {}, using fallback.",
+                    self.model
+                );
                 DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
             }
         } else {
-            warn!("Failed to discover context limit for model {}, using fallback.", self.model);
+            warn!(
+                "Failed to discover context limit for model {}, using fallback.",
+                self.model
+            );
             DEFAULT_EMBED_CONTEXT_LIMIT_FALLBACK
         };
 
@@ -111,11 +125,11 @@ impl Client {
     pub async fn embed(&self, summary: &str, content: &str) -> Result<Vec<f32>, Error> {
         let input = format!("{summary}\n\n{content}");
         let limit = self.get_context_limit().await;
-        
+
         // Approximate token budget: conservative 1 token ≈ 4 bytes
         let cap = limit * 4;
         let mut final_input = input.clone();
-        
+
         if final_input.len() > cap {
             warn!(
                 model = %self.model,
@@ -225,12 +239,12 @@ mod tests {
         let summary = "S".repeat(20);
         let content = "C".repeat(20);
         let input = format!("{summary}\n\n{content}");
-        
+
         let mut final_input = input.clone();
         if final_input.len() > cap {
             final_input.truncate(cap);
         }
-        
+
         assert!(final_input.len() <= cap);
         assert_eq!(final_input.len(), cap);
         assert!(final_input.starts_with(&summary));
