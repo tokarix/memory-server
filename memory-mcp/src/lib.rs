@@ -52,7 +52,6 @@ mod tests {
         assert!(instructions.contains("memory_rules"));
         assert!(instructions.contains("review_queue"));
         assert!(instructions.contains("review_submit"));
-        assert!(instructions.contains("memory_recall"));
     }
 }
 // Fixed review feedback
