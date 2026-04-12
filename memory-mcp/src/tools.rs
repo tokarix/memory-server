@@ -301,7 +301,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "List neighbor memories reachable via graph edges from a given memory")]
+    #[tool(
+        description = "The follow-up inspection tool after a promising memory_search or memory_get result. Exposes graph-connected context around a known memory, useful for tracing related decisions, plans, fixes, or rules."
+    )]
     async fn memory_neighbors(
         &self,
         Parameters(params): Parameters<ListNeighborsParams>,
@@ -381,7 +383,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Semantic memory search: embed query, cosine similarity retrieval. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
+        description = "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
     )]
     async fn memory_search(
         &self,
@@ -567,7 +569,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "List memories in a project that are tagged review-needed, with optional category filter"
+        description = "Find pending review work by listing memories tagged review-needed, optionally narrowed by category."
     )]
     async fn review_queue(
         &self,
@@ -589,7 +591,9 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(description = "Store a review decision for a memory and mark the original reviewed")]
+    #[tool(
+        description = "Record the review decision and complete the handoff by marking the original item reviewed."
+    )]
     async fn review_submit(
         &self,
         Parameters(params): Parameters<SubmitReviewParams>,
@@ -1287,5 +1291,40 @@ mod tests {
         text.split_whitespace()
             .find_map(|token| Uuid::parse_str(token).ok())
             .unwrap()
+    }
+
+    #[test]
+    fn test_tool_descriptions() {
+        use rmcp::ServerHandler;
+        let server = MemoryServer::new(MemoryBackend::Http(
+            HttpMemoryClient::new("http://localhost:8080", None).unwrap(),
+        ));
+
+        let get_desc = |name: &str| {
+            server
+                .get_tool(name)
+                .and_then(|t| t.description)
+                .unwrap_or_default()
+        };
+
+        let search = get_desc("memory_search");
+        assert!(search.contains("default retrieval entrypoint"));
+        assert!(search.contains("expands via the memory graph"));
+        assert!(search.contains("fall back to session-log search"));
+
+        let neighbors = get_desc("memory_neighbors");
+        assert!(neighbors.contains("follow-up inspection tool"));
+        assert!(neighbors.contains("graph-connected context"));
+
+        let queue = get_desc("review_queue");
+        assert!(queue.contains("Find pending review work"));
+        assert!(queue.contains("tagged review-needed"));
+
+        let submit = get_desc("review_submit");
+        assert!(submit.contains("Record the review decision"));
+        assert!(submit.contains("marking the original item reviewed"));
+
+        let sess_start = get_desc("session_start");
+        assert!(!sess_start.contains("entrypoint"));
     }
 }
