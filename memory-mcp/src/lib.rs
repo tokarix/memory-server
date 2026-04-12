@@ -22,7 +22,7 @@ impl ServerHandler for tools::MemoryServer {
                 ..Implementation::from_build_env()
             },
             instructions: Some(
-                "Semantic memory server: store, search, list, update, and delete memories.\n\nAt session start, use `memory_bootstrap(project, include_general=true, include_recall=true)` to load effective rules and core memories. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Use `memory_neighbors` to follow up on promising hits. Use `memory_rules` for durable rules only. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.".into(),
+                "Semantic memory server: store, search, list, update, and delete memories.\n\nAt session start, use `memory_bootstrap(project, include_general=true, include_recall=true)` to load effective rules and core memories. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default; set `expand_query=true` or `rerank=true` to trade latency for recall/quality when needed. Use `memory_neighbors` to follow up on promising hits. Use `memory_rules` for durable rules only. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.".into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

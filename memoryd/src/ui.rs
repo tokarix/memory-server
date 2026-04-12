@@ -391,6 +391,7 @@ async fn render_search_results(
             .search_memories(SearchMemoriesRequest {
                 category: query.category.clone(),
                 cross_project: None,
+                expand_query: None,
                 graph_hops: None,
                 include_general: None,
                 limit: Some(SEARCH_LIMIT),

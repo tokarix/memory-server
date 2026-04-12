@@ -424,6 +424,7 @@ Purpose:
 
 Behavior:
 
+- expand the query only when requested and configured
 - embed the query server-side
 - run vector + FTS hybrid search
 - apply rerank only when requested and configured

@@ -20,6 +20,8 @@ pub struct SearchMemoriesRequest {
     pub category: Option<Category>,
     /// Allow graph expansion into foreign projects (default: false)
     pub cross_project: Option<bool>,
+    /// Expand search query using an LLM (default: false)
+    pub expand_query: Option<bool>,
     /// Number of graph hops for expansion (default: 1)
     pub graph_hops: Option<u32>,
     /// Include edges to/from the `general` project during expansion (default: false)

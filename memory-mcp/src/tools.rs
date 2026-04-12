@@ -90,6 +90,8 @@ pub struct SearchParams {
     category: Option<Category>,
     /// Allow graph expansion into foreign projects (default: false)
     cross_project: Option<bool>,
+    /// Expand search query using an LLM (default: false)
+    expand_query: Option<bool>,
     /// Number of graph hops for expansion (default: 1)
     graph_hops: Option<u32>,
     /// Include edges to/from the `general` project during expansion (default: false)
@@ -379,7 +381,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Semantic memory search: embed query, cosine similarity retrieval. Semantic reranking is opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
+        description = "Semantic memory search: embed query, cosine similarity retrieval. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
     )]
     async fn memory_search(
         &self,
@@ -390,6 +392,7 @@ impl MemoryServer {
             .search_memories(SearchMemoriesRequest {
                 category: params.category,
                 cross_project: params.cross_project,
+                expand_query: params.expand_query,
                 graph_hops: params.graph_hops,
                 include_general: params.include_general,
                 limit: params.limit,

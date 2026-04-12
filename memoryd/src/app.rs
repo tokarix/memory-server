@@ -39,6 +39,7 @@ pub struct ListMemoriesRequest {
 pub struct SearchMemoriesRequest {
     pub category: Option<Category>,
     pub cross_project: Option<bool>,
+    pub expand_query: Option<bool>,
     pub graph_hops: Option<u32>,
     pub include_general: Option<bool>,
     pub limit: Option<i64>,
@@ -436,15 +437,20 @@ impl MemoryApp {
             .unwrap_or(DEFAULT_MIN_SIMILARITY)
             .clamp(0.0, 1.0);
         let inner_limit = limit * 2;
+        let use_query_expansion = request.expand_query.unwrap_or(false);
 
-        let queries = expand::expand_query(
-            &self.http,
-            &self.ollama_url,
-            &self.expand_model,
-            self.generate_num_ctx,
-            &request.query,
-        )
-        .await;
+        let queries = if use_query_expansion {
+            expand::expand_query(
+                &self.http,
+                &self.ollama_url,
+                &self.expand_model,
+                self.generate_num_ctx,
+                &request.query,
+            )
+            .await
+        } else {
+            vec![request.query.clone()]
+        };
 
         let mut variant_results = Vec::with_capacity(queries.len());
         let mut first_embedding = None;

@@ -27,7 +27,7 @@ Workspace crates:
 
 - Persistent semantic memories with embeddings stored in PostgreSQL
 - Hybrid retrieval: vector similarity plus PostgreSQL full-text search
-- Query expansion and optional LLM reranking for `memory_search`
+- Optional query expansion and LLM reranking for `memory_search`
 - Core-memory recall at session start with `memory_recall`
 - CRUD tools: store, search, list, get, update, delete
 - Memory graph: weighted edges between memories for cross-reference
