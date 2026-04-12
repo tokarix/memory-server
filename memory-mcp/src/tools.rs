@@ -104,6 +104,8 @@ pub struct SearchParams {
     project_allowlist: Option<Vec<String>>,
     /// Natural language search query
     query: String,
+    /// Apply semantic reranking to the results (default: false)
+    rerank: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -376,7 +378,9 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(description = "Semantic memory search: embed query, cosine similarity retrieval")]
+    #[tool(
+        description = "Semantic memory search: embed query, cosine similarity retrieval. Semantic reranking is opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
+    )]
     async fn memory_search(
         &self,
         Parameters(params): Parameters<SearchParams>,
@@ -393,6 +397,7 @@ impl MemoryServer {
                 project: params.project,
                 project_allowlist: params.project_allowlist,
                 query: params.query,
+                rerank: params.rerank,
             })
             .await
             .map_err(rmcp::ErrorData::from)?

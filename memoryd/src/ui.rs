@@ -398,6 +398,7 @@ async fn render_search_results(
                 project: project.to_owned(),
                 project_allowlist: None,
                 query: trimmed.to_owned(),
+                rerank: None,
             })
             .await?
         {

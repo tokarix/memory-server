@@ -426,7 +426,7 @@ Behavior:
 
 - embed the query server-side
 - run vector + FTS hybrid search
-- apply rerank if configured
+- apply rerank only when requested and configured
 
 ### `GET /api/v1/memories/{id}`
 

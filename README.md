@@ -27,7 +27,7 @@ Workspace crates:
 
 - Persistent semantic memories with embeddings stored in PostgreSQL
 - Hybrid retrieval: vector similarity plus PostgreSQL full-text search
-- Query expansion and LLM reranking for `memory_search`
+- Query expansion and optional LLM reranking for `memory_search`
 - Core-memory recall at session start with `memory_recall`
 - CRUD tools: store, search, list, get, update, delete
 - Memory graph: weighted edges between memories for cross-reference
@@ -218,7 +218,7 @@ require `Authorization: Bearer <token>`.
 - expands the user query with the configured LLM
 - runs hybrid vector + FTS retrieval against durable memories
 - expands seed results via graph edges (same-project by default)
-- reranks the combined set with the configured rerank model
+- optionally reranks the combined set with the configured rerank model (disabled by default)
 - falls back to session-log search if no durable memories match
 
 ## Additional binaries

@@ -46,6 +46,7 @@ pub struct SearchMemoriesRequest {
     pub project: String,
     pub project_allowlist: Option<Vec<String>>,
     pub query: String,
+    pub rerank: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -488,15 +489,19 @@ impl MemoryApp {
             }
         }
 
-        let mut results = rerank::rerank(
-            &self.http,
-            &self.ollama_url,
-            &self.rerank_model,
-            self.generate_num_ctx,
-            &request.query,
-            results,
-        )
-        .await;
+        let mut results = if request.rerank.unwrap_or(false) {
+            rerank::rerank(
+                &self.http,
+                &self.ollama_url,
+                &self.rerank_model,
+                self.generate_num_ctx,
+                &request.query,
+                results,
+            )
+            .await
+        } else {
+            results
+        };
 
         // Enforce the requested limit after graph expansion + rerank.
         let final_limit = usize::try_from(limit).unwrap_or(usize::MAX);

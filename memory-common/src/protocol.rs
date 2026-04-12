@@ -30,6 +30,8 @@ pub struct SearchMemoriesRequest {
     /// Restrict cross-project expansion to these projects only
     pub project_allowlist: Option<Vec<String>>,
     pub query: String,
+    /// Apply semantic reranking to the results (default: false)
+    pub rerank: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
