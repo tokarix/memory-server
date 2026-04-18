@@ -181,6 +181,55 @@ Add a stdio MCP server entry to `~/.claude.json`:
 }
 ```
 
+## Multi-agent / distributed setup
+
+For use cases where multiple agents across different machines or locations need
+to share a common memory store:
+
+### 1. Server-side configuration
+
+By default, `memoryd` binds to `127.0.0.1`, which only allows local connections.
+To make it reachable over a network, set `http_bind` to `0.0.0.0` (all
+interfaces) or a specific IP address in your `config.toml`:
+
+```toml
+http_bind = "0.0.0.0:8080"
+```
+
+### 2. Authentication
+
+When the service is reachable over a network, you **must** enable `api_token` in
+the server `config.toml`. The default (no token) is only appropriate for
+private localhost use.
+
+```toml
+api_token = "your-secure-shared-secret"
+```
+
+### 3. Client-side configuration
+
+Each agent's `memory-mcp` needs to know where the central `memoryd` is running.
+In each agent's local `config.toml`, set `memoryd_url` to the server's actual
+address and include the `api_token`:
+
+```toml
+memoryd_url = "http://memory.example.com:8080"
+api_token = "your-secure-shared-secret"
+```
+
+### 4. Firewall and Reverse Proxy
+
+`memoryd` speaks plain HTTP. For internet-facing setups or when traversing
+untrusted networks, it is recommended to run `memoryd` behind a reverse proxy
+(such as Nginx or Caddy) that provides TLS (HTTPS) termination.
+
+### 5. Sharing memory across agents
+
+Multiple agents (e.g. Claude Code on a laptop and Codex on a remote server) can
+all point to the same `memoryd` instance. They will share all memories
+within the same project namespace, enabling cross-agent collaboration and
+persistent context.
+
 ## HTTP API
 
 `memoryd` currently exposes:
