@@ -24,16 +24,38 @@ pub struct ApiState {
     pub bearer_token: Option<String>,
 }
 
+/// Deserialize an optional comma-separated string into `Option<Vec<String>>`.
+///
+/// `serde_urlencoded` (used by `axum::extract::Query`) does not support
+/// deserializing repeated keys into a `Vec`. We accept a single
+/// comma-separated value instead, e.g. `?tags=lang:rust,phase:planning`.
+fn deserialize_comma_tags<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect()
+    }))
+}
+
 #[derive(Deserialize)]
 struct ListMemoriesQuery {
     category: Option<Category>,
     limit: Option<i64>,
     offset: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_comma_tags")]
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 struct RulesQuery {
     include_general: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_comma_tags")]
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -517,7 +539,11 @@ async fn list_rules(
     authorize(&state, &headers)?;
     let rules = state
         .app
-        .list_rules(&path.project, query.include_general.unwrap_or(true))
+        .list_rules(
+            &path.project,
+            query.include_general.unwrap_or(true),
+            query.tags.as_deref(),
+        )
         .await?;
     Ok(Json(rules.into()))
 }
@@ -576,6 +602,7 @@ async fn list_memories(
             limit: query.limit,
             offset: query.offset,
             project: path.project,
+            tags: query.tags,
         })
         .await?;
     Ok(Json(MemoryListEnvelope {

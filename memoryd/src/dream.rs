@@ -76,7 +76,7 @@ pub async fn run(
     let mut all_memories: Vec<crate::model::MemorySummary> = Vec::new();
     for project in &projects {
         all_embeddings.extend(db::all_embeddings(pool, project).await?);
-        all_memories.extend(db::list(pool, project, None, 10_000, 0).await?);
+        all_memories.extend(db::list(pool, project, None, 10_000, 0, None).await?);
     }
     tracing::info!(
         embeddings = all_embeddings.len(),
@@ -475,7 +475,7 @@ async fn find_stale_candidates(
     let now = Utc::now();
     let recent_cutoff = now - chrono::Duration::days(RECENT_DAYS);
 
-    let all_memories = db::list(pool, project, None, 10_000, 0).await?;
+    let all_memories = db::list(pool, project, None, 10_000, 0, None).await?;
 
     let recent_embeddings: Vec<&Vec<f32>> = all_memories
         .iter()

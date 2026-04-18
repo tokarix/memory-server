@@ -13,6 +13,7 @@ pub struct ListMemoriesRequest {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub project: String,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -34,6 +35,7 @@ pub struct SearchMemoriesRequest {
     pub query: String,
     /// Apply semantic reranking to the results (default: false)
     pub rerank: Option<bool>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -537,18 +537,22 @@ pub async fn list_rules(
     pool: &PgPool,
     project: &str,
     include_general: bool,
+    tags: Option<&[String]>,
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let tag_arr = tags.map(<[String]>::to_vec);
     let rows = if include_general && project != crate::app::GENERAL_RULE_PROJECT {
         sqlx::query(
             "SELECT id, category, content, created_at, project, summary, tags, updated_at
              FROM memories
              WHERE category = $1
                AND (project = $2 OR project = $3)
+               AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
              ORDER BY CASE WHEN project = $3 THEN 0 ELSE 1 END, updated_at DESC",
         )
         .bind(Category::Rule)
         .bind(project)
         .bind(crate::app::GENERAL_RULE_PROJECT)
+        .bind(&tag_arr)
         .fetch_all(pool)
         .await?
     } else {
@@ -556,10 +560,12 @@ pub async fn list_rules(
             "SELECT id, category, content, created_at, project, summary, tags, updated_at
              FROM memories
              WHERE category = $1 AND project = $2
+               AND ($3::TEXT[] IS NULL OR tags @> $3::TEXT[])
              ORDER BY updated_at DESC",
         )
         .bind(Category::Rule)
         .bind(project)
+        .bind(&tag_arr)
         .fetch_all(pool)
         .await?
     };
@@ -577,13 +583,16 @@ pub async fn list(
     category: Option<&Category>,
     limit: i64,
     offset: i64,
+    tags: Option<&[String]>,
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let tag_arr = tags.map(<[String]>::to_vec);
     let rows = match category {
         Some(cat) => {
             sqlx::query(
                 "SELECT id, category, content, created_at, project, summary, tags, updated_at
                  FROM memories
                  WHERE project = $1 AND category = $2
+                   AND ($5::TEXT[] IS NULL OR tags @> $5::TEXT[])
                  ORDER BY updated_at DESC
                  LIMIT $3 OFFSET $4",
             )
@@ -591,6 +600,7 @@ pub async fn list(
             .bind(cat)
             .bind(limit)
             .bind(offset)
+            .bind(&tag_arr)
             .fetch_all(pool)
             .await?
         }
@@ -599,12 +609,14 @@ pub async fn list(
                 "SELECT id, category, content, created_at, project, summary, tags, updated_at
                  FROM memories
                  WHERE project = $1
+                   AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
                  ORDER BY updated_at DESC
                  LIMIT $2 OFFSET $3",
             )
             .bind(project)
             .bind(limit)
             .bind(offset)
+            .bind(&tag_arr)
             .fetch_all(pool)
             .await?
         }
@@ -904,23 +916,30 @@ pub async fn update(
     Ok(result.rows_affected() > 0)
 }
 
+pub struct HybridSearchParams<'a> {
+    pub category: Option<&'a Category>,
+    pub limit: i64,
+    pub min_similarity: f64,
+    pub project: &'a str,
+    pub query: &'a str,
+    pub tags: Option<&'a [String]>,
+}
+
 /// Run hybrid semantic plus full-text memory search.
 ///
 /// # Errors
 ///
 /// Returns an error if the query fails.
+#[allow(clippy::too_many_arguments)]
 pub async fn hybrid_search(
     pool: &PgPool,
     embedding: Vec<f32>,
-    query: &str,
-    project: &str,
-    category: Option<&Category>,
-    limit: i64,
-    min_similarity: f64,
+    params: HybridSearchParams<'_>,
 ) -> Result<Vec<(MemorySummary, f64)>, sqlx::Error> {
     let query_vec = Vector::from(embedding);
-    let fetch_limit = limit * 3;
-    let rows = match category {
+    let fetch_limit = params.limit * 3;
+    let tag_arr = params.tags.map(<[String]>::to_vec);
+    let rows = match params.category {
         Some(cat) => {
             sqlx::query(
                 "WITH vector_results AS (
@@ -928,6 +947,7 @@ pub async fn hybrid_search(
                     FROM memories
                     WHERE project = $2 AND category = $3
                       AND 1 - (embedding <=> $1) >= $5
+                      AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
                     LIMIT $4
                 ),
                 fts_results AS (
@@ -935,6 +955,7 @@ pub async fn hybrid_search(
                     FROM memories
                     WHERE project = $2 AND category = $3
                       AND fts @@ plainto_tsquery('english', $6)
+                      AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
                     LIMIT $4
                 ),
                 combined AS (
@@ -951,12 +972,13 @@ pub async fn hybrid_search(
                 LIMIT $7",
             )
             .bind(&query_vec)
-            .bind(project)
+            .bind(params.project)
             .bind(cat)
             .bind(fetch_limit)
-            .bind(min_similarity)
-            .bind(query)
-            .bind(limit)
+            .bind(params.min_similarity)
+            .bind(params.query)
+            .bind(params.limit)
+            .bind(&tag_arr)
             .fetch_all(pool)
             .await?
         }
@@ -967,6 +989,7 @@ pub async fn hybrid_search(
                     FROM memories
                     WHERE project = $2
                       AND 1 - (embedding <=> $1) >= $4
+                      AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
                     LIMIT $3
                 ),
                 fts_results AS (
@@ -974,6 +997,7 @@ pub async fn hybrid_search(
                     FROM memories
                     WHERE project = $2
                       AND fts @@ plainto_tsquery('english', $5)
+                      AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
                     LIMIT $3
                 ),
                 combined AS (
@@ -990,11 +1014,12 @@ pub async fn hybrid_search(
                 LIMIT $6",
             )
             .bind(&query_vec)
-            .bind(project)
+            .bind(params.project)
             .bind(fetch_limit)
-            .bind(min_similarity)
-            .bind(query)
-            .bind(limit)
+            .bind(params.min_similarity)
+            .bind(params.query)
+            .bind(params.limit)
+            .bind(&tag_arr)
             .fetch_all(pool)
             .await?
         }

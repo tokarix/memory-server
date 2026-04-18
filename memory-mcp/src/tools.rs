@@ -58,6 +58,8 @@ pub struct ListParams {
     offset: Option<i64>,
     /// Project name to list memories for
     project: String,
+    /// Filter to memories containing all of these exact tags
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -72,6 +74,8 @@ pub struct RulesParams {
     include_general: Option<bool>,
     /// Project name to load rules for
     project: String,
+    /// Filter to rules containing all of these exact tags (e.g. `["lang:rust", "phase:planning"]`)
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -108,6 +112,8 @@ pub struct SearchParams {
     query: String,
     /// Apply semantic reranking to the results (default: false)
     rerank: Option<bool>,
+    /// Filter to memories containing all of these exact tags
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -287,6 +293,7 @@ impl MemoryServer {
                 limit: params.limit,
                 offset: params.offset,
                 project: params.project,
+                tags: params.tags,
             })
             .await
             .map_err(rmcp::ErrorData::from)?;
@@ -345,7 +352,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Load durable rule memories for a project, optionally unioned with shared general rules"
+        description = "Load durable rule memories for a project, optionally unioned with shared general rules. Targeted worker workflows should use `tags` to exclusively filter rules (e.g. `['lang:rust']` or `['phase:planning']`) when starting targeted worker runs. This avoids polluting context with irrelevant language/phase rules."
     )]
     async fn memory_rules(
         &self,
@@ -353,7 +360,11 @@ impl MemoryServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let rules = self
             .backend
-            .list_rules(&params.project, params.include_general.unwrap_or(true))
+            .list_rules(
+                &params.project,
+                params.include_general.unwrap_or(true),
+                params.tags.as_deref(),
+            )
             .await
             .map_err(rmcp::ErrorData::from)?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -362,7 +373,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Bootstrap a session by loading effective rules plus non-rule core recall memories for a project"
+        description = "Bootstrap a session by loading effective rules plus non-rule core recall memories for a project. For targeted worker runs, consider using `include_recall=false` or omitting general rules to avoid context dilution, heavily relying on subsequent `memory_rules` or `memory_search` calls with specific phase/language `tags` filters."
     )]
     async fn memory_bootstrap(
         &self,
@@ -383,7 +394,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency."
+        description = "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency. Targeted worker workflows should use `tags` to exclusively filter search hits."
     )]
     async fn memory_search(
         &self,
@@ -403,6 +414,7 @@ impl MemoryServer {
                 project_allowlist: params.project_allowlist,
                 query: params.query,
                 rerank: params.rerank,
+                tags: params.tags,
             })
             .await
             .map_err(rmcp::ErrorData::from)?
@@ -666,9 +678,14 @@ impl MemoryBackend {
         }
     }
 
-    async fn list_rules(&self, project: &str, include_general: bool) -> Result<RuleList, Error> {
+    async fn list_rules(
+        &self,
+        project: &str,
+        include_general: bool,
+        tags: Option<&[String]>,
+    ) -> Result<RuleList, Error> {
         match self {
-            Self::Http(client) => client.list_rules(project, include_general).await,
+            Self::Http(client) => client.list_rules(project, include_general, tags).await,
         }
     }
 
@@ -1136,6 +1153,7 @@ mod tests {
             .memory_rules(Parameters(RulesParams {
                 include_general: Some(true),
                 project: "memory-server".to_owned(),
+                tags: None,
             }))
             .await
             .unwrap();

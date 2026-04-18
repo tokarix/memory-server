@@ -33,6 +33,7 @@ pub struct ListMemoriesRequest {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub project: String,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,6 +49,7 @@ pub struct SearchMemoriesRequest {
     pub project_allowlist: Option<Vec<String>>,
     pub query: String,
     pub rerank: Option<bool>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,6 +198,7 @@ impl MemoryApp {
             request.category.as_ref(),
             limit,
             offset,
+            request.tags.as_deref(),
         )
         .await
         .map_err(Error::from)
@@ -380,8 +383,9 @@ impl MemoryApp {
         &self,
         project: &str,
         include_general: bool,
+        tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
-        let rules = db::list_rules(&self.pool, project, include_general)
+        let rules = db::list_rules(&self.pool, project, include_general, tags)
             .await
             .map_err(Error::from)?;
         let (general_rules, project_rules): (Vec<_>, Vec<_>) = rules
@@ -404,7 +408,7 @@ impl MemoryApp {
         include_general: bool,
         include_recall: bool,
     ) -> Result<BootstrapPayload, Error> {
-        let rules = self.list_rules(project, include_general).await?;
+        let rules = self.list_rules(project, include_general, None).await?;
         let recall_memories = if include_recall {
             self.recall_project(project)
                 .await?
@@ -462,11 +466,14 @@ impl MemoryApp {
             let results = db::hybrid_search(
                 &self.pool,
                 embedding,
-                query,
-                &request.project,
-                request.category.as_ref(),
-                inner_limit,
-                min_similarity,
+                db::HybridSearchParams {
+                    category: request.category.as_ref(),
+                    limit: inner_limit,
+                    min_similarity,
+                    project: &request.project,
+                    query,
+                    tags: request.tags.as_deref(),
+                },
             )
             .await
             .map_err(Error::from)?;
@@ -515,6 +522,11 @@ impl MemoryApp {
 
         if !results.is_empty() {
             return Ok(SearchOutcome::Memories(results));
+        }
+        // Session logs do not support structural tagging. If the caller explicitly
+        // requested tag-filtered results, suppress the untagged fallback entirely.
+        if request.tags.is_some() {
+            return Ok(SearchOutcome::Memories(vec![]));
         }
 
         if let Some(embedding) = first_embedding {

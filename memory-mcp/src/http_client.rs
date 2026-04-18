@@ -100,6 +100,9 @@ impl HttpMemoryClient {
             if let Some(offset) = request.offset {
                 query.append_pair("offset", &offset.to_string());
             }
+            if let Some(tags) = &request.tags {
+                query.append_pair("tags", &tags.join(","));
+            }
         }
         let response: MemoryListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(response.memories.into_iter().map(Into::into).collect())
@@ -151,10 +154,16 @@ impl HttpMemoryClient {
         &self,
         project: &str,
         include_general: bool,
+        tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
         let mut url = self.url(&["api", "v1", "projects", project, "rules"])?;
-        url.query_pairs_mut()
-            .append_pair("include_general", &include_general.to_string());
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("include_general", &include_general.to_string());
+            if let Some(tags) = tags {
+                query.append_pair("tags", &tags.join(","));
+            }
+        }
         let response: RuleListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(RuleList {
             general_rules: response.general_rules.into_iter().map(Into::into).collect(),

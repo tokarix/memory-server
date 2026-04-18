@@ -435,6 +435,16 @@ manage the workflow.
 - The reviewer inspects the code and calls `review_submit(...)`.
 - `review_submit` stores a `decision` memory and retags the original.
 
+## Worker Workflows
+
+When launching short-lived, targeted worker sessions, you must avoid context dilution. Unrestricted bootstraps (`memory_bootstrap`) in highly specialized workers (e.g. ones that solely write frontend CSS vs ones that manage SQL migrations) will pollute the AI's context with rules and guidelines meant for entirely different phases of the project.
+
+For isolated workers, you should completely avoid `memory_bootstrap` or pass `include_recall=false` minus the general rules, and instead rely on **Tag-Based Filtering**. Rules and memories can be scoped using tags such as `lang:rust`, `lang:typescript`, `phase:planning`, or `phase:styling`. 
+
+1. At session start, specialized workers MUST be instructed to call `memory_rules(project, tags=["lang:rust"])` or multi-tag combinations like `tags=["lang:rust", "phase:planning"]`.
+2. For retrieval, workers must exclusively use `memory_search(tags=...)` targeted to their operational domain.
+3. If creating rules or plans intended for specialized agents, always ensure they are tagged with the relevant `lang:*` or `phase:*` identifiers.
+
 ## Skills
 
 Repo-managed skills live under [`skills/`](skills/).

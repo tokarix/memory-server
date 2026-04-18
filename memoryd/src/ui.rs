@@ -274,6 +274,7 @@ async fn project(
             limit: Some(SECTION_LIMIT),
             offset: Some(0),
             project: path.project.clone(),
+            tags: None,
         })
         .await?
         .into_iter()
@@ -400,6 +401,7 @@ async fn render_search_results(
                 project_allowlist: None,
                 query: trimmed.to_owned(),
                 rerank: None,
+                tags: None,
             })
             .await?
         {
