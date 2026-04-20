@@ -20,11 +20,12 @@ pub const GENERAL_RULE_PROJECT: &str = "general";
 pub struct MemoryApp {
     embed_client: Arc<embed::Client>,
     expand_model: String,
-    generate_num_ctx: u32,
+    expand_num_ctx: u32,
     http: reqwest::Client,
     ollama_url: String,
     pool: PgPool,
     rerank_model: String,
+    rerank_num_ctx: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -123,24 +124,27 @@ pub enum SearchOutcome {
 }
 
 impl MemoryApp {
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         pool: PgPool,
         embed_client: Arc<embed::Client>,
         expand_model: String,
-        generate_num_ctx: u32,
+        expand_num_ctx: u32,
         http: reqwest::Client,
         ollama_url: String,
         rerank_model: String,
+        rerank_num_ctx: u32,
     ) -> Self {
         Self {
             embed_client,
             expand_model,
-            generate_num_ctx,
+            expand_num_ctx,
             http,
             ollama_url,
             pool,
             rerank_model,
+            rerank_num_ctx,
         }
     }
 
@@ -448,7 +452,7 @@ impl MemoryApp {
                 &self.http,
                 &self.ollama_url,
                 &self.expand_model,
-                self.generate_num_ctx,
+                self.expand_num_ctx,
                 &request.query,
             )
             .await
@@ -507,7 +511,7 @@ impl MemoryApp {
                 &self.http,
                 &self.ollama_url,
                 &self.rerank_model,
-                self.generate_num_ctx,
+                self.rerank_num_ctx,
                 &request.query,
                 results,
             )

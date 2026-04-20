@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.ollama_url,
         &config.dream_model,
         dry_run,
-        config.generate_num_ctx,
+        config.dream_num_ctx,
     )
     .await?;
 

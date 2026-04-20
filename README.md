@@ -93,7 +93,9 @@ embedding_model = "bge-m3"
 expand_model = "llama3.1"
 rerank_model = "llama3.1"
 dream_model = "llama3.1"
-generate_num_ctx = 8192
+expand_num_ctx = 8192
+rerank_num_ctx = 8192
+dream_num_ctx = 8192
 ```
 
 Configuration fields:
@@ -110,7 +112,10 @@ Configuration fields:
 | `expand_model` | `llama3.1` | Query expansion model |
 | `rerank_model` | `llama3.1` | Search reranking model |
 | `dream_model` | `llama3.1` | Dream/prune maintenance model |
-| `generate_num_ctx` | `8192` | Context window for generation calls |
+| `expand_num_ctx` | `8192` | Context window for query expansion |
+| `rerank_num_ctx` | `8192` | Context window for search reranking |
+| `dream_num_ctx` | `8192` | Context window for dream maintenance |
+| `generate_num_ctx` | `8192` | (Legacy) Context window for all generation calls; used as fallback |
 
 ### 4. Build
 

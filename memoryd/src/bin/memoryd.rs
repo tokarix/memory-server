@@ -44,10 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.embedding_tokenizer_revision,
         )),
         config.expand_model,
-        config.generate_num_ctx,
+        config.expand_num_ctx,
         reqwest::Client::new(),
         config.ollama_url,
         config.rerank_model,
+        config.rerank_num_ctx,
     );
     let state = api::ApiState {
         app,
