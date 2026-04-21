@@ -51,6 +51,7 @@ pub struct ListNeighborsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
+    #[schemars(with = "Option<String>")]
     category: Option<Category>,
     /// Maximum number of results (default: 20, max: 100)
     limit: Option<i64>,
@@ -91,6 +92,7 @@ pub struct BootstrapParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
+    #[schemars(with = "Option<String>")]
     category: Option<Category>,
     /// Allow graph expansion into foreign projects (default: false)
     cross_project: Option<bool>,
@@ -169,6 +171,7 @@ pub struct SessionFinalizeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviewQueueParams {
     /// Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`
+    #[schemars(with = "Option<String>")]
     category: Option<Category>,
     /// Maximum number of items to return (default: 20, max: 100)
     limit: Option<i64>,
@@ -193,6 +196,7 @@ pub struct SubmitReviewParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StoreParams {
     /// Memory category: `context`, `decision`, `error_fix`, `plan`, or `rule`
+    #[schemars(with = "String")]
     category: Category,
     /// Full content of the memory
     content: String,
