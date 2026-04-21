@@ -699,10 +699,7 @@ impl MemoryApp {
             "{category_label} review by {reviewer}: {}",
             original.summary
         );
-        let review_content = format!(
-            "Memory ID: {}\nReviewer: {}\nVerdict: {}\n\nOriginal summary:\n{}\n\nOriginal content:\n{}\n\nReview notes:\n{}",
-            original.id, reviewer, normalized_verdict, original.summary, original.content, notes
-        );
+        let review_content = notes;
         let mut updated_tags: Vec<String> = original
             .tags
             .iter()
@@ -912,4 +909,114 @@ pub(crate) fn outer_rrf(
         .into_iter()
         .filter_map(|(id, score)| memories.get(&id).map(|memory| ((*memory).clone(), score)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Category, Memory};
+    use axum::{Json, Router, routing::post};
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
+
+    async fn mock_embed() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "embeddings": [vec![0.0f32; 1024]]
+        }))
+    }
+
+    async fn mock_show() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "model_info": {
+                "general.architecture": "llama",
+                "llama.context_length": 8192
+            }
+        }))
+    }
+
+    async fn spawn_mock_server() -> String {
+        let app = Router::new()
+            .route("/api/embed", post(mock_embed))
+            .route("/api/show", post(mock_show));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[ignore = "requires DATABASE_URL"]
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn submit_review_stores_notes_as_content_and_retags(pool: PgPool) {
+        let mock_url = spawn_mock_server().await;
+        let embed_client = Arc::new(crate::embed::Client::new(
+            mock_url.clone(),
+            "test-model".to_owned(),
+            None,
+            None,
+        ));
+        let app = MemoryApp::new(
+            pool.clone(),
+            embed_client,
+            "test-model".to_owned(),
+            1024,
+            reqwest::Client::new(),
+            mock_url,
+            "test-model".to_owned(),
+            1024,
+        );
+
+        let memory_id = Uuid::new_v4();
+        let mem = Memory {
+            id: memory_id,
+            category: Category::Plan,
+            content: "old plan content".to_owned(),
+            created_at: Utc::now(),
+            embedding: vec![0.0; 1024],
+            project: "test_proj".to_owned(),
+            summary: "test plan summary".to_owned(),
+            tags: vec!["review-needed".to_owned()],
+            updated_at: Utc::now(),
+        };
+        crate::db::insert(&pool, &mem).await.unwrap();
+
+        let review = app
+            .submit_review(
+                memory_id,
+                None,
+                "test_reviewer".to_owned(),
+                "CHANGES-REQUESTED".to_owned(),
+                "These are my review notes.".to_owned(),
+            )
+            .await
+            .unwrap()
+            .expect("Review created");
+
+        assert_eq!(review.category, Category::Decision);
+        assert_eq!(review.content, "These are my review notes.");
+        assert_eq!(
+            review.summary,
+            "Plan review by test_reviewer: test plan summary"
+        );
+        assert!(review.tags.contains(&"reviewer:test_reviewer".to_owned()));
+        assert!(
+            review
+                .tags
+                .contains(&"verdict:changes-requested".to_owned())
+        );
+        assert!(review.tags.contains(&format!("reviewed-item:{memory_id}")));
+
+        let updated_original = app.get_memory(memory_id).await.unwrap().unwrap();
+        assert!(!updated_original.tags.contains(&"review-needed".to_owned()));
+        assert!(updated_original.tags.contains(&"reviewed".to_owned()));
+        assert!(
+            updated_original
+                .tags
+                .contains(&"review-verdict:changes-requested".to_owned())
+        );
+    }
 }
