@@ -73,6 +73,8 @@ pub struct RecallParams {
 pub struct RulesParams {
     /// Whether to include rules stored under the shared `general` project
     include_general: Option<bool>,
+    /// Whether to shadow general rules when a project has matching rules for the given tags (default: true)
+    shadow_general: Option<bool>,
     /// Project name to load rules for
     project: String,
     /// Filter to rules containing all of these exact tags (e.g. `["lang:rust", "phase:planning"]`)
@@ -367,6 +369,7 @@ impl MemoryServer {
             .list_rules(
                 &params.project,
                 params.include_general.unwrap_or(true),
+                params.shadow_general.unwrap_or(true),
                 params.tags.as_deref(),
             )
             .await
@@ -686,10 +689,15 @@ impl MemoryBackend {
         &self,
         project: &str,
         include_general: bool,
+        shadow_general: bool,
         tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
         match self {
-            Self::Http(client) => client.list_rules(project, include_general, tags).await,
+            Self::Http(client) => {
+                client
+                    .list_rules(project, include_general, shadow_general, tags)
+                    .await
+            }
         }
     }
 
@@ -1156,6 +1164,7 @@ mod tests {
         let rules = server
             .memory_rules(Parameters(RulesParams {
                 include_general: Some(true),
+                shadow_general: Some(true),
                 project: "memory-server".to_owned(),
                 tags: None,
             }))

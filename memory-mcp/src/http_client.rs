@@ -154,12 +154,14 @@ impl HttpMemoryClient {
         &self,
         project: &str,
         include_general: bool,
+        shadow_general: bool,
         tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
         let mut url = self.url(&["api", "v1", "projects", project, "rules"])?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("include_general", &include_general.to_string());
+            query.append_pair("shadow_general", &shadow_general.to_string());
             if let Some(tags) = tags {
                 query.append_pair("tags", &tags.join(","));
             }

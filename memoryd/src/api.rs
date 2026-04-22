@@ -54,6 +54,7 @@ struct ListMemoriesQuery {
 #[derive(Deserialize)]
 struct RulesQuery {
     include_general: Option<bool>,
+    shadow_general: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_comma_tags")]
     tags: Option<Vec<String>>,
 }
@@ -542,6 +543,7 @@ async fn list_rules(
         .list_rules(
             &path.project,
             query.include_general.unwrap_or(true),
+            query.shadow_general.unwrap_or(true),
             query.tags.as_deref(),
         )
         .await?;

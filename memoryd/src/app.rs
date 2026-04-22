@@ -387,9 +387,10 @@ impl MemoryApp {
         &self,
         project: &str,
         include_general: bool,
+        shadow_general: bool,
         tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
-        let rules = db::list_rules(&self.pool, project, include_general, tags)
+        let rules = db::list_rules(&self.pool, project, include_general, shadow_general, tags)
             .await
             .map_err(Error::from)?;
         let (general_rules, project_rules): (Vec<_>, Vec<_>) = rules
@@ -412,7 +413,9 @@ impl MemoryApp {
         include_general: bool,
         include_recall: bool,
     ) -> Result<BootstrapPayload, Error> {
-        let rules = self.list_rules(project, include_general, None).await?;
+        let rules = self
+            .list_rules(project, include_general, false, None)
+            .await?;
         let recall_memories = if include_recall {
             self.recall_project(project)
                 .await?
