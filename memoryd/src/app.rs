@@ -418,7 +418,9 @@ impl MemoryApp {
                 .await?
                 .into_iter()
                 .filter(|memory| {
-                    memory.category != Category::Rule && memory.category != Category::Plan
+                    memory.category != Category::Rule
+                        && memory.category != Category::Plan
+                        && !memory.tags.iter().any(|t| t == "review")
                 })
                 .collect()
         } else {
