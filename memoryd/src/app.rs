@@ -417,7 +417,9 @@ impl MemoryApp {
             self.recall_project(project)
                 .await?
                 .into_iter()
-                .filter(|memory| memory.category != Category::Rule)
+                .filter(|memory| {
+                    memory.category != Category::Rule && memory.category != Category::Plan
+                })
                 .collect()
         } else {
             Vec::new()
