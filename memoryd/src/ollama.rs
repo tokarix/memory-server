@@ -140,6 +140,33 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_array_schema_format() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "score": { "type": "integer", "minimum": 0, "maximum": 10 }
+                },
+                "required": ["id", "score"],
+                "additionalProperties": false
+            }
+        });
+        let request = GenerateRequest {
+            format: Some(schema.clone()),
+            model: "llama3.1",
+            options: GenerateOptions { num_ctx: 8192 },
+            prompt: "hello",
+            stream: false,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["format"], schema);
+        assert_eq!(json["format"]["type"], "array");
+        assert_eq!(json["format"]["items"]["additionalProperties"], false);
+    }
+
+    #[test]
     fn generate_response_deserialization() {
         let json = r#"{"response":"merged memory content"}"#;
         let parsed: GenerateResponse = serde_json::from_str(json).unwrap();

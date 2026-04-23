@@ -1,20 +1,37 @@
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use uuid::Uuid;
 
 use crate::{model, ollama};
 
+fn get_scores_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "score": { "type": "integer", "minimum": 0, "maximum": 10 }
+            },
+            "required": ["id", "score"],
+            "additionalProperties": false
+        }
+    })
+}
+
 const PROMPT_TEMPLATE: &str = r#"You are a relevance scoring system. Rate how relevant each memory is to the given search query.
 
-Query: "{query}"
+Query: "<<QUERY>>"
 
 Memories to score:
-{candidates}
+<<CANDIDATES>>
 
 For each memory, assign a relevance score from 0 (completely irrelevant) to 10 (perfectly relevant).
 
-Return ONLY a JSON array of objects with "id" and "score" fields, no explanation.
-Example: [{"id": "uuid-1", "score": 8}, {"id": "uuid-2", "score": 3}]"#;
+You must respond with exactly the following JSON structure, nothing else:
+<<SCHEMA>>
+"#;
 
 pub async fn rerank(
     http: &reqwest::Client,
@@ -37,17 +54,23 @@ pub async fn rerank(
         );
     }
 
+    let scores_schema = get_scores_schema();
+    let schema_str = serde_json::to_string(&scores_schema).unwrap_or_default();
     let prompt = PROMPT_TEMPLATE
-        .replace("{query}", query)
-        .replace("{candidates}", &candidates);
+        .replace("<<QUERY>>", query)
+        .replace("<<CANDIDATES>>", &candidates)
+        .replace("<<SCHEMA>>", &schema_str);
 
-    let response = match ollama::generate(http, ollama_url, model, num_ctx, &prompt).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("rerank LLM call failed: {e:#?}");
-            return results;
-        }
-    };
+    let response =
+        match ollama::generate_schema(http, ollama_url, model, num_ctx, &prompt, scores_schema)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("rerank LLM call failed: {e:#?}");
+                return results;
+            }
+        };
 
     let Some(scores) = parse_scores(&response) else {
         tracing::warn!("rerank: failed to parse LLM response: {response}");
@@ -58,44 +81,24 @@ pub async fn rerank(
 }
 
 fn parse_scores(response: &str) -> Option<Vec<(Uuid, u8)>> {
-    let start = response.find('[')?;
-    let end = response[start..].find(']')? + start + 1;
-    let array_str = &response[start..end];
-
-    let raw: Vec<serde_json::Value> = serde_json::from_str(array_str).ok()?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(response).ok()?;
     if raw.is_empty() {
         return None;
     }
 
     let mut scores = Vec::with_capacity(raw.len());
+    let mut seen_ids: HashSet<Uuid> = HashSet::with_capacity(raw.len());
+
     for item in &raw {
-        let Some(id) = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<Uuid>().ok())
-        else {
-            tracing::warn!("rerank: skipping item with missing/invalid id: {item}");
+        let Some((id, score)) = parse_single_item(item) else {
             continue;
         };
 
-        let score_val = match item.get("score") {
-            Some(v) if v.is_u64() => v.as_u64(),
-            Some(v) if v.is_f64() => v.as_f64().map(|f| {
-                // Scores are 0–10; clamp first so truncation and sign loss cannot occur.
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                {
-                    f.clamp(0.0, 10.0) as u64
-                }
-            }),
-            Some(v) => v.as_str().and_then(|s| s.parse::<u64>().ok()),
-            None => None,
-        };
-        let Some(score_val) = score_val else {
-            tracing::warn!("rerank: skipping item with missing/invalid score: {item}");
+        if !seen_ids.insert(id) {
+            tracing::warn!("rerank: skipping duplicate id: {id}");
             continue;
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        let score = (score_val.min(10)) as u8;
+        }
+
         scores.push((id, score));
     }
 
@@ -104,6 +107,42 @@ fn parse_scores(response: &str) -> Option<Vec<(Uuid, u8)>> {
     } else {
         Some(scores)
     }
+}
+
+/// Parse a single JSON object into a (Uuid, u8) pair.
+///
+/// Returns `None` if the item should be skipped due to any defect:
+/// - Not an object
+/// - Missing or extra fields beyond "id" and "score"
+/// - Invalid UUID
+/// - Score not a valid integer in range 0-10
+fn parse_single_item(item: &serde_json::Value) -> Option<(Uuid, u8)> {
+    let obj = item.as_object()?;
+
+    // Enforce exact field set: only "id" and "score" allowed
+    if obj.len() != 2 {
+        tracing::warn!("rerank: skipping item with unexpected field count: {item}");
+        return None;
+    }
+
+    if !obj.contains_key("id") || !obj.contains_key("score") {
+        tracing::warn!("rerank: skipping item missing required field: {item}");
+        return None;
+    }
+
+    let id_str = obj.get("id").and_then(|v| v.as_str())?;
+    let id = id_str.parse::<Uuid>().ok()?;
+
+    let score_val = obj.get("score")?;
+    let score = score_val.as_i64()?;
+
+    if !(0..=10).contains(&score) {
+        tracing::warn!("rerank: skipping item with out-of-range score {score}: {item}");
+        return None;
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some((id, score as u8))
 }
 
 fn blend(
@@ -170,7 +209,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_scores_clean_json() {
+    fn scores_schema_is_top_level_array() {
+        let schema = get_scores_schema();
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["items"]["type"], "object");
+        assert_eq!(schema["items"]["additionalProperties"], false);
+        assert_eq!(
+            schema["items"]["required"],
+            serde_json::json!(["id", "score"])
+        );
+        assert_eq!(schema["items"]["properties"]["score"]["type"], "integer");
+        assert_eq!(schema["items"]["properties"]["score"]["minimum"], 0);
+        assert_eq!(schema["items"]["properties"]["score"]["maximum"], 10);
+    }
+
+    #[test]
+    fn parse_scores_structured_valid() {
         let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": 8}, {"id": "00000000-0000-0000-0000-000000000002", "score": 3}]"#;
         let scores = parse_scores(response).unwrap();
         assert_eq!(scores.len(), 2);
@@ -179,67 +233,95 @@ mod tests {
     }
 
     #[test]
-    fn parse_scores_markdown_wrapped() {
-        let response = "Here are the scores:\n```json\n[{\"id\": \"00000000-0000-0000-0000-000000000001\", \"score\": 7}]\n```";
-        let scores = parse_scores(response).unwrap();
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0], (Uuid::from_u128(1), 7));
+    fn parse_scores_root_non_array_fallback() {
+        assert!(parse_scores(r#"{"scores": []}"#).is_none());
+        assert!(parse_scores("\"not an array\"").is_none());
+        assert!(parse_scores("42").is_none());
     }
 
     #[test]
-    fn parse_scores_malformed() {
-        assert!(parse_scores("not json at all").is_none());
-        assert!(parse_scores("[invalid]").is_none());
+    fn parse_scores_root_empty_fallback() {
         assert!(parse_scores("[]").is_none());
     }
 
     #[test]
-    fn parse_scores_stringified_numeric_score() {
-        let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": "7"}]"#;
-        let scores = parse_scores(response).unwrap();
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0], (Uuid::from_u128(1), 7));
-    }
-
-    #[test]
-    fn parse_scores_float_score() {
-        let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": 7.5}]"#;
-        let scores = parse_scores(response).unwrap();
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0], (Uuid::from_u128(1), 7));
-    }
-
-    #[test]
-    fn parse_scores_skips_malformed_row_keeps_valid() {
-        let response = r#"[
-            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
-            {"id": "not-a-uuid", "score": 5},
-            {"id": "00000000-0000-0000-0000-000000000003", "score": "invalid"},
-            {"id": "00000000-0000-0000-0000-000000000004", "score": 6}
-        ]"#;
-        let scores = parse_scores(response).unwrap();
-        assert_eq!(scores.len(), 2);
-        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
-        assert_eq!(scores[1], (Uuid::from_u128(4), 6));
-    }
-
-    #[test]
-    fn parse_scores_all_malformed_returns_none() {
-        let response = r#"[
-            {"id": "not-a-uuid", "score": 5},
-            {"id": "00000000-0000-0000-0000-000000000001"}
-        ]"#;
+    fn parse_scores_all_items_skipped_fallback() {
+        let response = r#"[{"id": "not-a-uuid", "score": 5}, {"id": "also-not-uuid", "score": 3}]"#;
         assert!(parse_scores(response).is_none());
     }
 
     #[test]
-    fn parse_scores_prefix_text_with_partial_malformed() {
-        let response = r#"Here are the relevance scores:
-        [{"id": "00000000-0000-0000-0000-000000000001", "score": 9}, {"id": "00000000-0000-0000-0000-000000000002", "score": "3"}]"#;
+    fn parse_scores_item_invalid_uuid_skipped() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            {"id": "not-a-uuid", "score": 5},
+            {"id": "00000000-0000-0000-0000-000000000003", "score": 6}
+        ]"#;
         let scores = parse_scores(response).unwrap();
         assert_eq!(scores.len(), 2);
-        assert_eq!(scores[0], (Uuid::from_u128(1), 9));
-        assert_eq!(scores[1], (Uuid::from_u128(2), 3));
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(3), 6));
+    }
+
+    #[test]
+    fn parse_scores_item_float_or_negative_score_skipped() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            {"id": "00000000-0000-0000-0000-000000000002", "score": 7.5},
+            {"id": "00000000-0000-0000-0000-000000000003", "score": -1},
+            {"id": "00000000-0000-0000-0000-000000000004", "score": 11},
+            {"id": "00000000-0000-0000-0000-000000000005", "score": 6}
+        ]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(5), 6));
+    }
+
+    #[test]
+    fn parse_scores_item_non_object_element_skipped() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            "string-element",
+            42,
+            {"id": "00000000-0000-0000-0000-000000000003", "score": 6}
+        ]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(3), 6));
+    }
+
+    #[test]
+    fn parse_scores_item_extra_fields_skipped() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            {"id": "00000000-0000-0000-0000-000000000002", "score": 5, "reason": "irrelevant"},
+            {"id": "00000000-0000-0000-0000-000000000003", "score": 6}
+        ]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(3), 6));
+    }
+
+    #[test]
+    fn parse_scores_duplicate_id_skipped() {
+        let response = r#"[
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 8},
+            {"id": "00000000-0000-0000-0000-000000000001", "score": 3},
+            {"id": "00000000-0000-0000-0000-000000000002", "score": 6}
+        ]"#;
+        let scores = parse_scores(response).unwrap();
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0], (Uuid::from_u128(1), 8));
+        assert_eq!(scores[1], (Uuid::from_u128(2), 6));
+    }
+
+    #[test]
+    fn parse_scores_malformed_json() {
+        assert!(parse_scores("not json at all").is_none());
+        assert!(parse_scores("[invalid]").is_none());
     }
 
     #[test]
@@ -248,21 +330,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_scores_clamped_to_10() {
-        let response = r#"[{"id": "00000000-0000-0000-0000-000000000001", "score": 15}]"#;
-        let scores = parse_scores(response).unwrap();
-        assert_eq!(scores[0].1, 10);
-    }
-
-    #[test]
     fn blend_tier1_weights() {
-        // Ranks 1-3: 75% RRF / 25% LLM
         let id1 = Uuid::from_u128(1);
         let id2 = Uuid::from_u128(2);
-        let results = vec![
-            (make_summary(id1), 1.0), // rank 1, max RRF
-            (make_summary(id2), 0.5), // rank 2
-        ];
+        let results = vec![(make_summary(id1), 1.0), (make_summary(id2), 0.5)];
         let scores = vec![(id1, 5_u8), (id2, 10_u8)];
 
         let blended = blend(results, &scores);
@@ -277,8 +348,6 @@ mod tests {
 
     #[test]
     fn blend_tier2_weights() {
-        // Ranks 4-10: 60% RRF / 40% LLM
-        // Create 5 items so items at index 3 and 4 are in the 4-10 tier
         let ids: Vec<Uuid> = (1..=5).map(Uuid::from_u128).collect();
         let results: Vec<_> = ids
             .iter()
@@ -289,20 +358,16 @@ mod tests {
                 (make_summary(id), score)
             })
             .collect();
-        // Give item at rank 5 (index 4) a high LLM score
         let scores = vec![(ids[4], 10_u8), (ids[3], 10_u8)];
 
         let blended = blend(results, &scores);
 
-        // Item at original rank 4 (index 3): norm_rrf=0.7/1.0=0.7, norm_llm=1.0
-        // blended = 0.60*0.7 + 0.40*1.0 = 0.82
         let rank4_item = blended.iter().find(|(m, _)| m.id == ids[3]).unwrap();
         assert!((rank4_item.1 - 0.82).abs() < 1e-10);
     }
 
     #[test]
     fn blend_tier3_weights() {
-        // Ranks 11+: 40% RRF / 60% LLM
         let ids: Vec<Uuid> = (1..=12).map(Uuid::from_u128).collect();
         let results: Vec<_> = ids
             .iter()
@@ -313,13 +378,10 @@ mod tests {
                 (make_summary(id), score)
             })
             .collect();
-        // Item at rank 12 (index 11): RRF = 1.0 - 0.55 = 0.45
         let scores = vec![(ids[11], 10_u8)];
 
         let blended = blend(results, &scores);
 
-        // norm_rrf = 0.45/1.0 = 0.45, norm_llm = 1.0
-        // blended = 0.40*0.45 + 0.60*1.0 = 0.78
         let rank12_item = blended.iter().find(|(m, _)| m.id == ids[11]).unwrap();
         assert!((rank12_item.1 - 0.78).abs() < 1e-10);
     }
@@ -339,7 +401,6 @@ mod tests {
 
     #[test]
     fn blend_importance_boost() {
-        // Two memories with identical RRF and LLM scores but different categories
         let id_rule = Uuid::from_u128(1);
         let id_context = Uuid::from_u128(2);
         let results = vec![
@@ -353,9 +414,8 @@ mod tests {
 
         let blended = blend(results, &scores);
 
-        // Both have same base: 0.75*1.0 + 0.25*0.5 = 0.875
-        // Rule: 0.875 * (0.5 + 0.9) = 0.875 * 1.4 = 1.225
-        // Context: 0.875 * (0.5 + 0.5) = 0.875 * 1.0 = 0.875
+        // Rule: 0.875 * 1.4 = 1.225
+        // Context: 0.875 * 1.0 = 0.875
         assert_eq!(blended[0].0.id, id_rule);
         assert!((blended[0].1 - 1.225).abs() < 1e-10);
         assert_eq!(blended[1].0.id, id_context);
@@ -363,15 +423,13 @@ mod tests {
     }
 
     #[test]
-    fn blend_missing_scores_default_to_5() {
+    fn blend_missing_ids_neutral() {
         let id1 = Uuid::from_u128(1);
         let results = vec![(make_summary(id1), 1.0)];
-        // No scores provided for id1
         let scores: Vec<(Uuid, u8)> = vec![];
 
         let blended = blend(results, &scores);
 
-        // norm_rrf=1.0, norm_llm=0.5 (default 5/10), rank 1: 0.75*1.0 + 0.25*0.5 = 0.875
         assert!((blended[0].1 - 0.875).abs() < 1e-10);
     }
 }
