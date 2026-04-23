@@ -10,11 +10,11 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::ApiState;
-use crate::app::{ListMemoriesRequest, SearchMemoriesRequest, SearchOutcome};
 use crate::error::Error;
 use crate::model::{
     Category, MemorySummary, SessionLogSummary, SessionMessageSummary, SessionSummary,
 };
+use crate::protocol::{ListMemoriesRequest, SearchMemoriesRequest, SearchOutcome};
 
 const UI_TOKEN_COOKIE: &str = "memoryd_token";
 const SEARCH_LIMIT: i64 = 20;

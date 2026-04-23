@@ -4,19 +4,21 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::app::{
-    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
-    ListMemoriesRequest, MemoryApp, RuleList, SearchMemoriesRequest, SearchOutcome,
-    StoreMemoryRequest, StoreSessionLogRequest, UpdateMemoryRequest,
-};
+use crate::app::MemoryApp;
 use crate::error::Error;
-use crate::model::{
-    Category, EdgeOrigin, EdgeRelation, MemoryEdgeSummary, MemorySummary, SessionLogSummary,
+use crate::model::Category;
+use crate::protocol::{
+    AppendSessionMessageDto, AppendSessionMessageRequest, BootstrapEnvelope, CreateSessionRequest,
+    DeleteEnvelope, FinalizeSessionDto, FinalizeSessionEnvelope, FinalizeSessionRequest,
+    HealthResponse, ListMemoriesRequest, MemoryEnvelope, MemoryListEnvelope, MemoryMatchDto,
+    NeighborDto, NeighborListEnvelope, PatchMemoryRequest, RuleListEnvelope, SearchEnvelope,
+    SearchMemoriesRequest, SearchOutcome, SessionEnvelope, SessionLogMatchDto,
+    SessionMessageEnvelope, StoreMemoryRequest, StoreSessionLogEnvelope, StoreSessionLogRequest,
+    SubmitReviewDto, UpdateMemoryRequest,
 };
-use crate::protocol::SubmitReviewDto;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -86,198 +88,17 @@ struct SessionPath {
     id: Uuid,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct PatchMemoryRequest {
-    pub content: Option<String>,
-    pub summary: Option<String>,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct HealthResponse {
-    pub status: String,
-    pub version: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct MemoryEnvelope {
-    pub memory: MemoryDto,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct MemoryListEnvelope {
-    pub memories: Vec<MemoryDto>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct RuleListEnvelope {
-    pub general_rules: Vec<MemoryDto>,
-    pub project_rules: Vec<MemoryDto>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct BootstrapEnvelope {
-    pub general_rules: Vec<MemoryDto>,
-    pub project: String,
-    pub project_rules: Vec<MemoryDto>,
-    pub recall_memories: Vec<MemoryDto>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SearchEnvelope {
-    pub fallback: bool,
-    pub memories: Vec<MemoryMatchDto>,
-    pub session_logs: Vec<SessionLogMatchDto>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct StoreSessionLogEnvelope {
-    pub chunk_count: usize,
-    pub session_id: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionEnvelope {
-    pub session: SessionDto,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionMessageEnvelope {
-    pub message: SessionMessageDto,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct FinalizeSessionEnvelope {
-    pub chunk_count: usize,
-    pub session_id: Uuid,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct DeleteEnvelope {
-    pub deleted: bool,
-    pub id: Uuid,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct EdgeDto {
-    pub confidence: f64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub dst_id: Uuid,
-    pub dst_project: String,
-    pub evidence: Option<String>,
-    pub id: Uuid,
-    pub origin: EdgeOrigin,
-    pub relation: EdgeRelation,
-    pub src_id: Uuid,
-    pub src_project: String,
-    pub suppressed: bool,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub weight: f64,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct NeighborDto {
-    pub edge: EdgeDto,
-    pub memory: MemoryDto,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct NeighborListEnvelope {
-    pub neighbors: Vec<NeighborDto>,
-}
-
 #[derive(Deserialize)]
 struct NeighborQuery {
     limit: Option<i64>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-pub struct MemoryMatchDto {
-    pub memory: MemoryDto,
-    pub similarity: f64,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionLogMatchDto {
-    pub session_log: SessionLogDto,
-    pub similarity: f64,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct MemoryDto {
-    pub category: Category,
-    pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub id: Uuid,
-    pub project: String,
-    pub summary: String,
-    pub tags: Vec<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionLogDto {
-    pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub cwd: String,
-    pub id: Uuid,
-    pub project: String,
-    pub session_id: String,
-    pub summary: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionDto {
-    pub agent: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub cwd: String,
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub external_session_id: String,
-    pub id: Uuid,
-    pub project: String,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct SessionMessageDto {
-    pub agent: String,
-    pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub id: Uuid,
-    pub kind: String,
-    pub metadata: Option<String>,
-    pub role: String,
-    pub session_id: Uuid,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct CreateSessionDto {
-    pub agent: Option<String>,
-    pub cwd: Option<String>,
-    pub external_session_id: String,
-    pub project: Option<String>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct AppendSessionMessageDto {
-    pub agent: Option<String>,
-    pub content: String,
-    pub kind: Option<String>,
-    pub metadata: Option<String>,
-    pub role: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct FinalizeSessionDto {
-    pub summary: Option<String>,
-}
-
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct ApiErrorEnvelope {
     error: ApiErrorBody,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct ApiErrorBody {
     code: &'static str,
     message: String,
@@ -334,18 +155,10 @@ async fn create_memory(
 async fn create_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    LoggedJson(request): LoggedJson<CreateSessionDto>,
+    LoggedJson(request): LoggedJson<CreateSessionRequest>,
 ) -> Result<Json<SessionEnvelope>, ApiError> {
     authorize(&state, &headers)?;
-    let session = state
-        .app
-        .create_session(CreateSessionRequest {
-            agent: request.agent,
-            cwd: request.cwd,
-            external_session_id: request.external_session_id,
-            project: request.project,
-        })
-        .await?;
+    let session = state.app.create_session(request).await?;
     Ok(Json(SessionEnvelope {
         session: session.into(),
     }))
@@ -646,168 +459,6 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::unauthorized("invalid bearer token"))
-    }
-}
-
-impl From<MemoryEdgeSummary> for EdgeDto {
-    fn from(edge: MemoryEdgeSummary) -> Self {
-        Self {
-            confidence: edge.confidence,
-            created_at: edge.created_at,
-            dst_id: edge.dst_id,
-            dst_project: edge.dst_project,
-            evidence: edge.evidence,
-            id: edge.id,
-            origin: edge.origin,
-            relation: edge.relation,
-            src_id: edge.src_id,
-            src_project: edge.src_project,
-            suppressed: edge.suppressed,
-            updated_at: edge.updated_at,
-            weight: edge.weight,
-        }
-    }
-}
-
-impl From<MemorySummary> for MemoryDto {
-    fn from(memory: MemorySummary) -> Self {
-        Self {
-            category: memory.category,
-            content: memory.content,
-            created_at: memory.created_at,
-            id: memory.id,
-            project: memory.project,
-            summary: memory.summary,
-            tags: memory.tags,
-            updated_at: memory.updated_at,
-        }
-    }
-}
-
-impl From<MemoryDto> for MemorySummary {
-    fn from(memory: MemoryDto) -> Self {
-        Self {
-            category: memory.category,
-            content: memory.content,
-            created_at: memory.created_at,
-            id: memory.id,
-            project: memory.project,
-            summary: memory.summary,
-            tags: memory.tags,
-            updated_at: memory.updated_at,
-        }
-    }
-}
-
-impl From<RuleList> for RuleListEnvelope {
-    fn from(rules: RuleList) -> Self {
-        Self {
-            general_rules: rules.general_rules.into_iter().map(Into::into).collect(),
-            project_rules: rules.project_rules.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl From<BootstrapPayload> for BootstrapEnvelope {
-    fn from(payload: BootstrapPayload) -> Self {
-        Self {
-            general_rules: payload.general_rules.into_iter().map(Into::into).collect(),
-            project: payload.project,
-            project_rules: payload.project_rules.into_iter().map(Into::into).collect(),
-            recall_memories: payload
-                .recall_memories
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
-    }
-}
-
-impl From<SessionLogSummary> for SessionLogDto {
-    fn from(session_log: SessionLogSummary) -> Self {
-        Self {
-            content: session_log.content,
-            created_at: session_log.created_at,
-            cwd: session_log.cwd,
-            id: session_log.id,
-            project: session_log.project,
-            session_id: session_log.session_id,
-            summary: session_log.summary,
-        }
-    }
-}
-
-impl From<SessionLogDto> for SessionLogSummary {
-    fn from(session_log: SessionLogDto) -> Self {
-        Self {
-            content: session_log.content,
-            created_at: session_log.created_at,
-            cwd: session_log.cwd,
-            id: session_log.id,
-            project: session_log.project,
-            session_id: session_log.session_id,
-            summary: session_log.summary,
-        }
-    }
-}
-
-impl From<crate::model::SessionSummary> for SessionDto {
-    fn from(session: crate::model::SessionSummary) -> Self {
-        Self {
-            agent: session.agent,
-            created_at: session.created_at,
-            cwd: session.cwd,
-            ended_at: session.ended_at,
-            external_session_id: session.external_session_id,
-            id: session.id,
-            project: session.project,
-            updated_at: session.updated_at,
-        }
-    }
-}
-
-impl From<SessionDto> for crate::model::SessionSummary {
-    fn from(session: SessionDto) -> Self {
-        Self {
-            agent: session.agent,
-            created_at: session.created_at,
-            cwd: session.cwd,
-            ended_at: session.ended_at,
-            external_session_id: session.external_session_id,
-            id: session.id,
-            project: session.project,
-            updated_at: session.updated_at,
-        }
-    }
-}
-
-impl From<crate::model::SessionMessageSummary> for SessionMessageDto {
-    fn from(message: crate::model::SessionMessageSummary) -> Self {
-        Self {
-            agent: message.agent,
-            content: message.content,
-            created_at: message.created_at,
-            id: message.id,
-            kind: message.kind,
-            metadata: message.metadata,
-            role: message.role,
-            session_id: message.session_id,
-        }
-    }
-}
-
-impl From<SessionMessageDto> for crate::model::SessionMessageSummary {
-    fn from(message: SessionMessageDto) -> Self {
-        Self {
-            agent: message.agent,
-            content: message.content,
-            created_at: message.created_at,
-            id: message.id,
-            kind: message.kind,
-            metadata: message.metadata,
-            role: message.role,
-            session_id: message.session_id,
-        }
     }
 }
 

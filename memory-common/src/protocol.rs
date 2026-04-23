@@ -455,3 +455,27 @@ impl From<SessionMessageDto> for SessionMessageSummary {
         }
     }
 }
+
+impl From<RuleList> for RuleListEnvelope {
+    fn from(rules: RuleList) -> Self {
+        Self {
+            general_rules: rules.general_rules.into_iter().map(Into::into).collect(),
+            project_rules: rules.project_rules.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<BootstrapPayload> for BootstrapEnvelope {
+    fn from(payload: BootstrapPayload) -> Self {
+        Self {
+            general_rules: payload.general_rules.into_iter().map(Into::into).collect(),
+            project: payload.project,
+            project_rules: payload.project_rules.into_iter().map(Into::into).collect(),
+            recall_memories: payload
+                .recall_memories
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}

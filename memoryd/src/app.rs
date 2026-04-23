@@ -2,13 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::embed;
 use crate::error::Error;
 use crate::model::{self, Category, MemoryEdgeSummary};
+use crate::protocol::{
+    AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
+    ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
+    StoreSessionLogRequest, UpdateMemoryRequest,
+};
 use crate::{db, edges, expand, rerank, transcript};
 
 const CHUNK_OVERLAP: usize = 200;
@@ -26,101 +30,6 @@ pub struct MemoryApp {
     pool: PgPool,
     rerank_model: String,
     rerank_num_ctx: u32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ListMemoriesRequest {
-    pub category: Option<Category>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    pub project: String,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SearchMemoriesRequest {
-    pub category: Option<Category>,
-    pub cross_project: Option<bool>,
-    pub expand_query: Option<bool>,
-    pub graph_hops: Option<u32>,
-    pub include_general: Option<bool>,
-    pub limit: Option<i64>,
-    pub min_similarity: Option<f64>,
-    pub project: String,
-    pub project_allowlist: Option<Vec<String>>,
-    pub query: String,
-    pub rerank: Option<bool>,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StoreMemoryRequest {
-    pub category: Category,
-    pub content: String,
-    pub project: String,
-    pub summary: String,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct UpdateMemoryRequest {
-    pub content: Option<String>,
-    pub id: Uuid,
-    pub summary: Option<String>,
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StoreSessionLogRequest {
-    pub content: String,
-    pub cwd: Option<String>,
-    pub project: Option<String>,
-    pub session_id: String,
-    pub summary: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CreateSessionRequest {
-    pub agent: Option<String>,
-    pub cwd: Option<String>,
-    pub external_session_id: String,
-    pub project: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AppendSessionMessageRequest {
-    pub agent: Option<String>,
-    pub content: String,
-    pub kind: Option<String>,
-    pub metadata: Option<String>,
-    pub role: String,
-    pub session_id: Uuid,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct FinalizeSessionRequest {
-    pub session_id: Uuid,
-    pub summary: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct RuleList {
-    pub general_rules: Vec<model::MemorySummary>,
-    pub project_rules: Vec<model::MemorySummary>,
-}
-
-#[derive(Clone)]
-pub struct BootstrapPayload {
-    pub general_rules: Vec<model::MemorySummary>,
-    pub project: String,
-    pub project_rules: Vec<model::MemorySummary>,
-    pub recall_memories: Vec<model::MemorySummary>,
-}
-
-pub enum SearchOutcome {
-    Memories(Vec<(model::MemorySummary, f64)>),
-    SessionLogs(Vec<(model::SessionLogSummary, f64)>),
-    Empty,
 }
 
 impl MemoryApp {
