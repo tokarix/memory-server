@@ -404,7 +404,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Bootstrap a session by loading effective rules plus non-rule core recall memories for a project. For targeted worker runs, consider using `include_recall=false` or omitting general rules to avoid context dilution, heavily relying on subsequent `memory_rules` or `memory_search` calls with specific phase/language `tags` filters."
+        description = "Load all effective rules plus non-rule core recall memories for a project in a single call. Prefer `memory_rules` with `tags` filters for scoped, targeted rule retrieval — this avoids loading irrelevant rules and wasting context."
     )]
     async fn memory_bootstrap(
         &self,
