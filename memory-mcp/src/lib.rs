@@ -3,7 +3,6 @@
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool_handler};
 
-pub mod http_client;
 pub mod mcp;
 pub mod tools;
 
@@ -38,7 +37,8 @@ mod tests {
     #[test]
     fn test_instructions_contain_key_phrases() {
         let server = MemoryServer::new(crate::tools::MemoryBackend::Http(
-            crate::http_client::HttpMemoryClient::new("http://localhost:8080", None).unwrap(),
+            memory_common::http_client::HttpMemoryClient::new("http://localhost:8080", None)
+                .unwrap(),
         ));
         let info = server.get_info();
         let instructions = info

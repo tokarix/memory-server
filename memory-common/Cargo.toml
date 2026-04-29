@@ -5,11 +5,13 @@ edition.workspace = true
 
 [features]
 default = []
+http-client = ["dep:reqwest"]
 rmcp = ["dep:rmcp"]
 sqlx = ["dep:sqlx"]
 
 [dependencies]
 chrono.workspace = true
+reqwest = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 schemars.workspace = true
 serde.workspace = true

@@ -8,9 +8,8 @@ name = "memory-mcp"
 path = "src/main.rs"
 
 [dependencies]
-memory-common = { path = "../memory-common", features = ["rmcp"] }
+memory-common = { path = "../memory-common", features = ["http-client", "rmcp"] }
 serde_json.workspace = true
-reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true

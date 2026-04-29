@@ -9,7 +9,6 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::http_client::HttpMemoryClient;
 use crate::model;
 use crate::model::Category;
 use crate::protocol::{
@@ -17,6 +16,7 @@ use crate::protocol::{
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
+use memory_common::http_client::HttpMemoryClient;
 
 #[derive(Clone)]
 pub enum MemoryBackend {

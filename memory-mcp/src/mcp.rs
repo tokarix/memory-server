@@ -1,7 +1,7 @@
 use rmcp::{ServiceExt, transport::stdio};
 
-use crate::http_client::HttpMemoryClient;
 use crate::{config, tools};
+use memory_common::http_client::HttpMemoryClient;
 
 /// Run the stdio MCP adapter against a remote `memoryd` HTTP endpoint.
 ///
