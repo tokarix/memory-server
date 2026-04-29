@@ -45,6 +45,10 @@ pub struct ListNeighborsParams {
     /// UUID of the memory to find neighbors for
     id: Uuid,
     /// Maximum number of neighbors to return (default: 20, max: 100)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     limit: Option<i64>,
 }
 
@@ -54,8 +58,16 @@ pub struct ListParams {
     #[schemars(with = "Option<String>")]
     category: Option<Category>,
     /// Maximum number of results (default: 20, max: 100)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     limit: Option<i64>,
     /// Offset for pagination (default: 0)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     offset: Option<i64>,
     /// Project name to list memories for
     project: String,
@@ -101,10 +113,18 @@ pub struct SearchParams {
     /// Expand search query using an LLM (default: false)
     expand_query: Option<bool>,
     /// Number of graph hops for expansion (default: 1)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     graph_hops: Option<u32>,
     /// Include edges to/from the `general` project during expansion (default: false)
     include_general: Option<bool>,
     /// Maximum number of results (default: 5, max: 100)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     limit: Option<i64>,
     /// Minimum similarity threshold (default: 0.5, range: 0.0-1.0)
     min_similarity: Option<f64>,
@@ -176,6 +196,10 @@ pub struct ReviewQueueParams {
     #[schemars(with = "Option<String>")]
     category: Option<Category>,
     /// Maximum number of items to return (default: 20, max: 100)
+    #[serde(
+        default,
+        deserialize_with = "serde_aux::field_attributes::deserialize_option_number_from_string"
+    )]
     limit: Option<i64>,
     /// Project name
     project: String,
@@ -1357,5 +1381,41 @@ mod tests {
 
         let sess_start = get_desc("session_start");
         assert!(!sess_start.contains("entrypoint"));
+    }
+
+    #[test]
+    fn test_lenient_numeric_deserialization() {
+        let json = r#"{
+            "project": "test_project",
+            "limit": "42",
+            "offset": "100"
+        }"#;
+        let params: ListParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.project, "test_project");
+        assert_eq!(params.limit, Some(42));
+        assert_eq!(params.offset, Some(100));
+        assert_eq!(params.category, None);
+
+        let json_search = r#"{
+            "project": "test_project",
+            "query": "find things",
+            "graph_hops": "3",
+            "limit": "15"
+        }"#;
+        let search_params: SearchParams = serde_json::from_str(json_search).unwrap();
+        assert_eq!(search_params.project, "test_project");
+        assert_eq!(search_params.query, "find things");
+        assert_eq!(search_params.graph_hops, Some(3));
+        assert_eq!(search_params.limit, Some(15));
+        assert_eq!(search_params.expand_query, None);
+
+        let json_search_missing = r#"{
+            "project": "test_project",
+            "query": "find things"
+        }"#;
+        let search_params_missing: SearchParams =
+            serde_json::from_str(json_search_missing).unwrap();
+        assert_eq!(search_params_missing.graph_hops, None);
+        assert_eq!(search_params_missing.limit, None);
     }
 }
