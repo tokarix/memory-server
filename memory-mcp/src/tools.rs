@@ -25,7 +25,7 @@ pub enum MemoryBackend {
 
 pub struct MemoryServer {
     backend: MemoryBackend,
-    pub tool_router: ToolRouter<Self>,
+    pub(crate) tool_router: ToolRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
