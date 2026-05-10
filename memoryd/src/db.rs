@@ -1175,7 +1175,6 @@ mod tests {
         }
     }
 
-    #[ignore = "requires DATABASE_URL"]
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn list_neighbors_dedup_symmetric_same_edge(pool: PgPool) {
         let id_a = Uuid::new_v4();
@@ -1211,7 +1210,6 @@ mod tests {
         assert_eq!(neighbors[0].1.id, id_b);
     }
 
-    #[ignore = "requires DATABASE_URL"]
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn list_neighbors_preserves_distinct_edge_types(pool: PgPool) {
         let id_a = Uuid::new_v4();
@@ -1245,7 +1243,6 @@ mod tests {
         assert!(neighbors.iter().all(|(_, m)| m.id == id_b));
     }
 
-    #[ignore = "requires DATABASE_URL"]
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn list_rules_shadows_general_correctly(pool: PgPool) {
         let mut general_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);

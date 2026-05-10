@@ -3,6 +3,14 @@ when:
   - event: push
     branch: main
 
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: tokarix
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: memory_server_test
+
 steps:
   fmt:
     image: rust:1.94-slim
@@ -35,8 +43,11 @@ steps:
     image: rust:1.94-slim
     environment:
       CARGO_TARGET_DIR: /tmp/target
+      DATABASE_URL: postgres://tokarix:password@postgres:5432/memory_server_test
     commands:
-      - apt-get update && apt-get install -y g++
+      - apt-get update && apt-get install -y g++ postgresql-client
+      - |
+        timeout 30s bash -c 'until pg_isready -h postgres -U tokarix -d memory_server_test; do echo "Waiting for postgres..."; sleep 1; done'
       - cargo test --all-features --all-targets
     depends_on:
       - check

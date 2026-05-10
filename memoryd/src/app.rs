@@ -865,7 +865,6 @@ mod tests {
         format!("http://{addr}")
     }
 
-    #[ignore = "requires DATABASE_URL"]
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn submit_review_stores_notes_as_content_and_retags(pool: PgPool) {
         let mock_url = spawn_mock_server().await;
