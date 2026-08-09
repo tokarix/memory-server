@@ -428,6 +428,15 @@ Behavior:
 - embed the query server-side
 - run vector + FTS hybrid search
 - apply rerank only when requested and configured
+- exclude task-scoped workflow artifacts by default before every vector,
+  full-text, graph-neighbor, and session-log candidate limit
+- include those artifacts when the optional JSON field
+  `include_workflow_artifacts` is `true`
+
+Workflow artifacts are retained records: task-scoped Plans, recursively linked
+superseded Plan revisions, Decisions that review those Plans, and correlated
+raw or normalized task session transcripts. Exact list/get, public-neighbor,
+review, normalized-session, and session-log browse endpoints remain inclusive.
 
 ### `GET /api/v1/memories/{id}`
 
@@ -458,9 +467,14 @@ Purpose:
 
 - return project memories considered core recall
 
+Query parameters:
+
+- `include_workflow_artifacts=true` optional, default `false`
+
 Behavior:
 
 - mirrors current `memory_recall`
+- exclude task-scoped workflow artifacts unless explicitly included
 
 ### `GET /api/v1/projects/{project}/rules`
 
@@ -495,6 +509,10 @@ Behavior:
 - return `general_rules`
 - return `project_rules`
 - return non-rule `recall_memories` for the project
+- omit every Plan and review Decision from `recall_memories`, independent of
+  the standalone recall opt-in
+- the review exclusion applies to Decisions tagged `review`; other categories
+  carrying that tag are now eligible, unlike the previous broader filter
 - this is the preferred endpoint for session-start and first-prompt hooks
 
 ### `POST /api/v1/sessions`
@@ -710,3 +728,11 @@ Recommended durable flow:
 - agent B writes its review with `review_submit`
 - both agents can search raw session chronology separately from durable
   review memories
+
+### Normalized session activity timestamps
+
+Appending a message advances `sessions.updated_at` to at least the current
+database transaction time, including imports of historical or out-of-order
+messages. It also retains any later stored or incoming message timestamp.
+Provenance reconciliation can advance this timestamp as well. It represents
+session activity, not only the maximum original message timestamp.

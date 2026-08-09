@@ -49,6 +49,25 @@ Workspace crates:
 `memory_recall` returns the categories considered core by the current
 implementation: `decision`, `error_fix`, `plan`, and `rule`.
 
+Semantic search and standalone recall exclude task-scoped workflow artifacts
+by default. These retained audit records include plans tagged with a valid
+`task:<uuid>` or legacy `superseded-for-task:<uuid>` marker, earlier Plan
+revisions reached recursively through `supersedes-plan:<uuid>`, Decisions that
+target a marked Plan through `reviewed-item:<uuid>`, and session transcripts
+containing a valid `task:<uuid>` token. Pass
+`include_workflow_artifacts=true` to `memory_search` or `memory_recall` to use
+the previous inclusive behavior.
+
+The default applies before vector, full-text, graph-neighbor, and session-log
+candidate limits, so protected records cannot consume an ordinary result
+window. Exact listing and direct retrieval remain inclusive, as do public
+neighbor, review, normalized-session, and session-log browsing surfaces.
+`memory_bootstrap` retains its stronger policy: its recall payload omits every
+Plan and review Decision even though standalone recall has an opt-in.
+
+See the [workflow artifact verification notes](docs/workflow-artifact-verification.md)
+for relationship indexing, review contracts, query-plan comparisons, and tests.
+
 ## Prerequisites
 
 - Rust 1.85+
@@ -274,6 +293,8 @@ require `Authorization: Bearer <token>`.
 - expands seed results via graph edges (same-project by default)
 - optionally reranks the combined set with the configured rerank model (disabled by default)
 - falls back to session-log search if no durable memories match
+- excludes task-scoped workflow artifacts at every retrieval stage unless
+  `include_workflow_artifacts=true`
 
 ## Additional binaries
 
@@ -454,6 +475,8 @@ Scope policy (all conservative by default):
 - `general` project: only when `include_general=true`
 - Foreign projects: only when `cross_project=true`, optionally filtered
   by `project_allowlist`
+- Task-scoped workflow artifacts: only when
+  `include_workflow_artifacts=true`
 
 Score decay per hop: 0.7×, with additional discounts for `general`
 (0.9×) and foreign projects (0.5×).
@@ -464,6 +487,11 @@ The `dream` binary includes a graph refresh phase that runs before
 merge/prune. It builds `similar` and `related_tag` edges using
 idempotent upserts. `ON DELETE CASCADE` on both foreign keys ensures
 edges are cleaned up when memories are deleted.
+
+Graph refresh remains inclusive, but merge and prune maintenance exclude
+workflow artifacts during candidate generation and recheck provenance inside
+the mutation transaction. Historical workflow plans, reviews, and transcripts
+are retained for audit and explicit retrieval.
 
 ## Review Workflow
 
