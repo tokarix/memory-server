@@ -89,7 +89,7 @@ pub async fn run(
     // Per-project merge/prune pass.
     for project in &projects {
         tracing::info!(project, "processing project");
-        let embeddings = db::all_embeddings(pool, project).await?;
+        let embeddings = db::maintenance_embeddings(pool, project).await?;
         tracing::info!(project, count = embeddings.len(), "loaded embeddings");
 
         let merge_candidates = find_merge_candidates(&embeddings);
@@ -170,16 +170,23 @@ async fn apply_merges(
                     .embed_client
                     .embed(&merged.summary, &merged.content)
                     .await?;
-                db::update(
+                let applied = db::dream_merge(
                     context.pool,
                     candidate.id_a,
-                    Some(&merged.content),
-                    Some(embedding),
-                    Some(&merged.summary),
-                    None,
+                    candidate.id_b,
+                    &merged.content,
+                    embedding,
+                    &merged.summary,
                 )
                 .await?;
-                db::delete(context.pool, candidate.id_b).await?;
+                if !applied {
+                    tracing::info!(
+                        id_a = %candidate.id_a,
+                        id_b = %candidate.id_b,
+                        "skipping merge: candidate became protected"
+                    );
+                    continue;
+                }
                 merged_ids.insert(candidate.id_a);
                 merged_ids.insert(candidate.id_b);
                 tracing::info!(
@@ -252,12 +259,16 @@ async fn apply_prunes(
                         reason = decision.reason,
                         "keeping stale memory"
                     );
-                } else {
-                    db::delete(context.pool, candidate.id).await?;
+                } else if db::dream_prune(context.pool, candidate.id).await? {
                     tracing::info!(
                         id = %candidate.id,
                         reason = decision.reason,
                         "pruned stale memory"
+                    );
+                } else {
+                    tracing::info!(
+                        id = %candidate.id,
+                        "skipping prune: candidate became protected"
                     );
                 }
             }
@@ -475,7 +486,7 @@ async fn find_stale_candidates(
     let now = Utc::now();
     let recent_cutoff = now - chrono::Duration::days(RECENT_DAYS);
 
-    let all_memories = db::list(pool, project, None, 10_000, 0, None).await?;
+    let all_memories = db::list_maintenance_candidates(pool, project).await?;
 
     let recent_embeddings: Vec<&Vec<f32>> = all_memories
         .iter()

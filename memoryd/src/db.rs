@@ -37,6 +37,37 @@ pub async fn all_embeddings(
         .collect()
 }
 
+/// Load embeddings eligible for destructive dream maintenance.
+///
+/// Public graph refresh intentionally continues to use [`all_embeddings`].
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn maintenance_embeddings(
+    pool: &PgPool,
+    project: &str,
+) -> Result<Vec<(Uuid, Vec<f32>)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, embedding::TEXT
+         FROM memories
+         WHERE project = $1
+           AND workflow_artifact = FALSE
+           AND category NOT IN ('plan', 'rule')
+         ORDER BY id",
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let id: Uuid = row.try_get("id")?;
+            let embedding_text: String = row.try_get("embedding")?;
+            Ok((id, parse_pgvector_text(&embedding_text)))
+        })
+        .collect()
+}
+
 /// Connect to `PostgreSQL`.
 ///
 /// # Errors
@@ -615,6 +646,30 @@ pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary
     rows.iter().map(row_to_summary).collect()
 }
 
+/// List memories eligible for destructive dream maintenance.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_maintenance_candidates(
+    pool: &PgPool,
+    project: &str,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags,
+                updated_at
+         FROM memories
+         WHERE project = $1
+           AND workflow_artifact = FALSE
+           AND category NOT IN ('plan', 'rule')
+         ORDER BY updated_at DESC",
+    )
+    .bind(project)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
 /// List memories awaiting review, optionally filtered by category.
 ///
 /// # Errors
@@ -1111,6 +1166,101 @@ pub async fn update(
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Merge two ordinary memories after a transactional protection recheck.
+///
+/// Returns `false` without mutation if either row disappeared or became a
+/// Plan, Rule, or workflow artifact after candidate discovery.
+///
+/// # Errors
+///
+/// Returns an error if locking or mutation fails.
+pub async fn dream_merge(
+    pool: &PgPool,
+    survivor_id: Uuid,
+    source_id: Uuid,
+    content: &str,
+    embedding: Vec<f32>,
+    summary: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    acquire_workflow_provenance_mutex(&mut transaction).await?;
+    let ids = [survivor_id, source_id];
+    let rows = sqlx::query(
+        "SELECT id, category, workflow_artifact
+         FROM memories
+         WHERE id = ANY($1)
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(ids)
+    .fetch_all(&mut *transaction)
+    .await?;
+    let mut protected = false;
+    for row in &rows {
+        protected |= memory_is_dream_protected(row)?;
+    }
+    if rows.len() != 2 || protected {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE memories
+         SET content = $2, embedding = $3, summary = $4, updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(survivor_id)
+    .bind(content)
+    .bind(Vector::from(embedding))
+    .bind(summary)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("DELETE FROM memories WHERE id = $1")
+        .bind(source_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+/// Prune an ordinary memory after a transactional protection recheck.
+///
+/// # Errors
+///
+/// Returns an error if locking or deletion fails.
+pub async fn dream_prune(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    acquire_workflow_provenance_mutex(&mut transaction).await?;
+    let row = sqlx::query(
+        "SELECT id, category, workflow_artifact
+         FROM memories
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(row) = row else {
+        transaction.commit().await?;
+        return Ok(false);
+    };
+    if memory_is_dream_protected(&row)? {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM memories WHERE id = $1")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+fn memory_is_dream_protected(row: &sqlx::postgres::PgRow) -> Result<bool, sqlx::Error> {
+    let category = row.try_get::<Category, _>("category")?;
+    let workflow_artifact = row.try_get::<bool, _>("workflow_artifact")?;
+    Ok(workflow_artifact || matches!(category, Category::Plan | Category::Rule))
 }
 
 /// Update a memory while preserving and propagating workflow provenance.
@@ -2824,6 +2974,70 @@ mod tests {
 
         assert!(is_workflow_artifact(&pool, plan_id).await);
         assert!(is_workflow_artifact(&pool, review_id).await);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn dream_candidates_and_mutations_preserve_workflow_reviews(pool: PgPool) {
+        let plan_id = Uuid::new_v4();
+        let review_id = Uuid::new_v4();
+        let ordinary_id = Uuid::new_v4();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(plan_id, Category::Plan, "project", vec![]),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                review_id,
+                Category::Decision,
+                "project",
+                vec![format!("reviewed-item:{plan_id}")],
+            ),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(ordinary_id, Category::Decision, "project", vec![]),
+        )
+        .await
+        .unwrap();
+
+        let before = maintenance_embeddings(&pool, "project").await.unwrap();
+        assert!(before.iter().any(|(id, _)| *id == review_id));
+        update_with_workflow_provenance(
+            &pool,
+            plan_id,
+            None,
+            None,
+            None,
+            Some(&[format!("task:{}", Uuid::new_v4())]),
+        )
+        .await
+        .unwrap();
+        assert!(is_workflow_artifact(&pool, review_id).await);
+
+        assert!(
+            !dream_merge(
+                &pool,
+                ordinary_id,
+                review_id,
+                "merged content",
+                vec![1.0; 1024],
+                "merged summary",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!dream_prune(&pool, review_id).await.unwrap());
+        assert!(get(&pool, ordinary_id).await.unwrap().is_some());
+        assert!(get(&pool, review_id).await.unwrap().is_some());
+
+        let after = maintenance_embeddings(&pool, "project").await.unwrap();
+        assert!(!after.iter().any(|(id, _)| *id == review_id));
+        assert!(after.iter().any(|(id, _)| *id == ordinary_id));
     }
 
     fn test_edge(
