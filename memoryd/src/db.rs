@@ -241,6 +241,59 @@ pub async fn list_neighbors(
         .collect()
 }
 
+/// List graph neighbors for semantic search under its artifact policy.
+///
+/// Public [`list_neighbors`] remains inclusive for audit access.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_search_neighbors(
+    pool: &PgPool,
+    memory_id: Uuid,
+    limit: i64,
+    include_workflow_artifacts: bool,
+) -> Result<Vec<(MemoryEdgeSummary, MemorySummary)>, sqlx::Error> {
+    if include_workflow_artifacts {
+        return list_neighbors(pool, memory_id, limit).await;
+    }
+    let rows = sqlx::query(
+        "WITH ranked AS (
+            SELECT e.id AS edge_id, e.confidence,
+                   e.created_at AS edge_created_at, e.dst_id, e.dst_project,
+                   e.evidence, e.origin, e.relation, e.src_id, e.src_project,
+                   e.suppressed, e.updated_at AS edge_updated_at, e.weight,
+                   CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS neighbor_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END,
+                                    e.relation, e.origin
+                       ORDER BY e.weight DESC
+                   ) AS rn
+            FROM memory_edges e
+            WHERE (e.src_id = $1 OR e.dst_id = $1)
+              AND NOT e.suppressed
+        )
+        SELECT r.edge_id, r.confidence, r.edge_created_at, r.dst_id,
+               r.dst_project, r.evidence, r.origin, r.relation, r.src_id,
+               r.src_project, r.suppressed, r.edge_updated_at, r.weight,
+               m.id, m.category, m.content, m.created_at, m.project,
+               m.summary, m.tags, m.updated_at
+        FROM ranked r
+        JOIN memories m ON m.id = r.neighbor_id
+        WHERE r.rn = 1
+          AND m.workflow_artifact = FALSE
+        ORDER BY r.weight DESC
+        LIMIT $2",
+    )
+    .bind(memory_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| Ok((row_to_edge_summary(row)?, row_to_summary(row)?)))
+        .collect()
+}
+
 /// List edges originating from a specific memory.
 ///
 /// # Errors
@@ -928,6 +981,83 @@ pub async fn list_session_messages(
     rows.iter().map(row_to_session_message_summary).collect()
 }
 
+const SESSION_SEARCH_INCLUSIVE_SQL: &str = r"
+    WITH nearest_chunks AS (
+        SELECT c.session_log_id, c.embedding <=> $1 AS distance
+        FROM session_log_chunks c
+        JOIN session_logs sl ON sl.id = c.session_log_id
+        WHERE sl.project = $2
+        ORDER BY c.embedding <=> $1
+        LIMIT $3
+    ), vector_results AS (
+        SELECT session_log_id AS id,
+               ROW_NUMBER() OVER (ORDER BY MIN(distance)) AS rank_v
+        FROM nearest_chunks
+        WHERE 1 - distance >= $4
+        GROUP BY session_log_id
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        ) AS rank_f
+        FROM session_logs
+        WHERE project = $2
+          AND fts @@ plainto_tsquery('english', $5)
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        LIMIT $3
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT s.id, s.content, s.created_at, s.cwd, s.project, s.session_id,
+           s.summary, c.rrf_score AS similarity
+    FROM combined c
+    JOIN session_logs s ON s.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $6";
+
+const SESSION_SEARCH_DEFAULT_SQL: &str = r"
+    WITH nearest_chunks AS (
+        SELECT c.session_log_id, c.embedding <=> $1 AS distance
+        FROM session_log_chunks c
+        JOIN session_logs sl ON sl.id = c.session_log_id
+        WHERE sl.project = $2
+          AND c.workflow_artifact = FALSE
+          AND sl.workflow_artifact = FALSE
+        ORDER BY c.embedding <=> $1
+        LIMIT $3
+    ), vector_results AS (
+        SELECT session_log_id AS id,
+               ROW_NUMBER() OVER (ORDER BY MIN(distance)) AS rank_v
+        FROM nearest_chunks
+        WHERE 1 - distance >= $4
+        GROUP BY session_log_id
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        ) AS rank_f
+        FROM session_logs
+        WHERE project = $2
+          AND workflow_artifact = FALSE
+          AND fts @@ plainto_tsquery('english', $5)
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        LIMIT $3
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT s.id, s.content, s.created_at, s.cwd, s.project, s.session_id,
+           s.summary, c.rrf_score AS similarity
+    FROM combined c
+    JOIN session_logs s ON s.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $6";
+
 /// Search finalized session logs.
 ///
 /// # Errors
@@ -940,54 +1070,24 @@ pub async fn session_log_search(
     project: &str,
     limit: i64,
     min_similarity: f64,
+    include_workflow_artifacts: bool,
 ) -> Result<Vec<(SessionLogSummary, f64)>, sqlx::Error> {
     let query_vec = Vector::from(embedding);
     let fetch_limit = limit * 3;
-    let rows = sqlx::query(
-        "WITH nearest_chunks AS (
-            SELECT c.session_log_id,
-                   c.embedding <=> $1 AS distance
-            FROM session_log_chunks c
-            JOIN session_logs sl ON sl.id = c.session_log_id
-            WHERE sl.project = $2
-            ORDER BY c.embedding <=> $1
-            LIMIT $3
-        ),
-        vector_results AS (
-            SELECT session_log_id AS id,
-                   ROW_NUMBER() OVER (ORDER BY MIN(distance)) AS rank_v
-            FROM nearest_chunks
-            WHERE 1 - distance >= $4
-            GROUP BY session_log_id
-        ),
-        fts_results AS (
-            SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC) AS rank_f
-            FROM session_logs
-            WHERE project = $2
-              AND fts @@ plainto_tsquery('english', $5)
-            LIMIT $3
-        ),
-        combined AS (
-            SELECT COALESCE(v.id, f.id) AS id,
-                   (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
-            FROM vector_results v
-            FULL OUTER JOIN fts_results f ON v.id = f.id
-        )
-        SELECT s.id, s.content, s.created_at, s.cwd, s.project, s.session_id, s.summary,
-               c.rrf_score AS similarity
-        FROM combined c
-        JOIN session_logs s ON s.id = c.id
-        ORDER BY c.rrf_score DESC
-        LIMIT $6",
-    )
-    .bind(&query_vec)
-    .bind(project)
-    .bind(fetch_limit)
-    .bind(min_similarity)
-    .bind(query)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let statement = if include_workflow_artifacts {
+        SESSION_SEARCH_INCLUSIVE_SQL
+    } else {
+        SESSION_SEARCH_DEFAULT_SQL
+    };
+    let rows = sqlx::query(statement)
+        .bind(&query_vec)
+        .bind(project)
+        .bind(fetch_limit)
+        .bind(min_similarity)
+        .bind(query)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
     rows.iter()
         .map(|row| {
             let log = row_to_session_log_summary(row)?;
@@ -1510,12 +1610,149 @@ async fn mark_workflow_memories(
 
 pub struct HybridSearchParams<'a> {
     pub category: Option<&'a Category>,
+    pub include_workflow_artifacts: bool,
     pub limit: i64,
     pub min_similarity: f64,
     pub project: &'a str,
     pub query: &'a str,
     pub tags: Option<&'a [String]>,
 }
+
+const HYBRID_CATEGORY_INCLUSIVE_SQL: &str = r"
+    WITH vector_results AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+        FROM memories
+        WHERE project = $2 AND category = $3
+          AND 1 - (embedding <=> $1) >= $5
+          AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
+        ORDER BY embedding <=> $1
+        LIMIT $4
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC
+        ) AS rank_f
+        FROM memories
+        WHERE project = $2 AND category = $3
+          AND fts @@ plainto_tsquery('english', $6)
+          AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC
+        LIMIT $4
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
+           m.tags, m.updated_at, c.rrf_score AS similarity
+    FROM combined c
+    JOIN memories m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $7";
+
+const HYBRID_CATEGORY_DEFAULT_SQL: &str = r"
+    WITH vector_results AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+        FROM memories
+        WHERE project = $2 AND category = $3
+          AND workflow_artifact = FALSE
+          AND 1 - (embedding <=> $1) >= $5
+          AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
+        ORDER BY embedding <=> $1
+        LIMIT $4
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC
+        ) AS rank_f
+        FROM memories
+        WHERE project = $2 AND category = $3
+          AND workflow_artifact = FALSE
+          AND fts @@ plainto_tsquery('english', $6)
+          AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC
+        LIMIT $4
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
+           m.tags, m.updated_at, c.rrf_score AS similarity
+    FROM combined c
+    JOIN memories m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $7";
+
+const HYBRID_INCLUSIVE_SQL: &str = r"
+    WITH vector_results AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+        FROM memories
+        WHERE project = $2
+          AND 1 - (embedding <=> $1) >= $4
+          AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
+        ORDER BY embedding <=> $1
+        LIMIT $3
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        ) AS rank_f
+        FROM memories
+        WHERE project = $2
+          AND fts @@ plainto_tsquery('english', $5)
+          AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        LIMIT $3
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
+           m.tags, m.updated_at, c.rrf_score AS similarity
+    FROM combined c
+    JOIN memories m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $6";
+
+const HYBRID_DEFAULT_SQL: &str = r"
+    WITH vector_results AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
+        FROM memories
+        WHERE project = $2
+          AND workflow_artifact = FALSE
+          AND 1 - (embedding <=> $1) >= $4
+          AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
+        ORDER BY embedding <=> $1
+        LIMIT $3
+    ), fts_results AS (
+        SELECT id, ROW_NUMBER() OVER (
+            ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        ) AS rank_f
+        FROM memories
+        WHERE project = $2
+          AND workflow_artifact = FALSE
+          AND fts @@ plainto_tsquery('english', $5)
+          AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
+        ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC
+        LIMIT $3
+    ), combined AS (
+        SELECT COALESCE(v.id, f.id) AS id,
+               (COALESCE(1.0 / (60 + v.rank_v), 0)
+                + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
+        FROM vector_results v
+        FULL OUTER JOIN fts_results f ON v.id = f.id
+    )
+    SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
+           m.tags, m.updated_at, c.rrf_score AS similarity
+    FROM combined c
+    JOIN memories m ON m.id = c.id
+    ORDER BY c.rrf_score DESC
+    LIMIT $6";
 
 /// Run hybrid semantic plus full-text memory search.
 ///
@@ -1531,38 +1768,13 @@ pub async fn hybrid_search(
     let query_vec = Vector::from(embedding);
     let fetch_limit = params.limit * 3;
     let tag_arr = params.tags.map(<[String]>::to_vec);
-    let rows = match params.category {
-        Some(cat) => {
-            sqlx::query(
-                "WITH vector_results AS (
-                    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
-                    FROM memories
-                    WHERE project = $2 AND category = $3
-                      AND 1 - (embedding <=> $1) >= $5
-                      AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
-                    LIMIT $4
-                ),
-                fts_results AS (
-                    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $6)) DESC) AS rank_f
-                    FROM memories
-                    WHERE project = $2 AND category = $3
-                      AND fts @@ plainto_tsquery('english', $6)
-                      AND ($8::TEXT[] IS NULL OR tags @> $8::TEXT[])
-                    LIMIT $4
-                ),
-                combined AS (
-                    SELECT COALESCE(v.id, f.id) AS id,
-                           (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
-                    FROM vector_results v
-                    FULL OUTER JOIN fts_results f ON v.id = f.id
-                )
-                SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at,
-                       c.rrf_score AS similarity
-                FROM combined c
-                JOIN memories m ON m.id = c.id
-                ORDER BY c.rrf_score DESC
-                LIMIT $7",
-            )
+    let rows = if let Some(cat) = params.category {
+        let statement = if params.include_workflow_artifacts {
+            HYBRID_CATEGORY_INCLUSIVE_SQL
+        } else {
+            HYBRID_CATEGORY_DEFAULT_SQL
+        };
+        sqlx::query(statement)
             .bind(&query_vec)
             .bind(params.project)
             .bind(cat)
@@ -1573,38 +1785,13 @@ pub async fn hybrid_search(
             .bind(&tag_arr)
             .fetch_all(pool)
             .await?
-        }
-        None => {
-            sqlx::query(
-                "WITH vector_results AS (
-                    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank_v
-                    FROM memories
-                    WHERE project = $2
-                      AND 1 - (embedding <=> $1) >= $4
-                      AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
-                    LIMIT $3
-                ),
-                fts_results AS (
-                    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts, plainto_tsquery('english', $5)) DESC) AS rank_f
-                    FROM memories
-                    WHERE project = $2
-                      AND fts @@ plainto_tsquery('english', $5)
-                      AND ($7::TEXT[] IS NULL OR tags @> $7::TEXT[])
-                    LIMIT $3
-                ),
-                combined AS (
-                    SELECT COALESCE(v.id, f.id) AS id,
-                           (COALESCE(1.0 / (60 + v.rank_v), 0) + COALESCE(1.0 / (60 + f.rank_f), 0))::FLOAT8 AS rrf_score
-                    FROM vector_results v
-                    FULL OUTER JOIN fts_results f ON v.id = f.id
-                )
-                SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at,
-                       c.rrf_score AS similarity
-                FROM combined c
-                JOIN memories m ON m.id = c.id
-                ORDER BY c.rrf_score DESC
-                LIMIT $6",
-            )
+    } else {
+        let statement = if params.include_workflow_artifacts {
+            HYBRID_INCLUSIVE_SQL
+        } else {
+            HYBRID_DEFAULT_SQL
+        };
+        sqlx::query(statement)
             .bind(&query_vec)
             .bind(params.project)
             .bind(fetch_limit)
@@ -1614,7 +1801,6 @@ pub async fn hybrid_search(
             .bind(&tag_arr)
             .fetch_all(pool)
             .await?
-        }
     };
     rows.iter()
         .map(|row| {
@@ -1918,6 +2104,23 @@ mod tests {
                 published_chunk_states(pool, &external_id).await,
                 [task_marked]
             );
+            for inclusive in [false, true] {
+                let results = session_log_search(
+                    pool,
+                    vec![0.0; 1024],
+                    "transcript",
+                    "project",
+                    10,
+                    0.0,
+                    inclusive,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    results.iter().any(|(log, _)| log.session_id == external_id),
+                    inclusive || !task_marked,
+                );
+            }
         })
         .await
         .expect("paused preparation and publication must complete without deadlock");
@@ -3038,6 +3241,155 @@ mod tests {
         let after = maintenance_embeddings(&pool, "project").await.unwrap();
         assert!(!after.iter().any(|(id, _)| *id == review_id));
         assert!(after.iter().any(|(id, _)| *id == ordinary_id));
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn semantic_windows_filter_workflow_artifacts_before_limits(pool: PgPool) {
+        let seed_id = Uuid::new_v4();
+        let ordinary_id = Uuid::new_v4();
+        let workflow_id = Uuid::new_v4();
+        insert(&pool, &test_memory(seed_id, "project"))
+            .await
+            .unwrap();
+        insert(&pool, &test_memory(ordinary_id, "project"))
+            .await
+            .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                workflow_id,
+                Category::Plan,
+                "project",
+                vec![format!("task:{}", Uuid::new_v4())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        upsert_edge(
+            &pool,
+            &test_edge(
+                seed_id,
+                "project",
+                workflow_id,
+                "project",
+                EdgeRelation::Similar,
+                EdgeOrigin::EmbeddingNeighbor,
+                1.0,
+            ),
+        )
+        .await
+        .unwrap();
+        upsert_edge(
+            &pool,
+            &test_edge(
+                seed_id,
+                "project",
+                ordinary_id,
+                "project",
+                EdgeRelation::Similar,
+                EdgeOrigin::EmbeddingNeighbor,
+                0.9,
+            ),
+        )
+        .await
+        .unwrap();
+        let default_neighbors = list_search_neighbors(&pool, seed_id, 1, false)
+            .await
+            .unwrap();
+        assert_eq!(default_neighbors.len(), 1);
+        assert_eq!(default_neighbors[0].1.id, ordinary_id);
+        let inclusive_neighbors = list_search_neighbors(&pool, seed_id, 1, true)
+            .await
+            .unwrap();
+        assert_eq!(inclusive_neighbors[0].1.id, workflow_id);
+
+        let default_memories = hybrid_search(
+            &pool,
+            vec![0.0; 1024],
+            HybridSearchParams {
+                category: None,
+                include_workflow_artifacts: false,
+                limit: 10,
+                min_similarity: 0.0,
+                project: "project",
+                query: "test",
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            default_memories
+                .iter()
+                .all(|(memory, _)| memory.id != workflow_id)
+        );
+        let inclusive_memories = hybrid_search(
+            &pool,
+            vec![0.0; 1024],
+            HybridSearchParams {
+                category: None,
+                include_workflow_artifacts: true,
+                limit: 10,
+                min_similarity: 0.0,
+                project: "project",
+                query: "test",
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            inclusive_memories
+                .iter()
+                .any(|(memory, _)| memory.id == workflow_id)
+        );
+
+        let ordinary_log = test_session_log("ordinary-log", false);
+        publish_session_log(
+            &pool,
+            &ordinary_log,
+            &[test_session_chunk(ordinary_log.id, false)],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let workflow_log = test_session_log("workflow-log", true);
+        publish_session_log(
+            &pool,
+            &workflow_log,
+            &[test_session_chunk(workflow_log.id, true)],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let default_logs = session_log_search(
+            &pool,
+            vec![0.0; 1024],
+            "transcript",
+            "project",
+            10,
+            0.0,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(default_logs.len(), 1);
+        assert_eq!(default_logs[0].0.session_id, "ordinary-log");
+        let inclusive_logs = session_log_search(
+            &pool,
+            vec![0.0; 1024],
+            "transcript",
+            "project",
+            10,
+            0.0,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(inclusive_logs.len(), 2);
     }
 
     fn test_edge(

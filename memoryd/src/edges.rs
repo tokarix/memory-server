@@ -22,6 +22,7 @@ pub struct ExpansionPolicy {
     pub cross_project: bool,
     pub graph_hops: u32,
     pub include_general: bool,
+    pub include_workflow_artifacts: bool,
     pub project_allowlist: Option<Vec<String>>,
     pub source_project: String,
 }
@@ -53,8 +54,13 @@ pub async fn graph_expand(
     for _hop in 0..policy.graph_hops {
         let mut next_frontier: Vec<(Uuid, f64)> = Vec::new();
         for (node_id, node_score) in &frontier {
-            let neighbors =
-                crate::db::list_neighbors(pool, *node_id, EXPANSION_NEIGHBOR_LIMIT).await?;
+            let neighbors = crate::db::list_search_neighbors(
+                pool,
+                *node_id,
+                EXPANSION_NEIGHBOR_LIMIT,
+                policy.include_workflow_artifacts,
+            )
+            .await?;
             for (edge, neighbor) in neighbors {
                 if seen.contains(&neighbor.id) || edge.weight < EXPANSION_WEIGHT_THRESHOLD {
                     continue;
@@ -277,6 +283,7 @@ mod tests {
             cross_project: false,
             graph_hops: 1,
             include_general: false,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };
@@ -289,6 +296,7 @@ mod tests {
             cross_project: false,
             graph_hops: 1,
             include_general: false,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };
@@ -301,6 +309,7 @@ mod tests {
             cross_project: false,
             graph_hops: 1,
             include_general: true,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };
@@ -313,6 +322,7 @@ mod tests {
             cross_project: false,
             graph_hops: 1,
             include_general: false,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };
@@ -325,6 +335,7 @@ mod tests {
             cross_project: true,
             graph_hops: 1,
             include_general: false,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };
@@ -337,6 +348,7 @@ mod tests {
             cross_project: true,
             graph_hops: 1,
             include_general: false,
+            include_workflow_artifacts: false,
             project_allowlist: Some(vec!["allowed".to_owned()]),
             source_project: "myproject".to_owned(),
         };
@@ -350,6 +362,7 @@ mod tests {
             cross_project: true,
             graph_hops: 1,
             include_general: true,
+            include_workflow_artifacts: false,
             project_allowlist: None,
             source_project: "myproject".to_owned(),
         };

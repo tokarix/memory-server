@@ -120,6 +120,8 @@ pub struct SearchParams {
     graph_hops: Option<u32>,
     /// Include edges to/from the `general` project during expansion (default: false)
     include_general: Option<bool>,
+    /// Include task-scoped workflow artifacts (default: false)
+    include_workflow_artifacts: Option<bool>,
     /// Maximum number of results (default: 5, max: 100)
     #[serde(
         default,
@@ -439,6 +441,7 @@ impl MemoryServer {
                 expand_query: params.expand_query,
                 graph_hops: params.graph_hops,
                 include_general: params.include_general,
+                include_workflow_artifacts: params.include_workflow_artifacts,
                 limit: params.limit,
                 min_similarity: params.min_similarity,
                 project: params.project,
@@ -1408,6 +1411,7 @@ mod tests {
         assert_eq!(search_params.graph_hops, Some(3));
         assert_eq!(search_params.limit, Some(15));
         assert_eq!(search_params.expand_query, None);
+        assert_eq!(search_params.include_workflow_artifacts, None);
 
         let json_search_missing = r#"{
             "project": "test_project",
@@ -1417,5 +1421,16 @@ mod tests {
             serde_json::from_str(json_search_missing).unwrap();
         assert_eq!(search_params_missing.graph_hops, None);
         assert_eq!(search_params_missing.limit, None);
+        assert_eq!(search_params_missing.include_workflow_artifacts, None);
+
+        let explicit: SearchParams = serde_json::from_str(
+            r#"{
+                "project": "test_project",
+                "query": "find things",
+                "include_workflow_artifacts": true
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(explicit.include_workflow_artifacts, Some(true));
     }
 }

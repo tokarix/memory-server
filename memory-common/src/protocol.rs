@@ -27,6 +27,8 @@ pub struct SearchMemoriesRequest {
     pub graph_hops: Option<u32>,
     /// Include edges to/from the `general` project during expansion (default: false)
     pub include_general: Option<bool>,
+    /// Include task-scoped workflow artifacts (default: false)
+    pub include_workflow_artifacts: Option<bool>,
     pub limit: Option<i64>,
     pub min_similarity: Option<f64>,
     pub project: String,

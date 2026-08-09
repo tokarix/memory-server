@@ -395,6 +395,7 @@ async fn render_search_results(
                 expand_query: None,
                 graph_hops: None,
                 include_general: None,
+                include_workflow_artifacts: None,
                 limit: Some(SEARCH_LIMIT),
                 min_similarity: None,
                 project: project.to_owned(),

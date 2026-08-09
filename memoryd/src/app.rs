@@ -352,6 +352,7 @@ impl MemoryApp {
     /// # Errors
     ///
     /// Returns an error if expansion, embedding, reranking, or database retrieval fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn search_memories(
         &self,
         request: SearchMemoriesRequest,
@@ -363,6 +364,7 @@ impl MemoryApp {
             .clamp(0.0, 1.0);
         let inner_limit = limit * 2;
         let use_query_expansion = request.expand_query.unwrap_or(false);
+        let include_workflow_artifacts = request.include_workflow_artifacts.unwrap_or(false);
 
         let queries = if use_query_expansion {
             expand::expand_query(
@@ -389,6 +391,7 @@ impl MemoryApp {
                 embedding,
                 db::HybridSearchParams {
                     category: request.category.as_ref(),
+                    include_workflow_artifacts,
                     limit: inner_limit,
                     min_similarity,
                     project: &request.project,
@@ -408,6 +411,7 @@ impl MemoryApp {
             cross_project: request.cross_project.unwrap_or(false),
             graph_hops: request.graph_hops.unwrap_or(1),
             include_general: request.include_general.unwrap_or(false),
+            include_workflow_artifacts,
             project_allowlist: request.project_allowlist,
             source_project: request.project.clone(),
         };
@@ -458,6 +462,7 @@ impl MemoryApp {
                 &request.project,
                 limit,
                 min_similarity,
+                include_workflow_artifacts,
             )
             .await
             .map_err(Error::from)?;
@@ -882,7 +887,7 @@ mod tests {
 
     async fn mock_embed() -> Json<serde_json::Value> {
         Json(serde_json::json!({
-            "embeddings": [vec![0.0f32; 1024]]
+            "embeddings": [vec![1.0f32; 1024]]
         }))
     }
 
@@ -905,6 +910,76 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn search_workflow_policy_reaches_storage_and_graph(pool: PgPool) {
+        let mock_url = spawn_mock_server().await;
+        let app = MemoryApp::new(
+            pool,
+            Arc::new(crate::embed::Client::new(
+                mock_url.clone(),
+                "test-model".to_owned(),
+                None,
+                None,
+            )),
+            "test-model".to_owned(),
+            1024,
+            reqwest::Client::new(),
+            mock_url,
+            "test-model".to_owned(),
+            1024,
+        );
+        let mut plans = Vec::new();
+        for tags in [vec![], vec![format!("task:{}", Uuid::new_v4())]] {
+            plans.push(
+                app.store_memory(StoreMemoryRequest {
+                    category: Category::Plan,
+                    content: "nebula retrieval".to_owned(),
+                    project: "search-policy".to_owned(),
+                    summary: "nebula retrieval".to_owned(),
+                    tags: Some(tags),
+                })
+                .await
+                .unwrap(),
+            );
+        }
+        let review = app
+            .submit_review(
+                plans[1].id,
+                None,
+                "tester".to_owned(),
+                "approved".to_owned(),
+                "nebula retrieval".to_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for category in [None, Some(Category::Plan)] {
+            for include in [None, Some(false), Some(true)] {
+                let mut request = serde_json::json!({
+                    "project": "search-policy", "query": "nebula retrieval",
+                    "limit": 20, "min_similarity": 0.1, "graph_hops": 2,
+                    "category": category,
+                });
+                if let Some(include) = include {
+                    request["include_workflow_artifacts"] = include.into();
+                }
+                let outcome = app
+                    .search_memories(serde_json::from_value(request).unwrap())
+                    .await
+                    .unwrap();
+                let SearchOutcome::Memories(memories) = outcome else {
+                    panic!("expected durable search results");
+                };
+                let ids: Vec<_> = memories.iter().map(|(memory, _)| memory.id).collect();
+                assert!(ids.contains(&plans[0].id));
+                assert_eq!(ids.contains(&plans[1].id), include == Some(true));
+                if category.is_none() || include != Some(true) {
+                    assert_eq!(ids.contains(&review.id), include == Some(true));
+                }
+            }
+        }
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
