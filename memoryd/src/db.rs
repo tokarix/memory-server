@@ -1,12 +1,17 @@
+use std::collections::HashSet;
+
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::model::{
     Category, Memory, MemoryEdge, MemoryEdgeSummary, MemorySummary, Session, SessionLog,
     SessionLogChunk, SessionLogSummary, SessionMessage, SessionMessageSummary, SessionSummary,
 };
+use crate::workflow;
+
+const WORKFLOW_PROVENANCE_MUTEX: i64 = 0x4d45_4d57_4650_524f;
 
 /// Load all embeddings for one project.
 ///
@@ -450,6 +455,49 @@ pub async fn insert(pool: &PgPool, memory: &Memory) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Insert a Plan or Decision while serializing provenance relationships.
+///
+/// # Errors
+///
+/// Returns an error if the transaction fails.
+pub async fn insert_with_workflow_provenance(
+    pool: &PgPool,
+    memory: &Memory,
+) -> Result<(), sqlx::Error> {
+    let review_targets = workflow::reviewed_item_ids(&memory.tags);
+    let mut transaction = pool.begin().await?;
+    acquire_workflow_provenance_mutex(&mut transaction).await?;
+    let embedding = Vector::from(memory.embedding.clone());
+    let directly_scoped =
+        memory.category == Category::Plan && workflow::plan_is_directly_scoped(&memory.tags);
+    sqlx::query(
+        "INSERT INTO memories
+            (id, category, content, created_at, embedding, project, summary, tags,
+             updated_at, workflow_artifact)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(memory.id)
+    .bind(&memory.category)
+    .bind(&memory.content)
+    .bind(memory.created_at)
+    .bind(embedding)
+    .bind(&memory.project)
+    .bind(&memory.summary)
+    .bind(&memory.tags)
+    .bind(memory.updated_at)
+    .bind(directly_scoped)
+    .execute(&mut *transaction)
+    .await?;
+    promote_workflow_relationships(
+        &mut transaction,
+        memory.id,
+        &memory.category,
+        &review_targets,
+    )
+    .await?;
+    transaction.commit().await
 }
 
 /// List core memories for a project.
@@ -927,6 +975,197 @@ pub async fn update(
     Ok(result.rows_affected() > 0)
 }
 
+/// Update a memory while preserving and propagating workflow provenance.
+///
+/// # Errors
+///
+/// Returns an error if the transaction fails.
+pub async fn update_with_workflow_provenance(
+    pool: &PgPool,
+    id: Uuid,
+    content: Option<&str>,
+    embedding: Option<Vec<f32>>,
+    summary: Option<&str>,
+    tags: Option<&[String]>,
+) -> Result<bool, sqlx::Error> {
+    let Some(tags) = tags else {
+        return update(pool, id, content, embedding, summary, None).await;
+    };
+    // Category is immutable after insertion, so this preflight safely avoids the
+    // global provenance mutex for memories that cannot participate in workflow
+    // relationships. The transaction still reloads and locks the target row.
+    let category = sqlx::query_scalar::<_, Category>("SELECT category FROM memories WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(category) = category else {
+        return Ok(false);
+    };
+    if !matches!(category, Category::Plan | Category::Decision) {
+        return update(pool, id, content, embedding, summary, Some(tags)).await;
+    }
+
+    let review_targets = workflow::reviewed_item_ids(tags);
+    let mut transaction = pool.begin().await?;
+    acquire_workflow_provenance_mutex(&mut transaction).await?;
+    let current = sqlx::query(
+        "SELECT category
+         FROM memories
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(current) = current else {
+        transaction.commit().await?;
+        return Ok(false);
+    };
+    let category: Category = current.try_get("category")?;
+    let directly_scoped = category == Category::Plan && workflow::plan_is_directly_scoped(tags);
+
+    sqlx::query(
+        "UPDATE memories SET
+            content = COALESCE($2, content),
+            embedding = COALESCE($3, embedding),
+            summary = COALESCE($4, summary),
+            tags = COALESCE($5, tags),
+            workflow_artifact = workflow_artifact OR $6,
+            updated_at = NOW()
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(content)
+    .bind(embedding.map(Vector::from))
+    .bind(summary)
+    .bind(Some(tags))
+    .bind(directly_scoped)
+    .execute(&mut *transaction)
+    .await?;
+
+    if matches!(category, Category::Plan | Category::Decision) {
+        promote_workflow_relationships(&mut transaction, id, &category, &review_targets).await?;
+    }
+    transaction.commit().await?;
+    Ok(true)
+}
+
+async fn acquire_workflow_provenance_mutex(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(WORKFLOW_PROVENANCE_MUTEX)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn promote_workflow_relationships(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    category: &Category,
+    review_targets: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    // The caller holds the provenance mutex and primary row. Only relationship
+    // targets are subsequently locked, always before dependent decisions.
+    match category {
+        Category::Plan => promote_plan_lineage(transaction, id).await?,
+        Category::Decision => {
+            let marked_targets = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM memories
+                 WHERE id = ANY($1) AND category = 'plan' AND workflow_artifact
+                 ORDER BY id FOR UPDATE",
+            )
+            .bind(review_targets)
+            .fetch_all(&mut **transaction)
+            .await?;
+            if !marked_targets.is_empty() {
+                mark_workflow_memories(transaction, &[id]).await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn promote_plan_lineage(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<(), sqlx::Error> {
+    // A previously missing ancestor can be inserted after its marked successor.
+    // That incoming relationship is authoritative under the provenance mutex.
+    let marked: bool = sqlx::query_scalar(
+        "SELECT workflow_artifact OR EXISTS (
+             SELECT 1 FROM memories
+             WHERE category = 'plan' AND workflow_artifact
+               AND workflow_relationship_ids(tags, 'supersedes-plan:') @> ARRAY[$1]::UUID[]
+         ) FROM memories WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !marked {
+        return Ok(());
+    }
+
+    let mut seen = HashSet::new();
+    let mut frontier = vec![id];
+    let mut marked_plans = Vec::new();
+    while !frontier.is_empty() {
+        let rows = sqlx::query(
+            "SELECT id, tags FROM memories
+             WHERE category = 'plan' AND id = ANY($1)
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(&frontier)
+        .fetch_all(&mut **transaction)
+        .await?;
+        frontier.clear();
+        for row in rows {
+            let plan_id: Uuid = row.try_get("id")?;
+            if seen.insert(plan_id) {
+                marked_plans.push(plan_id);
+                let tags: Vec<String> = row.try_get("tags")?;
+                frontier.extend(
+                    workflow::superseded_plan_ids(&tags)
+                        .into_iter()
+                        .filter(|target| !seen.contains(target)),
+                );
+            }
+        }
+    }
+    mark_workflow_memories(transaction, &marked_plans).await?;
+
+    // Positive indexed UUID overlap finds only reviews of this lineage. It also
+    // catches reviews written before their plan, across project boundaries.
+    let decisions = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM memories
+         WHERE category = 'decision' AND workflow_artifact = FALSE
+           AND workflow_relationship_ids(tags, 'reviewed-item:') && $1::UUID[]
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(&marked_plans)
+    .fetch_all(&mut **transaction)
+    .await?;
+    mark_workflow_memories(transaction, &decisions).await
+}
+
+async fn mark_workflow_memories(
+    transaction: &mut Transaction<'_, Postgres>,
+    ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if !ids.is_empty() {
+        sqlx::query(
+            "UPDATE memories SET workflow_artifact = TRUE
+             WHERE id = ANY($1) AND workflow_artifact = FALSE",
+        )
+        .bind(ids)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 pub struct HybridSearchParams<'a> {
     pub category: Option<&'a Category>,
     pub limit: i64,
@@ -1146,6 +1385,401 @@ mod tests {
             tags: vec![],
             updated_at: Utc::now(),
         }
+    }
+
+    fn workflow_memory(id: Uuid, category: Category, project: &str, tags: Vec<String>) -> Memory {
+        Memory {
+            category,
+            tags,
+            ..test_memory(id, project)
+        }
+    }
+
+    async fn is_workflow_artifact(pool: &PgPool, id: Uuid) -> bool {
+        sqlx::query_scalar("SELECT workflow_artifact FROM memories WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn workflow_provenance_propagates_and_never_clears(pool: PgPool) {
+        let task_id = Uuid::new_v4();
+        let old_plan_id = Uuid::new_v4();
+        let intermediate_plan_id = Uuid::new_v4();
+        let current_plan_id = Uuid::new_v4();
+        let review_id = Uuid::new_v4();
+
+        let tags_index_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_indexes
+                 WHERE schemaname = current_schema()
+                   AND tablename = 'memories'
+                   AND indexname = 'idx_memories_tags'
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(tags_index_exists);
+
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                review_id,
+                Category::Decision,
+                "review-project",
+                vec![format!("reviewed-item:{current_plan_id}")],
+            ),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(old_plan_id, Category::Plan, "old-project", vec![]),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                intermediate_plan_id,
+                Category::Plan,
+                "intermediate-project",
+                vec![format!("supersedes-plan:{old_plan_id}")],
+            ),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                current_plan_id,
+                Category::Plan,
+                "current-project",
+                vec![
+                    format!("task:{task_id}"),
+                    format!("supersedes-plan:{intermediate_plan_id}"),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(is_workflow_artifact(&pool, current_plan_id).await);
+        assert!(is_workflow_artifact(&pool, intermediate_plan_id).await);
+        assert!(is_workflow_artifact(&pool, old_plan_id).await);
+        assert!(is_workflow_artifact(&pool, review_id).await);
+
+        update_with_workflow_provenance(&pool, current_plan_id, None, None, None, Some(&[]))
+            .await
+            .unwrap();
+        assert!(is_workflow_artifact(&pool, current_plan_id).await);
+        assert!(is_workflow_artifact(&pool, intermediate_plan_id).await);
+        assert!(is_workflow_artifact(&pool, old_plan_id).await);
+        assert!(is_workflow_artifact(&pool, review_id).await);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn relationship_index_parser_matches_rust(pool: PgPool) {
+        let id = Uuid::new_v4();
+        let spellings = [
+            id.to_string(),
+            id.to_string().to_uppercase(),
+            id.simple().to_string(),
+            id.braced().to_string(),
+            id.urn().to_string(),
+            format!("{id}:extra"),
+            format!(" {id}"),
+            format!("URN:UUID:{id}"),
+            "not-a-uuid".to_owned(),
+        ];
+        for prefix in ["reviewed-item:", "supersedes-plan:"] {
+            for spelling in &spellings {
+                let tags = vec![format!("{prefix}{spelling}"), format!("x-{prefix}{id}")];
+                let actual: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT array_remove(workflow_relationship_ids($1, $2), NULL)",
+                )
+                .bind(&tags)
+                .bind(prefix)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let expected = if prefix == "reviewed-item:" {
+                    workflow::reviewed_item_ids(&tags)
+                } else {
+                    workflow::superseded_plan_ids(&tags)
+                };
+                assert_eq!(actual, expected, "{tags:?}");
+            }
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn workflow_writes_do_not_lock_unrelated_rows(pool: PgPool) {
+        let unrelated_plan = Uuid::new_v4();
+        let unrelated_review = Uuid::new_v4();
+        for (id, category) in [
+            (unrelated_plan, Category::Plan),
+            (unrelated_review, Category::Decision),
+        ] {
+            insert_with_workflow_provenance(
+                &pool,
+                &workflow_memory(id, category, "unrelated", vec![]),
+            )
+            .await
+            .unwrap();
+        }
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM memories WHERE id = ANY($1) FOR UPDATE")
+            .bind([unrelated_plan, unrelated_review])
+            .fetch_all(&mut *holder)
+            .await
+            .unwrap();
+
+        let plan_id = Uuid::new_v4();
+        let review_id = Uuid::new_v4();
+        // The old table-wide FOR UPDATE blocks here until this timeout.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            insert_with_workflow_provenance(
+                &pool,
+                &workflow_memory(plan_id, Category::Plan, "plan", vec![]),
+            )
+            .await
+            .unwrap();
+            insert_with_workflow_provenance(
+                &pool,
+                &workflow_memory(
+                    review_id,
+                    Category::Decision,
+                    "review",
+                    vec![format!("reviewed-item:{plan_id}")],
+                ),
+            )
+            .await
+            .unwrap();
+            update_with_workflow_provenance(
+                &pool,
+                plan_id,
+                None,
+                None,
+                None,
+                Some(&[format!("task:{}", Uuid::new_v4())]),
+            )
+            .await
+            .unwrap();
+            let later_review_id = Uuid::new_v4();
+            insert_with_workflow_provenance(
+                &pool,
+                &workflow_memory(
+                    later_review_id,
+                    Category::Decision,
+                    "later-review",
+                    vec![format!("reviewed-item:{plan_id}")],
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(is_workflow_artifact(&pool, later_review_id).await);
+        })
+        .await
+        .expect("unrelated row locks must not block workflow writes");
+        holder.rollback().await.unwrap();
+        assert!(is_workflow_artifact(&pool, plan_id).await);
+        assert!(is_workflow_artifact(&pool, review_id).await);
+        assert!(!is_workflow_artifact(&pool, unrelated_plan).await);
+        assert!(!is_workflow_artifact(&pool, unrelated_review).await);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn late_ancestor_and_new_edges_on_marked_plan_propagate(pool: PgPool) {
+        let current = Uuid::new_v4();
+        let prior = Uuid::new_v4();
+        let oldest = Uuid::new_v4();
+        let review = Uuid::new_v4();
+        for memory in [
+            workflow_memory(
+                review,
+                Category::Decision,
+                "review",
+                vec![format!("reviewed-item:{}", prior.simple())],
+            ),
+            workflow_memory(
+                current,
+                Category::Plan,
+                "current",
+                vec![
+                    format!("task:{}", Uuid::new_v4()),
+                    format!("supersedes-plan:{}", prior.to_string().to_uppercase()),
+                ],
+            ),
+            workflow_memory(prior, Category::Plan, "prior", vec![]),
+            workflow_memory(oldest, Category::Plan, "oldest", vec![]),
+        ] {
+            insert_with_workflow_provenance(&pool, &memory)
+                .await
+                .unwrap();
+        }
+        assert!(is_workflow_artifact(&pool, prior).await);
+        assert!(is_workflow_artifact(&pool, review).await);
+        assert!(!is_workflow_artifact(&pool, oldest).await);
+        // Removing direct evidence and adding an edge must still propagate from
+        // durable provenance. A cycle must terminate without losing any row.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            update_with_workflow_provenance(
+                &pool,
+                prior,
+                None,
+                None,
+                None,
+                Some(&[
+                    format!("supersedes-plan:{oldest}"),
+                    format!("supersedes-plan:{current}"),
+                ]),
+            )
+            .await
+            .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(is_workflow_artifact(&pool, oldest).await);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn updates_without_workflow_tag_relationships_skip_provenance_mutex(pool: PgPool) {
+        let plan_id = Uuid::new_v4();
+        let context_id = Uuid::new_v4();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(plan_id, Category::Plan, "project", vec![]),
+        )
+        .await
+        .unwrap();
+        insert(&pool, &test_memory(context_id, "project"))
+            .await
+            .unwrap();
+
+        let mut lock_holder = pool.begin().await.unwrap();
+        acquire_workflow_provenance_mutex(&mut lock_holder)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            update_with_workflow_provenance(
+                &pool,
+                plan_id,
+                None,
+                None,
+                Some("content-only update"),
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            update_with_workflow_provenance(
+                &pool,
+                context_id,
+                None,
+                None,
+                None,
+                Some(&["ordinary-tag".to_owned()]),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        lock_holder.rollback().await.unwrap();
+        assert_eq!(
+            get(&pool, plan_id).await.unwrap().unwrap().summary,
+            "content-only update"
+        );
+        assert_eq!(
+            get(&pool, context_id).await.unwrap().unwrap().tags,
+            ["ordinary-tag"]
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn supersedes_relationship_does_not_mark_non_plan_targets(pool: PgPool) {
+        let non_plan_id = Uuid::new_v4();
+        let review_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(non_plan_id, Category::Decision, "other", vec![]),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                review_id,
+                Category::Decision,
+                "review",
+                vec![format!("reviewed-item:{non_plan_id}")],
+            ),
+        )
+        .await
+        .unwrap();
+        insert_with_workflow_provenance(
+            &pool,
+            &workflow_memory(
+                plan_id,
+                Category::Plan,
+                "plan",
+                vec![
+                    format!("task:{}", Uuid::new_v4()),
+                    format!("supersedes-plan:{non_plan_id}"),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(is_workflow_artifact(&pool, plan_id).await);
+        assert!(!is_workflow_artifact(&pool, non_plan_id).await);
+        assert!(!is_workflow_artifact(&pool, review_id).await);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn concurrent_plan_and_review_inserts_reconcile(pool: PgPool) {
+        let task_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let review_id = Uuid::new_v4();
+        let plan = workflow_memory(
+            plan_id,
+            Category::Plan,
+            "plan-project",
+            vec![format!("task:{task_id}")],
+        );
+        let review = workflow_memory(
+            review_id,
+            Category::Decision,
+            "review-project",
+            vec![format!("reviewed-item:{plan_id}")],
+        );
+        let plan_pool = pool.clone();
+        let review_pool = pool.clone();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let (plan_result, review_result) = tokio::join!(
+                insert_with_workflow_provenance(&plan_pool, &plan),
+                insert_with_workflow_provenance(&review_pool, &review),
+            );
+            plan_result.unwrap();
+            review_result.unwrap();
+        })
+        .await
+        .unwrap();
+
+        assert!(is_workflow_artifact(&pool, plan_id).await);
+        assert!(is_workflow_artifact(&pool, review_id).await);
     }
 
     fn test_edge(

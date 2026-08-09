@@ -493,7 +493,13 @@ impl MemoryApp {
             tags: request.tags.unwrap_or_default(),
             updated_at: now,
         };
-        db::insert(&self.pool, &memory).await.map_err(Error::from)?;
+        if matches!(memory.category, Category::Plan | Category::Decision) {
+            db::insert_with_workflow_provenance(&self.pool, &memory)
+                .await
+                .map_err(Error::from)?;
+        } else {
+            db::insert(&self.pool, &memory).await.map_err(Error::from)?;
+        }
         let summary = model::MemorySummary {
             id: memory.id,
             category: memory.category,
@@ -521,11 +527,14 @@ impl MemoryApp {
         &self,
         request: UpdateMemoryRequest,
     ) -> Result<Option<model::MemorySummary>, Error> {
+        let current = db::get(&self.pool, request.id).await.map_err(Error::from)?;
+        let Some(current) = current else {
+            if request.summary.is_some() || request.content.is_some() {
+                return Err(Error::NotFound(format!("memory {}", request.id)));
+            }
+            return Ok(None);
+        };
         let embedding = if request.summary.is_some() || request.content.is_some() {
-            let current = db::get(&self.pool, request.id)
-                .await
-                .map_err(Error::from)?
-                .ok_or_else(|| Error::NotFound(format!("memory {}", request.id)))?;
             let summary = request.summary.as_deref().unwrap_or(&current.summary);
             let content = request.content.as_deref().unwrap_or(&current.content);
             Some(self.embed_client.embed(summary, content).await?)
@@ -533,15 +542,29 @@ impl MemoryApp {
             None
         };
 
-        let updated = db::update(
-            &self.pool,
-            request.id,
-            request.content.as_deref(),
-            embedding,
-            request.summary.as_deref(),
-            request.tags.as_deref(),
-        )
-        .await
+        let updated = if matches!(current.category, Category::Plan | Category::Decision)
+            && request.tags.is_some()
+        {
+            db::update_with_workflow_provenance(
+                &self.pool,
+                request.id,
+                request.content.as_deref(),
+                embedding,
+                request.summary.as_deref(),
+                request.tags.as_deref(),
+            )
+            .await
+        } else {
+            db::update(
+                &self.pool,
+                request.id,
+                request.content.as_deref(),
+                embedding,
+                request.summary.as_deref(),
+                request.tags.as_deref(),
+            )
+            .await
+        }
         .map_err(Error::from)?;
 
         if !updated {
@@ -894,10 +917,15 @@ mod tests {
             embedding: vec![0.0; 1024],
             project: "test_proj".to_owned(),
             summary: "test plan summary".to_owned(),
-            tags: vec!["review-needed".to_owned()],
+            tags: vec![
+                "review-needed".to_owned(),
+                format!("task:{}", Uuid::new_v4()),
+            ],
             updated_at: Utc::now(),
         };
-        crate::db::insert(&pool, &mem).await.unwrap();
+        crate::db::insert_with_workflow_provenance(&pool, &mem)
+            .await
+            .unwrap();
 
         let review = app
             .submit_review(
@@ -911,6 +939,14 @@ mod tests {
             .unwrap()
             .expect("Review created");
 
+        let marked: bool =
+            sqlx::query_scalar("SELECT workflow_artifact FROM memories WHERE id = $1")
+                .bind(review.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(marked, "submit_review must use provenance-aware storage");
+        assert!(review.tags.contains(&"review".to_owned()));
         assert_eq!(review.category, Category::Decision);
         assert_eq!(review.content, "These are my review notes.");
         assert_eq!(
