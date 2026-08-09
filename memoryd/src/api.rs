@@ -79,6 +79,11 @@ struct RecallPath {
 }
 
 #[derive(Deserialize)]
+struct RecallQuery {
+    include_workflow_artifacts: Option<bool>,
+}
+
+#[derive(Deserialize)]
 struct MemoryPath {
     id: Uuid,
 }
@@ -305,9 +310,13 @@ async fn recall_project(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(path): Path<RecallPath>,
+    Query(query): Query<RecallQuery>,
 ) -> Result<Json<MemoryListEnvelope>, ApiError> {
     authorize(&state, &headers)?;
-    let memories = state.app.recall_project(&path.project).await?;
+    let memories = state
+        .app
+        .recall_project(&path.project, query.include_workflow_artifacts)
+        .await?;
     Ok(Json(MemoryListEnvelope {
         memories: memories.into_iter().map(Into::into).collect(),
     }))
@@ -555,5 +564,29 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recall_query_preserves_optional_workflow_policy() {
+        for (query, expected) in [
+            ("", None),
+            ("?include_workflow_artifacts=false", Some(false)),
+            ("?include_workflow_artifacts=true", Some(true)),
+        ] {
+            let uri = format!("/api/v1/projects/test/recall{query}")
+                .parse()
+                .unwrap();
+            let parsed = Query::<RecallQuery>::try_from_uri(&uri).unwrap();
+            assert_eq!(parsed.include_workflow_artifacts, expected);
+        }
+        let invalid = "/api/v1/projects/test/recall?include_workflow_artifacts=invalid"
+            .parse()
+            .unwrap();
+        assert!(Query::<RecallQuery>::try_from_uri(&invalid).is_err());
     }
 }

@@ -183,10 +183,18 @@ impl MemoryApp {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
-        db::list_core(&self.pool, project)
-            .await
-            .map_err(Error::from)
+    pub async fn recall_project(
+        &self,
+        project: &str,
+        include_workflow_artifacts: Option<bool>,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        db::list_core(
+            &self.pool,
+            project,
+            include_workflow_artifacts.unwrap_or(false),
+        )
+        .await
+        .map_err(Error::from)
     }
 
     /// Create or upsert a normalized session.
@@ -327,13 +335,14 @@ impl MemoryApp {
             .list_rules(project, include_general, false, None)
             .await?;
         let recall_memories = if include_recall {
-            self.recall_project(project)
+            self.recall_project(project, None)
                 .await?
                 .into_iter()
                 .filter(|memory| {
                     memory.category != Category::Rule
                         && memory.category != Category::Plan
-                        && !memory.tags.iter().any(|t| t == "review")
+                        && !(memory.category == Category::Decision
+                            && memory.tags.iter().any(|tag| tag == "review"))
                 })
                 .collect()
         } else {
@@ -1062,6 +1071,115 @@ mod tests {
             updated_original
                 .tags
                 .contains(&"review-verdict:changes-requested".to_owned())
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn bootstrap_keeps_stronger_plan_and_review_filter(pool: PgPool) {
+        let mock_url = spawn_mock_server().await;
+        let app = MemoryApp::new(
+            pool.clone(),
+            Arc::new(crate::embed::Client::new(
+                mock_url.clone(),
+                "test-model".to_owned(),
+                None,
+                None,
+            )),
+            "test-model".to_owned(),
+            1024,
+            reqwest::Client::new(),
+            mock_url,
+            "test-model".to_owned(),
+            1024,
+        );
+
+        let make_memory = |category, content: &str, tags| Memory {
+            id: Uuid::new_v4(),
+            category,
+            content: content.to_owned(),
+            created_at: Utc::now(),
+            embedding: vec![0.0; 1024],
+            project: "test_proj".to_owned(),
+            summary: content.to_owned(),
+            tags,
+            updated_at: Utc::now(),
+        };
+        let task_plan = make_memory(
+            Category::Plan,
+            "task plan",
+            vec![format!("task:{}", Uuid::new_v4())],
+        );
+        let ordinary_plan = make_memory(Category::Plan, "ordinary plan", Vec::new());
+        let ordinary_review = make_memory(
+            Category::Decision,
+            "ordinary plan review",
+            vec![
+                "review".to_owned(),
+                format!("reviewed-item:{}", ordinary_plan.id),
+            ],
+        );
+        let ordinary_decision = make_memory(Category::Decision, "ordinary decision", Vec::new());
+        let review_context = make_memory(
+            Category::ErrorFix,
+            "ordinary context tagged review",
+            vec!["review".to_owned()],
+        );
+        for memory in [
+            &task_plan,
+            &ordinary_plan,
+            &ordinary_review,
+            &ordinary_decision,
+            &review_context,
+        ] {
+            crate::db::insert_with_workflow_provenance(&pool, memory)
+                .await
+                .unwrap();
+        }
+
+        let default_recall = app.recall_project("test_proj", None).await.unwrap();
+        assert!(
+            default_recall
+                .iter()
+                .all(|memory| memory.id != task_plan.id)
+        );
+        assert!(
+            default_recall
+                .iter()
+                .any(|memory| memory.id == ordinary_plan.id)
+        );
+        let inclusive_recall = app.recall_project("test_proj", Some(true)).await.unwrap();
+        assert!(
+            inclusive_recall
+                .iter()
+                .any(|memory| memory.id == task_plan.id)
+        );
+
+        let bootstrap = app
+            .bootstrap_project("test_proj", false, true)
+            .await
+            .unwrap();
+        assert!(bootstrap.recall_memories.iter().all(|memory| {
+            memory.category != Category::Plan
+                && !(memory.category == Category::Decision
+                    && memory.tags.iter().any(|tag| tag == "review"))
+        }));
+        assert!(
+            bootstrap
+                .recall_memories
+                .iter()
+                .any(|memory| memory.id == ordinary_decision.id)
+        );
+        assert!(
+            bootstrap
+                .recall_memories
+                .iter()
+                .any(|memory| memory.id == review_context.id)
+        );
+        assert!(
+            bootstrap
+                .recall_memories
+                .iter()
+                .all(|memory| memory.id != ordinary_review.id)
         );
     }
 }

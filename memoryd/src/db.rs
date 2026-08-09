@@ -674,7 +674,11 @@ pub async fn insert_with_workflow_provenance(
 /// # Errors
 ///
 /// Returns an error if the query fails.
-pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary>, sqlx::Error> {
+pub async fn list_core(
+    pool: &PgPool,
+    project: &str,
+    include_workflow_artifacts: bool,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let categories: Vec<Category> = [
         Category::Context,
         Category::Decision,
@@ -686,16 +690,23 @@ pub async fn list_core(pool: &PgPool, project: &str) -> Result<Vec<MemorySummary
     .filter(Category::is_core)
     .collect();
 
-    let rows = sqlx::query(
+    let statement = if include_workflow_artifacts {
         "SELECT id, category, content, created_at, project, summary, tags, updated_at
          FROM memories
          WHERE project = $1 AND category = ANY($2)
-         ORDER BY updated_at DESC",
-    )
-    .bind(project)
-    .bind(&categories)
-    .fetch_all(pool)
-    .await?;
+         ORDER BY updated_at DESC"
+    } else {
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+         FROM memories
+         WHERE project = $1 AND category = ANY($2)
+           AND workflow_artifact = FALSE
+         ORDER BY updated_at DESC"
+    };
+    let rows = sqlx::query(statement)
+        .bind(project)
+        .bind(&categories)
+        .fetch_all(pool)
+        .await?;
     rows.iter().map(row_to_summary).collect()
 }
 
@@ -3390,6 +3401,115 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(inclusive_logs.len(), 2);
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn recall_defaults_exclude_artifacts_but_audit_access_stays_inclusive(pool: PgPool) {
+        let ordinary_id = Uuid::new_v4();
+        let workflow_id = Uuid::new_v4();
+        let task_tag = format!("task:{}", Uuid::new_v4());
+        let mut ordinary = workflow_memory(ordinary_id, Category::Decision, "project", Vec::new());
+        ordinary.summary = "ordinary decision".to_owned();
+        let mut workflow = workflow_memory(
+            workflow_id,
+            Category::Plan,
+            "project",
+            vec![task_tag.clone(), "review-needed".to_owned()],
+        );
+        workflow.summary = "workflow plan".to_owned();
+        insert_with_workflow_provenance(&pool, &ordinary)
+            .await
+            .unwrap();
+        insert_with_workflow_provenance(&pool, &workflow)
+            .await
+            .unwrap();
+
+        let default_recall = list_core(&pool, "project", false).await.unwrap();
+        assert!(default_recall.iter().any(|memory| memory.id == ordinary_id));
+        assert!(default_recall.iter().all(|memory| memory.id != workflow_id));
+        let inclusive_recall = list_core(&pool, "project", true).await.unwrap();
+        assert!(
+            inclusive_recall
+                .iter()
+                .any(|memory| memory.id == workflow_id)
+        );
+
+        let exact = list(
+            &pool,
+            "project",
+            Some(&Category::Plan),
+            10,
+            0,
+            Some(std::slice::from_ref(&task_tag)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].id, workflow_id);
+        assert_eq!(
+            get(&pool, workflow_id).await.unwrap().unwrap().id,
+            workflow_id
+        );
+        assert_eq!(
+            list_review_queue(&pool, "project", None, 10).await.unwrap()[0].id,
+            workflow_id
+        );
+
+        upsert_edge(
+            &pool,
+            &test_edge(
+                ordinary_id,
+                "project",
+                workflow_id,
+                "project",
+                EdgeRelation::References,
+                EdgeOrigin::StructuralTagRef,
+                1.0,
+            ),
+        )
+        .await
+        .unwrap();
+        let neighbors = list_neighbors(&pool, ordinary_id, 10).await.unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].1.id, workflow_id);
+
+        let external_id = Uuid::new_v4().to_string();
+        let mut session = test_session(&external_id);
+        session.workflow_artifact = true;
+        let stored_session = create_session(&pool, &session).await.unwrap();
+        let log = test_session_log(&external_id, true);
+        let stored_log =
+            publish_session_log(&pool, &log, &[test_session_chunk(log.id, true)], None, None)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            list_sessions(&pool, "project", 10, 0).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            get_session(&pool, stored_session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            stored_session.id
+        );
+        assert_eq!(
+            list_session_logs(&pool, "project", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            get_session_log(&pool, stored_log)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            stored_log
+        );
     }
 
     fn test_edge(

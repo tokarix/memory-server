@@ -77,6 +77,8 @@ pub struct ListParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecallParams {
+    /// Include task-scoped workflow artifacts (default: false)
+    include_workflow_artifacts: Option<bool>,
     /// Project name to recall core memories for
     project: String,
 }
@@ -369,7 +371,7 @@ impl MemoryServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let memories = self
             .backend
-            .recall_project(&params.project)
+            .recall_project(&params.project, params.include_workflow_artifacts)
             .await
             .map_err(rmcp::ErrorData::from)?;
 
@@ -706,9 +708,17 @@ impl MemoryBackend {
         }
     }
 
-    async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
+    async fn recall_project(
+        &self,
+        project: &str,
+        include_workflow_artifacts: Option<bool>,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
         match self {
-            Self::Http(client) => client.recall_project(project).await,
+            Self::Http(client) => {
+                client
+                    .recall_project(project, include_workflow_artifacts)
+                    .await
+            }
         }
     }
 
@@ -984,6 +994,61 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn http_recall_preserves_omitted_false_and_true_query_options() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = Router::new().route(
+            "/api/v1/projects/{project}/recall",
+            get(move |uri: axum::http::Uri| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(uri.to_string());
+                    Json(MemoryListEnvelope { memories: vec![] })
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    stop_rx.await.unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let client = memory_common::http_client::HttpMemoryClient::new(
+                &format!("http://{address}"),
+                None,
+            )
+            .unwrap();
+            for option in [None, Some(false), Some(true)] {
+                assert!(
+                    client
+                        .recall_project("test project", option)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            assert_eq!(
+                *requests.lock().unwrap(),
+                [
+                    "/api/v1/projects/test%20project/recall",
+                    "/api/v1/projects/test%20project/recall?include_workflow_artifacts=false",
+                    "/api/v1/projects/test%20project/recall?include_workflow_artifacts=true",
+                ]
+            );
+            stop_tx.send(()).unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("HTTP recall requests and server shutdown must complete");
+    }
 
     fn sample_summary() -> model::MemorySummary {
         sample_summary_with_id(Uuid::nil())
@@ -1432,5 +1497,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit.include_workflow_artifacts, Some(true));
+
+        let recall_missing: RecallParams =
+            serde_json::from_str(r#"{"project":"test_project"}"#).unwrap();
+        assert_eq!(recall_missing.include_workflow_artifacts, None);
+        let recall_explicit: RecallParams =
+            serde_json::from_str(r#"{"project":"test_project","include_workflow_artifacts":true}"#)
+                .unwrap();
+        assert_eq!(recall_explicit.include_workflow_artifacts, Some(true));
     }
 }

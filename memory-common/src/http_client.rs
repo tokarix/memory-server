@@ -138,10 +138,17 @@ impl HttpMemoryClient {
     /// # Errors
     ///
     /// Returns an error if the request fails or the response cannot be parsed.
-    pub async fn recall_project(&self, project: &str) -> Result<Vec<model::MemorySummary>, Error> {
-        let response: MemoryListEnvelope = self
-            .request(Method::GET, &["api", "v1", "projects", project, "recall"])
-            .await?;
+    pub async fn recall_project(
+        &self,
+        project: &str,
+        include_workflow_artifacts: Option<bool>,
+    ) -> Result<Vec<model::MemorySummary>, Error> {
+        let mut url = self.url(&["api", "v1", "projects", project, "recall"])?;
+        if let Some(include) = include_workflow_artifacts {
+            url.query_pairs_mut()
+                .append_pair("include_workflow_artifacts", &include.to_string());
+        }
+        let response: MemoryListEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(response.memories.into_iter().map(Into::into).collect())
     }
 
