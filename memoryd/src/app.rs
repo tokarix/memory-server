@@ -13,7 +13,7 @@ use crate::protocol::{
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
-use crate::{db, edges, expand, rerank, transcript};
+use crate::{db, edges, expand, rerank, transcript, workflow};
 
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;
@@ -210,6 +210,7 @@ impl MemoryApp {
             id: Uuid::new_v4(),
             project,
             updated_at: now,
+            workflow_artifact: false,
         };
         db::create_session(&self.pool, &session)
             .await
@@ -237,7 +238,8 @@ impl MemoryApp {
         };
         db::append_session_message(&self.pool, &message)
             .await
-            .map_err(Error::from)
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::NotFound(format!("session {}", request.session_id)))
     }
 
     /// Finalize a normalized session into searchable log chunks.
@@ -258,10 +260,9 @@ impl MemoryApp {
         let messages = db::list_session_messages(&self.pool, request.session_id)
             .await
             .map_err(Error::from)?;
-        let finalized = self
-            .materialize_session_log(&session, &messages, request.summary.as_deref())
-            .await?;
-        Ok(Some(finalized))
+        self.materialize_session_log(&session, &messages, request.summary.as_deref())
+            .await
+            .map(Some)
     }
 
     /// Fetch one normalized session by ID.
@@ -698,11 +699,17 @@ impl MemoryApp {
             project: project.to_owned(),
             session_id: session_id.to_owned(),
             summary: summary.to_owned(),
+            workflow_artifact: workflow::contains_task_token(content)
+                || workflow::contains_task_token(summary),
         };
-        let stored_id = db::session_log_upsert(&self.pool, &log)
+        let chunks = self.prepare_session_chunks(log.id, &text_chunks).await?;
+        db::publish_session_log(&self.pool, &log, &chunks, None, None)
             .await
-            .map_err(Error::from)?;
-        self.store_session_chunks(stored_id, &text_chunks).await
+            .map_err(Error::from)?
+            .ok_or_else(|| {
+                Error::Database("raw publisher unexpectedly returned no log ID".to_owned())
+            })?;
+        Ok(chunks.len())
     }
 
     async fn materialize_session_log(
@@ -712,43 +719,55 @@ impl MemoryApp {
         summary_override: Option<&str>,
     ) -> Result<usize, Error> {
         let (content, summary) = aggregate_session_messages(messages, summary_override);
-        let chunk_count = self
-            .materialize_raw_session_log(
-                &session.external_session_id,
-                &session.cwd,
-                &session.project,
-                &content,
-                &summary,
-            )
-            .await?;
-        db::update_session_finalized(&self.pool, session.id, Utc::now())
-            .await
-            .map_err(Error::from)?;
-        Ok(chunk_count)
+        let embedding = self.embed_client.embed(&summary, "").await?;
+        let text_chunks = transcript::chunk_text(&content, CHUNK_SIZE, CHUNK_OVERLAP);
+        let log = model::SessionLog {
+            id: Uuid::new_v4(),
+            content: content.clone(),
+            created_at: Utc::now(),
+            cwd: session.cwd.clone(),
+            embedding,
+            project: session.project.clone(),
+            session_id: session.external_session_id.clone(),
+            summary: summary.clone(),
+            workflow_artifact: workflow::contains_task_token(&content)
+                || workflow::contains_task_token(&summary),
+        };
+        let chunks = self.prepare_session_chunks(log.id, &text_chunks).await?;
+        db::publish_session_log(
+            &self.pool,
+            &log,
+            &chunks,
+            Some(session.id),
+            Some(Utc::now()),
+        )
+        .await
+        .map_err(Error::from)?
+        .ok_or_else(|| Error::NotFound(format!("session {}", session.id)))?;
+        Ok(chunks.len())
     }
 
-    async fn store_session_chunks(
+    async fn prepare_session_chunks(
         &self,
-        stored_id: Uuid,
+        session_log_id: Uuid,
         text_chunks: &[String],
-    ) -> Result<usize, Error> {
+    ) -> Result<Vec<model::SessionLogChunk>, Error> {
         let mut chunks = Vec::with_capacity(text_chunks.len());
         for (index, text) in text_chunks.iter().enumerate() {
             let chunk_embedding = self.embed_client.embed(text, "").await?;
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            // Publication assigns the authoritative parent provenance to every
+            // prepared chunk inside the correlation-locked transaction.
             chunks.push(model::SessionLogChunk {
                 chunk_index: index as i32,
                 content: text.clone(),
                 embedding: chunk_embedding,
                 id: Uuid::new_v4(),
-                session_log_id: stored_id,
+                session_log_id,
+                workflow_artifact: false,
             });
         }
-
-        db::session_log_chunks_replace(&self.pool, stored_id, &chunks)
-            .await
-            .map_err(Error::from)?;
-        Ok(chunks.len())
+        Ok(chunks)
     }
 }
 

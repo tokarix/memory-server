@@ -171,6 +171,7 @@ pub struct SessionLog {
     pub project: String,
     pub session_id: String,
     pub summary: String,
+    pub workflow_artifact: bool,
 }
 
 pub struct SessionLogChunk {
@@ -179,6 +180,7 @@ pub struct SessionLogChunk {
     pub embedding: Vec<f32>,
     pub id: Uuid,
     pub session_log_id: Uuid,
+    pub workflow_artifact: bool,
 }
 
 pub struct Session {
@@ -190,6 +192,7 @@ pub struct Session {
     pub id: Uuid,
     pub project: String,
     pub updated_at: DateTime<Utc>,
+    pub workflow_artifact: bool,
 }
 
 pub struct SessionMessage {

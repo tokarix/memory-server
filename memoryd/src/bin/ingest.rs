@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use memoryd::{config, db, embed, model, transcript};
+use memoryd::{config, db, embed, model, transcript, workflow};
 
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;
@@ -87,6 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Embed summary only for parent session log
     let embedding = embed_client.embed(&parsed.summary, "").await?;
 
+    let workflow_artifact = workflow::contains_task_token(&parsed.content)
+        || workflow::contains_task_token(&parsed.summary);
     let log = model::SessionLog {
         id: Uuid::new_v4(),
         content: parsed.content,
@@ -96,12 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         project: parsed.project,
         session_id: parsed.session_id,
         summary: parsed.summary,
+        workflow_artifact,
     };
 
-    let stored_id = db::session_log_upsert(&pool, &log).await?;
-    tracing::info!(id = %stored_id, session_id = %log.session_id, "session log stored");
-
-    // Embed each chunk and store
+    // Embed each chunk before opening the publication transaction.
     let mut chunks = Vec::with_capacity(text_chunks.len());
     for (i, text) in text_chunks.iter().enumerate() {
         let chunk_embedding = embed_client.embed(text, "").await?;
@@ -111,11 +111,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             content: text.clone(),
             embedding: chunk_embedding,
             id: Uuid::new_v4(),
-            session_log_id: stored_id,
+            session_log_id: log.id,
+            workflow_artifact,
         });
     }
 
-    db::session_log_chunks_replace(&pool, stored_id, &chunks).await?;
+    let stored_id = db::publish_session_log(&pool, &log, &chunks, None, None)
+        .await?
+        .ok_or("raw session publication lost its target")?;
     tracing::info!(
         id = %stored_id,
         chunk_count = chunks.len(),
