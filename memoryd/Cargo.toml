@@ -33,6 +33,6 @@ tracing-subscriber.workspace = true
 tower-http.workspace = true
 uuid.workspace = true
 tokenizers = "0.22.2"
-hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 
 [build-dependencies]
