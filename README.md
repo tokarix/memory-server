@@ -70,7 +70,7 @@ for relationship indexing, review contracts, query-plan comparisons, and tests.
 
 ## Prerequisites
 
-- Rust 1.85+
+- Rust 1.88+
 - PostgreSQL 17 with `pgvector`
 - Ollama with:
   - embedding model: `bge-m3`
