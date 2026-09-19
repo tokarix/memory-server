@@ -22,4 +22,4 @@ toml = "1.0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "std"] }
 tower-http = { version = "0.7.1", features = ["trace"] }
-uuid = { version = "1.21.0", features = ["v4", "serde"] }
+uuid = { version = "1.26.1", features = ["v4", "serde"] }

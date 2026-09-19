@@ -83,6 +83,8 @@ mod tests {
         )]));
         assert!(!plan_is_directly_scoped(&[
             "task:not-a-uuid".to_owned(),
+            "task:".to_owned(),
+            "task:é50e8400-e29b-41d4-a716-446655440000".to_owned(),
             format!("prefix-task:{TASK_ID}"),
             "superseded-plan".to_owned(),
         ]));
