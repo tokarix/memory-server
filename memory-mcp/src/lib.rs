@@ -1,6 +1,12 @@
 //! MCP adapter for the memory server HTTP API.
 
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use std::borrow::Cow;
+
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, ProtocolVersion, ServerCapabilities, ServerConfig,
+};
+use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, tool_handler};
 
 pub mod mcp;
@@ -10,8 +16,35 @@ pub use memory_common::{config, error, model, protocol};
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for tools::MemoryServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        // Bound initialization, discovery and inline request negotiation together.
+        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let context = ToolCallContext::new(self, request, context);
+        let name = context.name();
+        // Preserve 1.5's protocol errors for invalid arguments. ToolRouter::call
+        // now converts these into isError results; domain isError results must
+        // remain untouched. get() also rejects disabled routes.
+        if self.tool_router.get(name).is_none() {
+            return Err(rmcp::ErrorData::invalid_params("tool not found", None));
+        }
+        let route = self
+            .tool_router
+            .map
+            .get(name)
+            .ok_or_else(|| rmcp::ErrorData::invalid_params("tool not found", None))?;
+        (route.call)(context).await
+    }
+
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .with_instructions(
                 "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
             )

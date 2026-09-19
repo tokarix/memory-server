@@ -1,8 +1,9 @@
 use std::fmt::Write;
 
+use rmcp::handler::server::common::schema_for_type;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -250,6 +251,8 @@ pub struct UpdateParams {
     tags: Option<Vec<String>>,
 }
 
+// Retain the 1.5 input schemas, including root titles and optional defaults.
+// Newer SDK input-schema generation strips that metadata.
 #[tool_router]
 impl MemoryServer {
     #[must_use]
@@ -262,7 +265,7 @@ impl MemoryServer {
 
     #[tool(description = "Return the memory server version (includes git hash)")]
     async fn memory_server_version(&self) -> Result<CallToolResult, rmcp::ErrorData> {
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             self.backend
                 .version()
                 .await
@@ -270,7 +273,10 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(description = "Delete a memory by UUID")]
+    #[tool(
+        input_schema = schema_for_type::<DeleteParams>(),
+        description = "Delete a memory by UUID"
+    )]
     async fn memory_delete(
         &self,
         Parameters(params): Parameters<DeleteParams>,
@@ -281,19 +287,22 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
         if deleted {
-            Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Deleted memory {}",
                 params.id
             ))]))
         } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
+            Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Memory {} not found",
                 params.id
             ))]))
         }
     }
 
-    #[tool(description = "Retrieve a single memory by UUID")]
+    #[tool(
+        input_schema = schema_for_type::<GetParams>(),
+        description = "Retrieve a single memory by UUID"
+    )]
     async fn memory_get(
         &self,
         Parameters(params): Parameters<GetParams>,
@@ -306,16 +315,19 @@ impl MemoryServer {
         match memory {
             Some(m) => {
                 let text = format_single_memory(&m);
-                Ok(CallToolResult::success(vec![Content::text(text)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            None => Ok(CallToolResult::error(vec![Content::text(format!(
+            None => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Memory {} not found",
                 params.id
             ))])),
         }
     }
 
-    #[tool(description = "Browse memories by project with optional category filter, paginated")]
+    #[tool(
+        input_schema = schema_for_type::<ListParams>(),
+        description = "Browse memories by project with optional category filter, paginated"
+    )]
     async fn memory_list(
         &self,
         Parameters(params): Parameters<ListParams>,
@@ -333,16 +345,17 @@ impl MemoryServer {
             .map_err(rmcp::ErrorData::from)?;
 
         if memories.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No memories found.",
             )]));
         }
 
         let text = format_memory_list(&memories);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<ListNeighborsParams>(),
         description = "The follow-up inspection tool after a promising memory_search or memory_get result. Exposes graph-connected context around a known memory, useful for tracing related decisions, plans, fixes, or rules."
     )]
     async fn memory_neighbors(
@@ -355,16 +368,19 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
         if neighbors.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No neighbors found.",
             )]));
         }
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             format_neighbor_list(&neighbors),
         )]))
     }
 
-    #[tool(description = "Recall core memories (importance >= 0.7) for a project at session start")]
+    #[tool(
+        input_schema = schema_for_type::<RecallParams>(),
+        description = "Recall core memories (importance >= 0.7) for a project at session start"
+    )]
     async fn memory_recall(
         &self,
         Parameters(params): Parameters<RecallParams>,
@@ -376,16 +392,17 @@ impl MemoryServer {
             .map_err(rmcp::ErrorData::from)?;
 
         if memories.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No core memories found.",
             )]));
         }
 
         let text = format_memory_list(&memories);
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<RulesParams>(),
         description = "Load durable rule memories for a project, optionally unioned with shared general rules. Targeted worker workflows should use `tags` to exclusively filter rules (e.g. `['lang:rust']` or `['phase:planning']`) when starting targeted worker runs. This avoids polluting context with irrelevant language/phase rules."
     )]
     async fn memory_rules(
@@ -402,12 +419,13 @@ impl MemoryServer {
             )
             .await
             .map_err(rmcp::ErrorData::from)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             format_rule_list(&params.project, &rules),
         )]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<BootstrapParams>(),
         description = "Load all effective rules plus non-rule core recall memories for a project in a single call. Prefer `memory_rules` with `tags` filters for scoped, targeted rule retrieval — this avoids loading irrelevant rules and wasting context."
     )]
     async fn memory_bootstrap(
@@ -423,12 +441,13 @@ impl MemoryServer {
             )
             .await
             .map_err(rmcp::ErrorData::from)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             format_bootstrap(&payload),
         )]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<SearchParams>(),
         description = "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency. Targeted worker workflows should use `tags` to exclusively filter search hits."
     )]
     async fn memory_search(
@@ -455,21 +474,24 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?
         {
-            SearchOutcome::Memories(results) => Ok(CallToolResult::success(vec![Content::text(
-                format_search_results(&results),
-            )])),
+            SearchOutcome::Memories(results) => {
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    format_search_results(&results),
+                )]))
+            }
             SearchOutcome::SessionLogs(results) => {
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     format_session_log_results(&results),
                 )]))
             }
-            SearchOutcome::Empty => Ok(CallToolResult::success(vec![Content::text(
+            SearchOutcome::Empty => Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No matching memories found.",
             )])),
         }
     }
 
     #[tool(
+        input_schema = schema_for_type::<StoreParams>(),
         description = "Store a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance."
     )]
     async fn memory_store(
@@ -487,13 +509,14 @@ impl MemoryServer {
             })
             .await
             .map_err(rmcp::ErrorData::from)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Stored memory {} ({}): {}",
             memory.id, memory.category, memory.summary
         ))]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<UpdateParams>(),
         description = "Update a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead."
     )]
     async fn memory_update(
@@ -512,19 +535,22 @@ impl MemoryServer {
             .map_err(rmcp::ErrorData::from)?
             .is_some()
         {
-            Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Updated memory {}",
                 params.id
             ))]))
         } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
+            Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Memory {} not found",
                 params.id
             ))]))
         }
     }
 
-    #[tool(description = "Store a session log transcript for searchable archival")]
+    #[tool(
+        input_schema = schema_for_type::<SessionLogStoreParams>(),
+        description = "Store a session log transcript for searchable archival"
+    )]
     async fn session_log_store(
         &self,
         Parameters(params): Parameters<SessionLogStoreParams>,
@@ -541,13 +567,16 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Stored session log for session {} ({} chunks)",
             params.session_id, chunk_count
         ))]))
     }
 
-    #[tool(description = "Create or upsert a normalized shared session for cross-agent capture")]
+    #[tool(
+        input_schema = schema_for_type::<SessionStartParams>(),
+        description = "Create or upsert a normalized shared session for cross-agent capture"
+    )]
     async fn session_start(
         &self,
         Parameters(params): Parameters<SessionStartParams>,
@@ -562,13 +591,16 @@ impl MemoryServer {
             })
             .await
             .map_err(rmcp::ErrorData::from)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Started session {} for external session {}",
             session.id, session.external_session_id
         ))]))
     }
 
-    #[tool(description = "Append one message or tool event to a normalized shared session")]
+    #[tool(
+        input_schema = schema_for_type::<SessionMessageParams>(),
+        description = "Append one message or tool event to a normalized shared session"
+    )]
     async fn session_message_append(
         &self,
         Parameters(params): Parameters<SessionMessageParams>,
@@ -585,13 +617,16 @@ impl MemoryServer {
             })
             .await
             .map_err(rmcp::ErrorData::from)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Appended {} message {} to session {}",
             message.role, message.id, message.session_id
         ))]))
     }
 
-    #[tool(description = "Finalize a normalized session into searchable session-log chunks")]
+    #[tool(
+        input_schema = schema_for_type::<SessionFinalizeParams>(),
+        description = "Finalize a normalized session into searchable session-log chunks"
+    )]
     async fn session_finalize(
         &self,
         Parameters(params): Parameters<SessionFinalizeParams>,
@@ -605,11 +640,11 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
         match chunk_count {
-            Some(count) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Some(count) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Finalized session {} ({} chunks)",
                 params.session_id, count
             ))])),
-            None => Ok(CallToolResult::error(vec![Content::text(format!(
+            None => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Session {} not found",
                 params.session_id
             ))])),
@@ -617,6 +652,7 @@ impl MemoryServer {
     }
 
     #[tool(
+        input_schema = schema_for_type::<ReviewQueueParams>(),
         description = "Find pending review work by listing memories tagged review-needed, optionally narrowed by category."
     )]
     async fn review_queue(
@@ -630,16 +666,17 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
         if memories.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
                 "No items awaiting review.",
             )]));
         }
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             format_memory_list(&memories),
         )]))
     }
 
     #[tool(
+        input_schema = schema_for_type::<SubmitReviewParams>(),
         description = "Record the review decision and complete the handoff by marking the original item reviewed."
     )]
     async fn review_submit(
@@ -658,11 +695,11 @@ impl MemoryServer {
             .await
             .map_err(rmcp::ErrorData::from)?;
         match review {
-            Some(memory) => Ok(CallToolResult::success(vec![Content::text(format!(
+            Some(memory) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Stored review {} for memory {}",
                 memory.id, params.memory_id
             ))])),
-            None => Ok(CallToolResult::error(vec![Content::text(format!(
+            None => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Memory {} not found",
                 params.memory_id
             ))])),
@@ -1404,7 +1441,6 @@ mod tests {
 
     fn first_text(result: &CallToolResult) -> &str {
         result.content[0]
-            .raw
             .as_text()
             .map(|text| text.text.as_str())
             .unwrap()

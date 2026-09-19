@@ -428,3 +428,93 @@ async fn tool_roundtrips_and_options() {
     }
     golden("roundtrips", &fixture.finish(true).await);
 }
+
+#[tokio::test]
+async fn discovery_and_inline_versions_are_bounded() {
+    let mut fixture = Fixture::start().await;
+    fixture.initialize(VERSIONS[3]).await;
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": VERSIONS[3],
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let discovery = fixture
+        .request("server/discover", json!({"_meta":meta}))
+        .await;
+    assert_eq!(discovery["result"]["supportedVersions"], json!(VERSIONS));
+    assert_eq!(discovery["result"]["capabilities"], json!({"tools":{}}));
+    for version in ["2026-07-28", "2099-01-01"] {
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": version,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        for (method, mut params) in [
+            ("server/discover", json!({})),
+            ("tools/list", json!({})),
+            (
+                "tools/call",
+                json!({"name":"memory_server_version","arguments":{}}),
+            ),
+        ] {
+            params["_meta"] = meta.clone();
+            let response = fixture.request(method, params).await;
+            assert_eq!(
+                response["error"],
+                json!({
+                    "code":-32022,"message":"Unsupported protocol version",
+                    "data":{"requested":version,"supported":VERSIONS}
+                })
+            );
+        }
+    }
+    assert!(fixture.state.requests.lock().unwrap().is_empty());
+    // Rejected inline requests must not promote the negotiated legacy session.
+    let response = fixture
+        .call("memory_list", json!({"project":"failure"}))
+        .await;
+    assert_eq!(response["error"]["code"], -32002);
+    fixture.finish(true).await;
+}
+
+#[tokio::test]
+async fn discovery_opener_advertises_only_legacy_versions() {
+    let mut fixture = Fixture::start().await;
+    let response = fixture
+        .request(
+            "server/discover",
+            json!({"_meta":{
+                "io.modelcontextprotocol/protocolVersion":VERSIONS[3],
+                "io.modelcontextprotocol/clientCapabilities":{}
+            }}),
+        )
+        .await;
+    assert_eq!(response["result"]["supportedVersions"], json!(VERSIONS));
+    assert_eq!(response["result"]["capabilities"], json!({"tools":{}}));
+    assert!(fixture.state.requests.lock().unwrap().is_empty());
+    fixture.finish(true).await;
+}
+
+#[tokio::test]
+async fn uuid_forms_forward_the_same_canonical_id() {
+    let mut fixture = Fixture::start().await;
+    fixture.initialize(VERSIONS[3]).await;
+    let canonical = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    for input in [
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa",
+        "urn:uuid:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    ] {
+        let response = fixture.call("memory_get", json!({"id":input})).await;
+        assert_eq!(
+            response["result"],
+            json!({
+                "content":[{"type":"text","text":format!("Memory {canonical} not found")}],
+                "isError":true
+            })
+        );
+    }
+    let expected = json!({
+        "method":"GET","uri":format!("/api/v1/memories/{canonical}"),"body":null
+    });
+    assert_eq!(*fixture.state.requests.lock().unwrap(), vec![expected; 3]);
+    fixture.finish(true).await;
+}
