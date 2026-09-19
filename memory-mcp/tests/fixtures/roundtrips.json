@@ -1,0 +1,1311 @@
+{
+  "after_eof": [],
+  "http": [
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/review-queue?limit=20"
+    },
+    {
+      "body": {
+        "category": "decision",
+        "content": "Before",
+        "project": "fixture",
+        "summary": "Stored",
+        "tags": [
+          "review-needed"
+        ]
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": {
+        "content": "After",
+        "summary": "Updated",
+        "tags": [
+          "changed"
+        ]
+      },
+      "method": "PATCH",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/memories?category=decision&limit=42&offset=3&tags=changed"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001/neighbors?limit=2"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/review-queue?category=decision&limit=20"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/review-queue?category=decision&limit=1"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/review-queue?category=decision&limit=100"
+    },
+    {
+      "body": {
+        "memory_id": "00000000-0000-0000-0000-000000000001",
+        "notes": "Exact notes\nsecond line",
+        "project": "override",
+        "reviewer": "fixture-reviewer",
+        "verdict": " APPROVED "
+      },
+      "method": "POST",
+      "uri": "/api/v1/review"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/recall"
+    },
+    {
+      "body": {
+        "category": null,
+        "cross_project": null,
+        "expand_query": null,
+        "graph_hops": null,
+        "include_general": null,
+        "include_workflow_artifacts": null,
+        "limit": null,
+        "min_similarity": null,
+        "project": "fixture",
+        "project_allowlist": null,
+        "query": "empty",
+        "rerank": null,
+        "tags": null
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories/search"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&tags=lang%3Arust"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/recall"
+    },
+    {
+      "body": {
+        "category": "decision",
+        "cross_project": null,
+        "expand_query": null,
+        "graph_hops": 2,
+        "include_general": null,
+        "include_workflow_artifacts": null,
+        "limit": 5,
+        "min_similarity": 0.5,
+        "project": "fixture",
+        "project_allowlist": [
+          "other"
+        ],
+        "query": "hit",
+        "rerank": null,
+        "tags": [
+          "tag"
+        ]
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories/search"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/rules?include_general=false&shadow_general=false&tags=lang%3Arust"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=false&include_recall=false"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/recall?include_workflow_artifacts=false"
+    },
+    {
+      "body": {
+        "category": "decision",
+        "cross_project": false,
+        "expand_query": false,
+        "graph_hops": 2,
+        "include_general": false,
+        "include_workflow_artifacts": false,
+        "limit": 5,
+        "min_similarity": 0.5,
+        "project": "fixture",
+        "project_allowlist": [
+          "other"
+        ],
+        "query": "hit",
+        "rerank": false,
+        "tags": [
+          "tag"
+        ]
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories/search"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&tags=lang%3Arust"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/recall?include_workflow_artifacts=true"
+    },
+    {
+      "body": {
+        "category": "decision",
+        "cross_project": true,
+        "expand_query": true,
+        "graph_hops": 2,
+        "include_general": true,
+        "include_workflow_artifacts": true,
+        "limit": 5,
+        "min_similarity": 0.5,
+        "project": "fixture",
+        "project_allowlist": [
+          "other"
+        ],
+        "query": "hit",
+        "rerank": true,
+        "tags": [
+          "tag"
+        ]
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories/search"
+    },
+    {
+      "body": {
+        "category": null,
+        "cross_project": null,
+        "expand_query": null,
+        "graph_hops": null,
+        "include_general": null,
+        "include_workflow_artifacts": null,
+        "limit": null,
+        "min_similarity": null,
+        "project": "fixture",
+        "project_allowlist": null,
+        "query": "fallback",
+        "rerank": null,
+        "tags": null
+      },
+      "method": "POST",
+      "uri": "/api/v1/memories/search"
+    },
+    {
+      "body": null,
+      "method": "DELETE",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": {
+        "content": "missing",
+        "summary": null,
+        "tags": null
+      },
+      "method": "PATCH",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": null,
+      "method": "DELETE",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000001"
+    },
+    {
+      "body": {
+        "memory_id": "00000000-0000-0000-0000-000000000002",
+        "notes": "missing",
+        "project": null,
+        "reviewer": "fixture",
+        "verdict": "rejected"
+      },
+      "method": "POST",
+      "uri": "/api/v1/review"
+    },
+    {
+      "body": {
+        "summary": null
+      },
+      "method": "POST",
+      "uri": "/api/v1/sessions/00000000-0000-0000-0000-000000000002/finalize"
+    }
+  ],
+  "transcript": [
+    {
+      "request": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "contract",
+            "version": "1"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "response": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "name": "memory-server",
+            "version": "<package-version>-<git-hash>"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture"
+          },
+          "name": "review_queue"
+        }
+      },
+      "response": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "No items awaiting review.",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-2",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "content": "Before",
+            "project": "fixture",
+            "summary": "Stored",
+            "tags": [
+              "review-needed"
+            ]
+          },
+          "name": "memory_store"
+        }
+      },
+      "response": {
+        "id": "request-2",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Stored memory 00000000-0000-0000-0000-000000000001 (decision): Stored",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-3",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "id": "request-3",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## [decision] Stored (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nProject: fixture\nTags: review-needed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nBefore",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-4",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "content": "After",
+            "id": "00000000-0000-0000-0000-000000000001",
+            "summary": "Updated",
+            "tags": [
+              "changed"
+            ]
+          },
+          "name": "memory_update"
+        }
+      },
+      "response": {
+        "id": "request-4",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Updated memory 00000000-0000-0000-0000-000000000001",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-5",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "id": "request-5",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nProject: fixture\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-6",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "limit": "42",
+            "offset": "3",
+            "project": "fixture",
+            "tags": [
+              "changed"
+            ]
+          },
+          "name": "memory_list"
+        }
+      },
+      "response": {
+        "id": "request-6",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-7",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "limit": "2"
+          },
+          "name": "memory_neighbors"
+        }
+      },
+      "response": {
+        "id": "request-7",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "No neighbors found.",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-8",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "limit": null,
+            "project": "fixture"
+          },
+          "name": "review_queue"
+        }
+      },
+      "response": {
+        "id": "request-8",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-9",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "limit": "0",
+            "project": "fixture"
+          },
+          "name": "review_queue"
+        }
+      },
+      "response": {
+        "id": "request-9",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-10",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "limit": "101",
+            "project": "fixture"
+          },
+          "name": "review_queue"
+        }
+      },
+      "response": {
+        "id": "request-10",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-11",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "memory_id": "00000000-0000-0000-0000-000000000001",
+            "notes": "Exact notes\nsecond line",
+            "project": "override",
+            "reviewer": "fixture-reviewer",
+            "verdict": " APPROVED "
+          },
+          "name": "review_submit"
+        }
+      },
+      "response": {
+        "id": "request-11",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Stored review 00000000-0000-0000-0000-000000000001 for memory 00000000-0000-0000-0000-000000000001",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-12",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture"
+          },
+          "name": "memory_rules"
+        }
+      },
+      "response": {
+        "id": "request-12",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-13",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture"
+          },
+          "name": "memory_bootstrap"
+        }
+      },
+      "response": {
+        "id": "request-13",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-14",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture"
+          },
+          "name": "memory_recall"
+        }
+      },
+      "response": {
+        "id": "request-14",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-15",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture",
+            "query": "empty"
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "id": "request-15",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "No matching memories found.",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-16",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": null,
+            "project": "fixture",
+            "shadow_general": null,
+            "tags": [
+              "lang:rust"
+            ]
+          },
+          "name": "memory_rules"
+        }
+      },
+      "response": {
+        "id": "request-16",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-17",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": null,
+            "include_recall": null,
+            "project": "fixture"
+          },
+          "name": "memory_bootstrap"
+        }
+      },
+      "response": {
+        "id": "request-17",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-18",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_workflow_artifacts": null,
+            "project": "fixture"
+          },
+          "name": "memory_recall"
+        }
+      },
+      "response": {
+        "id": "request-18",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-19",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "cross_project": null,
+            "expand_query": null,
+            "graph_hops": "2",
+            "include_general": null,
+            "include_workflow_artifacts": null,
+            "limit": "5",
+            "min_similarity": 0.5,
+            "project": "fixture",
+            "project_allowlist": [
+              "other"
+            ],
+            "query": "hit",
+            "rerank": null,
+            "tags": [
+              "tag"
+            ]
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "id": "request-19",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Search Results (1 matches)\n\n### 1. [decision] Choice (importance: 0.75, similarity: 0.88)\nID: 00000000-0000-0000-0000-000000000001\nTags: review-needed\nCreated: 2025-06-15 12:00\n\nUse a synthetic backend.\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-20",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": false,
+            "project": "fixture",
+            "shadow_general": false,
+            "tags": [
+              "lang:rust"
+            ]
+          },
+          "name": "memory_rules"
+        }
+      },
+      "response": {
+        "id": "request-20",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-21",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": false,
+            "include_recall": false,
+            "project": "fixture"
+          },
+          "name": "memory_bootstrap"
+        }
+      },
+      "response": {
+        "id": "request-21",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-22",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_workflow_artifacts": false,
+            "project": "fixture"
+          },
+          "name": "memory_recall"
+        }
+      },
+      "response": {
+        "id": "request-22",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-23",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "cross_project": false,
+            "expand_query": false,
+            "graph_hops": "2",
+            "include_general": false,
+            "include_workflow_artifacts": false,
+            "limit": "5",
+            "min_similarity": 0.5,
+            "project": "fixture",
+            "project_allowlist": [
+              "other"
+            ],
+            "query": "hit",
+            "rerank": false,
+            "tags": [
+              "tag"
+            ]
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "id": "request-23",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Search Results (1 matches)\n\n### 1. [decision] Choice (importance: 0.75, similarity: 0.88)\nID: 00000000-0000-0000-0000-000000000001\nTags: review-needed\nCreated: 2025-06-15 12:00\n\nUse a synthetic backend.\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-24",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": true,
+            "project": "fixture",
+            "shadow_general": true,
+            "tags": [
+              "lang:rust"
+            ]
+          },
+          "name": "memory_rules"
+        }
+      },
+      "response": {
+        "id": "request-24",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-25",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_general": true,
+            "include_recall": true,
+            "project": "fixture"
+          },
+          "name": "memory_bootstrap"
+        }
+      },
+      "response": {
+        "id": "request-25",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-26",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "include_workflow_artifacts": true,
+            "project": "fixture"
+          },
+          "name": "memory_recall"
+        }
+      },
+      "response": {
+        "id": "request-26",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Memories (1 results)\n\n### 1. [decision] Updated (importance: 0.75)\nID: 00000000-0000-0000-0000-000000000001\nTags: changed\nCreated: 2025-06-15 12:00\nUpdated: 2025-06-15 12:00\n\nAfter\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-27",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "decision",
+            "cross_project": true,
+            "expand_query": true,
+            "graph_hops": "2",
+            "include_general": true,
+            "include_workflow_artifacts": true,
+            "limit": "5",
+            "min_similarity": 0.5,
+            "project": "fixture",
+            "project_allowlist": [
+              "other"
+            ],
+            "query": "hit",
+            "rerank": true,
+            "tags": [
+              "tag"
+            ]
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "id": "request-27",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Search Results (1 matches)\n\n### 1. [decision] Choice (importance: 0.75, similarity: 0.88)\nID: 00000000-0000-0000-0000-000000000001\nTags: review-needed\nCreated: 2025-06-15 12:00\n\nUse a synthetic backend.\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-28",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "fixture",
+            "query": "fallback"
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "id": "request-28",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "## Session Log Results (fallback, 1 matches)\n\n### 1. Transcript (similarity: 0.75)\nSession: session\nProject: fixture\nCwd: /fixture\nCreated: 2025-06-15 12:00\n\nSynthetic transcript\n\n---\n",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-29",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_delete"
+        }
+      },
+      "response": {
+        "id": "request-29",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Deleted memory 00000000-0000-0000-0000-000000000001",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-30",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "id": "request-30",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Memory 00000000-0000-0000-0000-000000000001 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-31",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "content": "missing",
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_update"
+        }
+      },
+      "response": {
+        "id": "request-31",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Memory 00000000-0000-0000-0000-000000000001 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-32",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000001"
+          },
+          "name": "memory_delete"
+        }
+      },
+      "response": {
+        "id": "request-32",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Memory 00000000-0000-0000-0000-000000000001 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-33",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "memory_id": "00000000-0000-0000-0000-000000000002",
+            "notes": "missing",
+            "reviewer": "fixture",
+            "verdict": "rejected"
+          },
+          "name": "review_submit"
+        }
+      },
+      "response": {
+        "id": "request-33",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Memory 00000000-0000-0000-0000-000000000002 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-34",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "session_id": "00000000-0000-0000-0000-000000000002"
+          },
+          "name": "session_finalize"
+        }
+      },
+      "response": {
+        "id": "request-34",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Session 00000000-0000-0000-0000-000000000002 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,164 @@
+{
+  "after_eof": [],
+  "http": [
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/health"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/health"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/memories/00000000-0000-0000-0000-000000000002"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/failure/memories?"
+    }
+  ],
+  "transcript": [
+    {
+      "request": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "contract",
+            "version": "1"
+          },
+          "protocolVersion": "2025-06-18"
+        }
+      },
+      "response": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
+          "protocolVersion": "2025-06-18",
+          "serverInfo": {
+            "name": "memory-server",
+            "version": "<package-version>-<git-hash>"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "method": "ping",
+        "params": {}
+      },
+      "response": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "request": {
+        "id": "request-2",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "name": "memory_server_version"
+        }
+      },
+      "response": {
+        "id": "request-2",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "fixture-version",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-3",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "memory_server_version"
+        }
+      },
+      "response": {
+        "id": "request-3",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "fixture-version",
+              "type": "text"
+            }
+          ],
+          "isError": false
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-4",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "00000000-0000-0000-0000-000000000002"
+          },
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "id": "request-4",
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "Memory 00000000-0000-0000-0000-000000000002 not found",
+              "type": "text"
+            }
+          ],
+          "isError": true
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-5",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "project": "failure"
+          },
+          "name": "memory_list"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32002,
+          "message": "transport error: fixture unavailable"
+        },
+        "id": "request-5",
+        "jsonrpc": "2.0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,660 @@
+{
+  "tools": [
+    {
+      "description": "Load all effective rules plus non-rule core recall memories for a project in a single call. Prefer `memory_rules` with `tags` filters for scoped, targeted rule retrieval — this avoids loading irrelevant rules and wasting context.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_general": {
+            "description": "Whether to include rules stored under the shared `general` project",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_recall": {
+            "description": "Whether to include non-rule core recall memories alongside rules",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name to bootstrap",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "BootstrapParams",
+        "type": "object"
+      },
+      "name": "memory_bootstrap"
+    },
+    {
+      "description": "Delete a memory by UUID",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "UUID of the memory to delete",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "DeleteParams",
+        "type": "object"
+      },
+      "name": "memory_delete"
+    },
+    {
+      "description": "Retrieve a single memory by UUID",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "UUID of the memory to retrieve",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "GetParams",
+        "type": "object"
+      },
+      "name": "memory_get"
+    },
+    {
+      "description": "Browse memories by project with optional category filter, paginated",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "category": {
+            "description": "Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum number of results (default: 20, max: 100)",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "default": null,
+            "description": "Offset for pagination (default: 0)",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name to list memories for",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Filter to memories containing all of these exact tags",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "ListParams",
+        "type": "object"
+      },
+      "name": "memory_list"
+    },
+    {
+      "description": "The follow-up inspection tool after a promising memory_search or memory_get result. Exposes graph-connected context around a known memory, useful for tracing related decisions, plans, fixes, or rules.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "id": {
+            "description": "UUID of the memory to find neighbors for",
+            "format": "uuid",
+            "type": "string"
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum number of neighbors to return (default: 20, max: 100)",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ListNeighborsParams",
+        "type": "object"
+      },
+      "name": "memory_neighbors"
+    },
+    {
+      "description": "Recall core memories (importance >= 0.7) for a project at session start",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_workflow_artifacts": {
+            "description": "Include task-scoped workflow artifacts (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name to recall core memories for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "RecallParams",
+        "type": "object"
+      },
+      "name": "memory_recall"
+    },
+    {
+      "description": "Load durable rule memories for a project, optionally unioned with shared general rules. Targeted worker workflows should use `tags` to exclusively filter rules (e.g. `['lang:rust']` or `['phase:planning']`) when starting targeted worker runs. This avoids polluting context with irrelevant language/phase rules.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "include_general": {
+            "description": "Whether to include rules stored under the shared `general` project",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name to load rules for",
+            "type": "string"
+          },
+          "shadow_general": {
+            "description": "Whether to shadow general rules when a project has matching rules for the given tags (default: true)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tags": {
+            "description": "Filter to rules containing all of these exact tags (e.g. `[\"lang:rust\", \"phase:planning\"]`)",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "RulesParams",
+        "type": "object"
+      },
+      "name": "memory_rules"
+    },
+    {
+      "description": "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency. Targeted worker workflows should use `tags` to exclusively filter search hits.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "category": {
+            "description": "Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cross_project": {
+            "description": "Allow graph expansion into foreign projects (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expand_query": {
+            "description": "Expand search query using an LLM (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "graph_hops": {
+            "default": null,
+            "description": "Number of graph hops for expansion (default: 1)",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "include_general": {
+            "description": "Include edges to/from the `general` project during expansion (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_workflow_artifacts": {
+            "description": "Include task-scoped workflow artifacts (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum number of results (default: 5, max: 100)",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "min_similarity": {
+            "description": "Minimum similarity threshold (default: 0.5, range: 0.0-1.0)",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name to search within",
+            "type": "string"
+          },
+          "project_allowlist": {
+            "description": "Restrict cross-project expansion to these projects only",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "query": {
+            "description": "Natural language search query",
+            "type": "string"
+          },
+          "rerank": {
+            "description": "Apply semantic reranking to the results (default: false)",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tags": {
+            "description": "Filter to memories containing all of these exact tags",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project",
+          "query"
+        ],
+        "title": "SearchParams",
+        "type": "object"
+      },
+      "name": "memory_search"
+    },
+    {
+      "description": "Return the memory server version (includes git hash)",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "memory_server_version"
+    },
+    {
+      "description": "Store a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "category": {
+            "description": "Memory category: `context`, `decision`, `error_fix`, `plan`, or `rule`",
+            "type": "string"
+          },
+          "content": {
+            "description": "Full content of the memory",
+            "type": "string"
+          },
+          "project": {
+            "description": "Project this memory belongs to",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Brief summary for display and embedding",
+            "type": "string"
+          },
+          "tags": {
+            "description": "Optional tags for organization",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "category",
+          "content",
+          "project",
+          "summary"
+        ],
+        "title": "StoreParams",
+        "type": "object"
+      },
+      "name": "memory_store"
+    },
+    {
+      "description": "Update a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "content": {
+            "description": "Updated content (if changing)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "UUID of the memory to update",
+            "format": "uuid",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Updated summary (if changing)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "description": "Updated tags (if changing)",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "UpdateParams",
+        "type": "object"
+      },
+      "name": "memory_update"
+    },
+    {
+      "description": "Find pending review work by listing memories tagged review-needed, optionally narrowed by category.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "category": {
+            "description": "Filter by category: `context`, `decision`, `error_fix`, `plan`, `rule`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": null,
+            "description": "Maximum number of items to return (default: 20, max: 100)",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "title": "ReviewQueueParams",
+        "type": "object"
+      },
+      "name": "review_queue"
+    },
+    {
+      "description": "Record the review decision and complete the handoff by marking the original item reviewed.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "memory_id": {
+            "description": "Memory UUID to review",
+            "format": "uuid",
+            "type": "string"
+          },
+          "notes": {
+            "description": "Review notes",
+            "type": "string"
+          },
+          "project": {
+            "description": "Optional override project for the review memory",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reviewer": {
+            "description": "Reviewer identity",
+            "type": "string"
+          },
+          "verdict": {
+            "description": "Verdict string such as `approved`, `changes-requested`, or `rejected`",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id",
+          "notes",
+          "reviewer",
+          "verdict"
+        ],
+        "title": "SubmitReviewParams",
+        "type": "object"
+      },
+      "name": "review_submit"
+    },
+    {
+      "description": "Finalize a normalized session into searchable session-log chunks",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "session_id": {
+            "description": "Internal memoryd session UUID",
+            "format": "uuid",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Optional override summary",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "SessionFinalizeParams",
+        "type": "object"
+      },
+      "name": "session_finalize"
+    },
+    {
+      "description": "Store a session log transcript for searchable archival",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "content": {
+            "description": "Full session transcript content",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Working directory of the session",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "Session identifier",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Brief summary for embedding",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "session_id",
+          "summary"
+        ],
+        "title": "SessionLogStoreParams",
+        "type": "object"
+      },
+      "name": "session_log_store"
+    },
+    {
+      "description": "Append one message or tool event to a normalized shared session",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent": {
+            "description": "Agent/client identity, for example `claude` or `codex`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "description": "Message body",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Optional message kind such as `message`, `tool`, or `command`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "description": "Optional metadata blob, stored as text",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "Role such as `user`, `assistant`, `tool`, or `system`",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Internal memoryd session UUID",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "role",
+          "session_id"
+        ],
+        "title": "SessionMessageParams",
+        "type": "object"
+      },
+      "name": "session_message_append"
+    },
+    {
+      "description": "Create or upsert a normalized shared session for cross-agent capture",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "agent": {
+            "description": "Agent/client identity, for example `claude` or `codex`",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "description": "Working directory of the session",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_session_id": {
+            "description": "External client session identifier",
+            "type": "string"
+          },
+          "project": {
+            "description": "Project name",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "external_session_id"
+        ],
+        "title": "SessionStartParams",
+        "type": "object"
+      },
+      "name": "session_start"
+    }
+  ]
+}

@@ -1,0 +1,164 @@
+{
+  "after_eof": [],
+  "http": [],
+  "transcript": [
+    {
+      "request": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "contract",
+            "version": "1"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "response": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "name": "memory-server",
+            "version": "<package-version>-<git-hash>"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "failed to deserialize parameters: missing field `id`"
+        },
+        "id": "request-1",
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "request": {
+        "id": "request-2",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "id": "invalid"
+          },
+          "name": "memory_get"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "failed to deserialize parameters: UUID parsing failed: invalid character: found `i` at 0"
+        },
+        "id": "request-2",
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "request": {
+        "id": "request-3",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "category": "invalid",
+            "content": "x",
+            "project": "fixture",
+            "summary": "x"
+          },
+          "name": "memory_store"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "failed to deserialize parameters: unknown variant `invalid`, expected one of `context`, `decision`, `error_fix`, `plan`, `rule`"
+        },
+        "id": "request-3",
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "request": {
+        "id": "request-4",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "limit": "invalid",
+            "project": "fixture"
+          },
+          "name": "memory_list"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "failed to deserialize parameters: invalid digit found in string"
+        },
+        "id": "request-4",
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "request": {
+        "id": "request-5",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "graph_hops": -1,
+            "project": "fixture",
+            "query": "x"
+          },
+          "name": "memory_search"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "failed to deserialize parameters: data did not match any variant of untagged enum NumericOrNull"
+        },
+        "id": "request-5",
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "request": {
+        "id": "request-6",
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "unknown"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "tool not found"
+        },
+        "id": "request-6",
+        "jsonrpc": "2.0"
+      }
+    }
+  ]
+}

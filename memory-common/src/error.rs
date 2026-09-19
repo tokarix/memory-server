@@ -65,4 +65,41 @@ mod tests {
             rmcp::model::ErrorCode(-32_001)
         );
     }
+
+    #[test]
+    #[cfg(feature = "rmcp")]
+    fn all_error_envelopes() {
+        for (error, code, message) in [
+            (
+                Error::Database("fixture".into()),
+                -32_000,
+                "database error: fixture",
+            ),
+            (
+                Error::Embedding("fixture".into()),
+                -32_001,
+                "embedding error: fixture",
+            ),
+            (
+                Error::Transport("fixture".into()),
+                -32_002,
+                "transport error: fixture",
+            ),
+            (
+                Error::NotFound("fixture".into()),
+                -32_004,
+                "fixture not found",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+            let converted: rmcp::ErrorData = error.into();
+            assert_eq!(converted.code, rmcp::model::ErrorCode(code));
+            assert_eq!(converted.message, message);
+            assert_eq!(converted.data, None);
+            assert_eq!(
+                serde_json::to_value(converted).unwrap(),
+                serde_json::json!({"code":code,"message":message})
+            );
+        }
+    }
 }

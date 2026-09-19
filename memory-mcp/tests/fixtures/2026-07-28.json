@@ -1,0 +1,49 @@
+{
+  "after_eof": [],
+  "http": [],
+  "transcript": [
+    {
+      "request": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "contract",
+            "version": "1"
+          },
+          "protocolVersion": "2026-07-28"
+        }
+      },
+      "response": {
+        "id": "request-0",
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "name": "memory-server",
+            "version": "<package-version>-<git-hash>"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "method": "ping",
+        "params": {}
+      },
+      "response": {
+        "id": "request-1",
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    }
+  ]
+}
