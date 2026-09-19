@@ -18,7 +18,7 @@ name = "ingest"
 path = "src/bin/ingest.rs"
 
 [dependencies]
-askama = "0.15"
+askama = "0.16"
 axum = { version = "0.8.8", features = ["json", "macros", "query", "tokio"] }
 chrono.workspace = true
 memory-common = { path = "../memory-common", features = ["sqlx"] }
