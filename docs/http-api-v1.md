@@ -485,13 +485,19 @@ Purpose:
 Query parameters:
 
 - `include_general=true` optional, default `true`
+- `tags` optional, comma-separated; every returned rule must contain all tags
+- `shadow_general` optional, default `true`; deprecated compatibility parameter
 
 Behavior:
 
 - include project-specific rules
 - optionally union with `project = "general"`
+- tagged project and general rules are additive for both `shadow_general`
+  values; the old blanket shadowing behavior is deprecated
 - return general and project rules separately so callers can apply
   precedence without reparsing a merged list
+- precise overrides require stable policy identity and are deferred to a
+  follow-up issue; tags, summaries, and content do not identify replacements
 
 ### `GET /api/v1/projects/{project}/bootstrap`
 

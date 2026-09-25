@@ -36,6 +36,12 @@ fn memory() -> Value {
         "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:00Z"})
 }
 
+fn rule(id: &str, project: &str, summary: &str) -> Value {
+    json!({"id":id,"project":project,"category":"rule","summary":summary,
+        "content":summary,"tags":["lang:rust"],
+        "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:00Z"})
+}
+
 async fn backend(State(state): State<Backend>, method: Method, uri: Uri, bytes: Bytes) -> Response {
     let body: Value = if bytes.is_empty() {
         Value::Null
@@ -85,6 +91,13 @@ async fn backend(State(state): State<Backend>, method: Method, uri: Uri, bytes: 
             }
             json!({"memory":memory()})
         }
+        ("GET", "/api/v1/projects/cockpit/rules") => json!({
+            "project_rules":[rule(ID,"cockpit","Rust rules loaded")],
+            "general_rules":[
+                rule("00000000-0000-0000-0000-000000000003","general","Keep Rust build artifacts off tmpfs"),
+                rule("00000000-0000-0000-0000-000000000004","general","Run Rust verification checks")
+            ]
+        }),
         ("GET", path) if path.ends_with("/rules") => json!({"general_rules":[],"project_rules":[]}),
         ("GET", path) if path.ends_with("/bootstrap") => {
             json!({"project":"fixture","general_rules":[],"project_rules":[],"recall_memories":[]})
@@ -258,6 +271,49 @@ fn golden(name: &str, actual: &Value) {
         .join(format!("{name}.json"));
     let expected: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(*actual, expected, "rmcp 1.5 wire contract: {name}");
+}
+
+#[tokio::test]
+async fn rust_rules_keep_project_placeholder_and_general_policies() {
+    let mut fixture = Fixture::start().await;
+    fixture.initialize(VERSIONS[3]).await;
+    for shadow_general in [None, Some(true), Some(false)] {
+        let mut arguments = json!({"project":"cockpit","tags":["lang:rust"]});
+        if let Some(value) = shadow_general {
+            arguments["shadow_general"] = json!(value);
+        }
+        let response = fixture.call("memory_rules", arguments).await;
+        let content = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(content.contains("## Rule Set (3 rules)"));
+        assert!(content.contains("Rust rules loaded"));
+        assert!(content.contains("Keep Rust build artifacts off tmpfs"));
+        assert!(content.contains("Run Rust verification checks"));
+    }
+    let requests = fixture.state.requests.lock().unwrap().clone();
+    let rule_requests = requests
+        .iter()
+        .filter(|request| request["uri"].as_str().unwrap().contains("/cockpit/rules"))
+        .collect::<Vec<_>>();
+    assert_eq!(rule_requests.len(), 3);
+    assert!(
+        rule_requests[0]["uri"]
+            .as_str()
+            .unwrap()
+            .contains("shadow_general=true")
+    );
+    assert!(
+        rule_requests[1]["uri"]
+            .as_str()
+            .unwrap()
+            .contains("shadow_general=true")
+    );
+    assert!(
+        rule_requests[2]["uri"]
+            .as_str()
+            .unwrap()
+            .contains("shadow_general=false")
+    );
+    fixture.finish(true).await;
 }
 
 #[tokio::test]

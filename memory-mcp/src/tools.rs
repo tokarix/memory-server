@@ -88,7 +88,7 @@ pub struct RecallParams {
 pub struct RulesParams {
     /// Whether to include rules stored under the shared `general` project
     include_general: Option<bool>,
-    /// Whether to shadow general rules when a project has matching rules for the given tags (default: true)
+    /// Deprecated compatibility parameter (default: true); both values include matching general rules until keyed overrides exist
     shadow_general: Option<bool>,
     /// Project name to load rules for
     project: String,

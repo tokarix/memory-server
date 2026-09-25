@@ -572,6 +572,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rules_query_accepts_legacy_shadow_values() {
+        for (query, expected) in [
+            ("?tags=lang:rust", None),
+            ("?tags=lang:rust&shadow_general=true", Some(true)),
+            ("?tags=lang:rust&shadow_general=false", Some(false)),
+        ] {
+            let uri = format!("/api/v1/projects/cockpit/rules{query}")
+                .parse()
+                .unwrap();
+            let parsed = Query::<RulesQuery>::try_from_uri(&uri).unwrap();
+            assert_eq!(parsed.shadow_general, expected);
+            assert_eq!(parsed.tags, Some(vec!["lang:rust".to_owned()]));
+        }
+    }
+
+    #[test]
     fn recall_query_preserves_optional_workflow_policy() {
         for (query, expected) in [
             ("", None),

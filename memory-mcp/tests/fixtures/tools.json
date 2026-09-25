@@ -193,7 +193,7 @@
             "type": "string"
           },
           "shadow_general": {
-            "description": "Whether to shadow general rules when a project has matching rules for the given tags (default: true)",
+            "description": "Deprecated compatibility parameter (default: true); both values include matching general rules until keyed overrides exist",
             "type": [
               "boolean",
               "null"

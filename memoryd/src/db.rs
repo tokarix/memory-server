@@ -789,11 +789,10 @@ pub async fn list_rules(
     pool: &PgPool,
     project: &str,
     include_general: bool,
-    shadow_general: bool,
+    _shadow_general: bool,
     tags: Option<&[String]>,
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let tag_arr = tags.map(<[String]>::to_vec);
-    let apply_shadow = shadow_general && tags.is_some_and(|t| !t.is_empty());
     let rows = if include_general && project != crate::app::GENERAL_RULE_PROJECT {
         sqlx::query(
             "SELECT id, category, content, created_at, project, summary, tags, updated_at
@@ -801,12 +800,7 @@ pub async fn list_rules(
              WHERE category = $1
                AND (
                    project = $2
-                   OR (project = $3 AND NOT ($5 AND $4::TEXT[] IS NOT NULL AND EXISTS (
-                       SELECT 1 FROM memories m2
-                       WHERE m2.category = $1
-                         AND m2.project = $2
-                         AND m2.tags @> $4::TEXT[]
-                   )))
+                   OR project = $3
                )
                AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
              ORDER BY CASE WHEN project = $3 THEN 0 ELSE 1 END, updated_at DESC",
@@ -815,7 +809,6 @@ pub async fn list_rules(
         .bind(project)
         .bind(crate::app::GENERAL_RULE_PROJECT)
         .bind(&tag_arr)
-        .bind(apply_shadow)
         .fetch_all(pool)
         .await?
     } else {
@@ -3608,44 +3601,78 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
-    async fn list_rules_shadows_general_correctly(pool: PgPool) {
-        let mut general_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);
-        general_rule.category = Category::Rule;
-        general_rule.tags = vec!["lang:rust".to_owned()];
-
+    async fn list_rules_keeps_tagged_general_rules(pool: PgPool) {
         let mut project_rule = test_memory(Uuid::new_v4(), "test-project");
         project_rule.category = Category::Rule;
         project_rule.tags = vec!["lang:rust".to_owned()];
+        project_rule.summary = "Rust rules loaded".to_owned();
 
-        insert(&pool, &general_rule).await.unwrap();
+        let mut storage_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);
+        storage_rule.category = Category::Rule;
+        storage_rule.tags = vec!["lang:rust".to_owned(), "storage".to_owned()];
+        storage_rule.summary = "Keep Rust build artifacts off tmpfs".to_owned();
+
+        let mut verification_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);
+        verification_rule.category = Category::Rule;
+        verification_rule.tags = vec!["lang:rust".to_owned(), "verification".to_owned()];
+        verification_rule.summary = "Run Rust verification checks".to_owned();
+
+        let mut go_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);
+        go_rule.category = Category::Rule;
+        go_rule.tags = vec!["lang:go".to_owned()];
+
         insert(&pool, &project_rule).await.unwrap();
+        insert(&pool, &storage_rule).await.unwrap();
+        insert(&pool, &verification_rule).await.unwrap();
+        insert(&pool, &go_rule).await.unwrap();
 
         let tags = vec!["lang:rust".to_owned()];
+        for shadow_general in [true, false] {
+            let rules = list_rules(&pool, "test-project", true, shadow_general, Some(&tags))
+                .await
+                .unwrap();
+            assert_eq!(rules.len(), 3);
+            assert_eq!(rules[2].id, project_rule.id);
+            let general_ids = rules[..2].iter().map(|rule| rule.id).collect::<Vec<_>>();
+            assert!(general_ids.contains(&storage_rule.id));
+            assert!(general_ids.contains(&verification_rule.id));
+        }
 
-        // 1. shadow_general = true (project matching rule shadows general)
-        let rules = list_rules(&pool, "test-project", true, true, Some(&tags))
+        let rules = list_rules(&pool, "test-project", false, true, Some(&tags))
             .await
             .unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].id, project_rule.id);
 
-        // 2. Fallback: project has no matching rules, general does
-        let mut general_only_rule = test_memory(Uuid::new_v4(), crate::app::GENERAL_RULE_PROJECT);
-        general_only_rule.category = Category::Rule;
-        general_only_rule.tags = vec!["lang:go".to_owned()];
-        insert(&pool, &general_only_rule).await.unwrap();
+        let rules = list_rules(
+            &pool,
+            "test-project",
+            true,
+            true,
+            Some(&["lang:go".to_owned()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, go_rule.id);
 
-        let go_tags = vec!["lang:go".to_owned()];
-        let rules = list_rules(&pool, "test-project", true, true, Some(&go_tags))
+        let storage_tags = vec!["lang:rust".to_owned(), "storage".to_owned()];
+        let rules = list_rules(&pool, "test-project", true, true, Some(&storage_tags))
             .await
             .unwrap();
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].id, general_only_rule.id);
+        assert_eq!(rules[0].id, storage_rule.id);
 
-        // 3. shadow_general = false (bootstrap mode includes both)
-        let rules = list_rules(&pool, "test-project", true, false, Some(&tags))
+        let rules = list_rules(&pool, "test-project", true, true, None)
             .await
             .unwrap();
-        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[3].id, project_rule.id);
+
+        let rules = list_rules(&pool, "test-project", false, true, None)
+            .await
+            .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, project_rule.id);
     }
 }
