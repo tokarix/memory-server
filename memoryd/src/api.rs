@@ -1,9 +1,11 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use memory_common::guardrails::GuardrailPack;
 use memory_common::policy::ResolutionContext;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -72,6 +74,11 @@ struct BootstrapQuery {
 }
 
 #[derive(Deserialize)]
+struct GuardrailsQuery {
+    context: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ReviewQueueQuery {
     category: Option<Category>,
     limit: Option<i64>,
@@ -128,6 +135,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/projects/{project}/memories", get(list_memories))
         .route("/api/v1/projects/{project}/recall", get(recall_project))
         .route("/api/v1/projects/{project}/rules", get(list_rules))
+        .route(
+            "/api/v1/projects/{project}/guardrails",
+            get(guardrails).layer(middleware::from_fn(guardrails_no_store)),
+        )
         .route(
             "/api/v1/projects/{project}/bootstrap",
             get(project_bootstrap),
@@ -379,6 +390,26 @@ async fn list_rules(
         })
         .await?;
     Ok(Json(rules.into()))
+}
+
+async fn guardrails(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(path): Path<RecallPath>,
+    Query(query): Query<GuardrailsQuery>,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    let context = parse_context(query.context.as_deref())?;
+    let pack: GuardrailPack = state.app.guardrails(&path.project, context).await?;
+    Ok(Json(pack).into_response())
+}
+
+async fn guardrails_no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn project_bootstrap(

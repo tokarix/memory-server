@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::error::Error;
+use crate::guardrails::{GuardrailPack, MAX_HTTP_BODY_BYTES};
 use crate::model;
 use crate::policy::ResolutionContext;
 use crate::protocol::{
@@ -60,6 +63,84 @@ impl HttpMemoryClient {
     pub fn with_context(mut self, context: ResolutionContext) -> Self {
         self.context = context;
         self
+    }
+
+    /// Fetch and independently validate one bounded authoritative guardrail pack.
+    ///
+    /// # Errors
+    /// Returns typed policy diagnostics for old, malformed, empty, or unreachable peers.
+    pub async fn guardrails(&self, project: &str) -> Result<GuardrailPack, Error> {
+        let mut url = self.url(&["api", "v1", "projects", project, "guardrails"])?;
+        url.query_pairs_mut().append_pair(
+            "context",
+            &serde_json::to_string(&self.context)
+                .map_err(|error| guardrails_error("guardrails_malformed", &error.to_string()))?,
+        );
+        let mut request = self.http.get(url).timeout(Duration::from_secs(5));
+        if let Some(token) = &self.bearer_token {
+            request = request.bearer_auth(token);
+        }
+        let mut response = request.send().await.map_err(|error| {
+            guardrails_error(
+                "guardrails_transport",
+                &format!("guardrail request failed: {error}"),
+            )
+        })?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_HTTP_BODY_BYTES as u64)
+        {
+            return Err(guardrails_error(
+                "guardrails_too_large",
+                "guardrail HTTP body exceeds 32768 bytes",
+            ));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            guardrails_error(
+                "guardrails_transport",
+                &format!("guardrail response failed: {error}"),
+            )
+        })? {
+            if body.len().saturating_add(chunk.len()) > MAX_HTTP_BODY_BYTES {
+                return Err(guardrails_error(
+                    "guardrails_too_large",
+                    "guardrail HTTP body exceeds 32768 bytes",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            if let Ok(envelope) = serde_json::from_slice::<ErrorEnvelope>(&body)
+                && (envelope.error.code.starts_with("policy_")
+                    || envelope.error.code.starts_with("guardrails_"))
+            {
+                return Err(Error::Policy {
+                    code: envelope.error.code,
+                    message: envelope.error.message,
+                    details: envelope.error.details,
+                    conflict: status == StatusCode::CONFLICT,
+                });
+            }
+            let code = if status == StatusCode::NOT_FOUND {
+                "guardrails_upstream_unsupported"
+            } else {
+                "guardrails_transport"
+            };
+            return Err(guardrails_error(
+                code,
+                &format!("guardrail endpoint returned HTTP {status}"),
+            ));
+        }
+        let pack: GuardrailPack = serde_json::from_slice(&body).map_err(|error| {
+            guardrails_error(
+                "guardrails_malformed",
+                &format!("invalid guardrail response: {error}"),
+            )
+        })?;
+        pack.validate_for(project, &self.context)?;
+        Ok(pack)
     }
 
     /// Fetch the remote server version string.
@@ -561,5 +642,14 @@ impl HttpMemoryClient {
             path_segments.extend(segments);
         }
         Ok(url)
+    }
+}
+
+fn guardrails_error(code: &str, message: &str) -> Error {
+    Error::Policy {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        details: serde_json::json!({"action": "Check the memoryd guardrails endpoint and configured scope"}),
+        conflict: false,
     }
 }

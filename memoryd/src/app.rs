@@ -337,6 +337,32 @@ impl MemoryApp {
         policy_resolution::resolve(candidates, &request)
     }
 
+    /// Resolve and publish the complete mandatory pack for a trusted scope.
+    ///
+    /// # Errors
+    /// Returns a typed policy or database error; no partial pack is published.
+    pub async fn guardrails(
+        &self,
+        project: &str,
+        context: memory_common::policy::ResolutionContext,
+    ) -> Result<memory_common::guardrails::GuardrailPack, Error> {
+        let rules = self
+            .resolve_rules(ResolutionRequest {
+                project: project.to_owned(),
+                include_general: true,
+                shadow_general: true,
+                tags: None,
+                context,
+            })
+            .await?;
+        memory_common::guardrails::GuardrailPack::new(
+            project.to_owned(),
+            rules.context,
+            rules.canonical.schema_version,
+            rules.canonical.mandatory,
+        )
+    }
+
     /// Load effective rules and optional recall memories for a project.
     ///
     /// # Errors
@@ -1218,6 +1244,28 @@ mod tests {
                 );
                 assert_eq!(body["canonical"]["effective"].as_array().unwrap().len(), 1);
             }
+            let context = format!("{{\"profile\":\"{profile}\"}}");
+            let response = client
+                .get(url("guardrails", &[("context", &context)]))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[reqwest::header::CACHE_CONTROL],
+                "no-store"
+            );
+            let pack: memory_common::guardrails::GuardrailPack = response.json().await.unwrap();
+            assert_eq!(pack.mandatory.len(), 1);
+            assert_eq!(pack.mandatory[0].id, Uuid::from_u128(expected_id));
+            pack.validate_for(
+                "app",
+                &memory_common::policy::ResolutionContext {
+                    profile: Some(profile.to_owned()),
+                    ..memory_common::policy::ResolutionContext::default()
+                },
+            )
+            .unwrap();
         }
         for endpoint in ["rules", "bootstrap"] {
             let response = client
@@ -1236,6 +1284,10 @@ mod tests {
                 2
             );
         }
+        let response = client.get(url("guardrails", &[])).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "policy_context_required");
 
         let mut incompatible = policy_request(None, 1).policy.unwrap();
         incompatible.policy_key = "storage.other".to_owned();
