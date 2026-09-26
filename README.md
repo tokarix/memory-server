@@ -287,6 +287,49 @@ require `Authorization: Bearer <token>`.
 | `review_queue` | List memories tagged `review-needed`, with optional category filter |
 | `review_submit` | Store a review decision and mark the original reviewed |
 
+### Policy identity for Rules
+
+Rules may carry structured `policy` metadata. A legacy Rule has `policy: null`
+and remains contextual; existing rows are never classified from their text or
+tags. A classified Rule has a project-local `policy_key`, a positive `revision`,
+a `delivery_class` of `contextual` or `mandatory`, a server-controlled `state`,
+and an optional predecessor UUID in `supersedes`. The active revision is
+returned by `memory_rules` and `memory_bootstrap`; superseded revisions remain
+available through `memory_get`, `memory_list`, and search. Mandatory is stored
+classification only in this release: existing rule filters still apply.
+
+To publish a new root, call `memory_store` with category `rule` and a complete
+write payload such as
+`"policy":{"policy_key":"build.storage","revision":1,"delivery_class":"contextual"}`.
+To revise it, store a new Rule with a higher revision and `supersedes` set to
+the current active revision's UUID. Classified content, summary, tags, and
+delivery class are immutable; editing them requires a new revision. A key is
+1–128 ASCII bytes, starting with a lowercase letter or digit, followed only
+by lowercase letters, digits, `.`, `_`, `:`, or `-`.
+
+To classify an existing legacy Rule while preserving its UUID and contents:
+
+1. Call `memory_get(id)` and inspect its project, category, content, summary,
+   tags, and `policy: null` status. Copy the `updated_at:` field from the
+   metadata header before the blank line that introduces content. It is the
+   persisted UTC instant with nine fractional digits and `Z`, for example
+   `2026-09-26T12:34:27.123456000Z`. The separate `Updated:` minute display
+   is never a concurrency token.
+2. Call `memory_update` with only `id`, that exact `expected_updated_at` value,
+   and the complete write payload. Example:
+   `{"id":"<legacy-rule-uuid>","expected_updated_at":"2026-09-26T12:34:27.123456000Z","policy":{"policy_key":"build.storage","revision":1,"delivery_class":"contextual"}}`.
+   Replace the example timestamp with the actual value just read.
+3. On success, call `memory_get` on the same UUID to verify the committed
+   identity. If the server returns `policy_stale_assignment`, read and inspect
+   the changed Rule again before deciding whether to retry. Never refresh the
+   token and classify text you have not inspected.
+
+Stop older write-capable `memoryd` instances before enabling classification;
+they do not have the new immutability guards. The policy migration rolls back
+only while every Rule remains unclassified. Once classification occurs, its
+down migration refuses to discard identity and history. Use a separately
+authorized export or restore procedure for that case.
+
 `memory_search` behavior:
 - expands the user query with the configured LLM
 - runs hybrid vector + FTS retrieval against durable memories

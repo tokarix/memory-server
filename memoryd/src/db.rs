@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use memory_common::policy::{DeliveryClass, PolicyMetadata, PolicyState};
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -147,7 +148,7 @@ pub async fn create_session(
 ///
 /// Returns an error if the query fails.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM memories WHERE id = $1")
+    let result = sqlx::query("DELETE FROM memories WHERE id = $1 AND policy_key IS NULL")
         .bind(id)
         .execute(pool)
         .await?;
@@ -221,7 +222,7 @@ pub async fn list_neighbors(
         SELECT r.edge_id, r.confidence, r.edge_created_at, r.dst_id, r.dst_project,
                r.evidence, r.origin, r.relation, r.src_id, r.src_project, r.suppressed,
                r.edge_updated_at, r.weight,
-               m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at
+               m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes
          FROM ranked r
          JOIN memories m ON m.id = r.neighbor_id
          WHERE r.rn = 1
@@ -277,7 +278,7 @@ pub async fn list_search_neighbors(
                r.dst_project, r.evidence, r.origin, r.relation, r.src_id,
                r.src_project, r.suppressed, r.edge_updated_at, r.weight,
                m.id, m.category, m.content, m.created_at, m.project,
-               m.summary, m.tags, m.updated_at
+               m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes
         FROM ranked r
         JOIN memories m ON m.id = r.neighbor_id
         WHERE r.rn = 1
@@ -555,7 +556,7 @@ pub async fn append_session_message(
 /// Returns an error if the query fails.
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
          FROM memories WHERE id = $1",
     )
     .bind(id)
@@ -691,15 +692,17 @@ pub async fn list_core(
     .collect();
 
     let statement = if include_workflow_artifacts {
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
          FROM memories
          WHERE project = $1 AND category = ANY($2)
+           AND (policy_state IS NULL OR policy_state = 'active')
          ORDER BY updated_at DESC"
     } else {
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
          FROM memories
          WHERE project = $1 AND category = ANY($2)
            AND workflow_artifact = FALSE
+           AND (policy_state IS NULL OR policy_state = 'active')
          ORDER BY updated_at DESC"
     };
     let rows = sqlx::query(statement)
@@ -721,7 +724,7 @@ pub async fn list_maintenance_candidates(
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, category, content, created_at, project, summary, tags,
-                updated_at
+                updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
          FROM memories
          WHERE project = $1
            AND workflow_artifact = FALSE
@@ -748,7 +751,7 @@ pub async fn list_review_queue(
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
                  FROM memories
                  WHERE project = $1
                    AND category = $2
@@ -764,7 +767,7 @@ pub async fn list_review_queue(
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
                  FROM memories
                  WHERE project = $1
                    AND tags @> ARRAY['review-needed']::TEXT[]
@@ -793,38 +796,27 @@ pub async fn list_rules(
     tags: Option<&[String]>,
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let tag_arr = tags.map(<[String]>::to_vec);
-    let rows = if include_general && project != crate::app::GENERAL_RULE_PROJECT {
-        sqlx::query(
-            "SELECT id, category, content, created_at, project, summary, tags, updated_at
-             FROM memories
-             WHERE category = $1
-               AND (
-                   project = $2
-                   OR project = $3
-               )
-               AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
-             ORDER BY CASE WHEN project = $3 THEN 0 ELSE 1 END, updated_at DESC",
-        )
-        .bind(Category::Rule)
-        .bind(project)
-        .bind(crate::app::GENERAL_RULE_PROJECT)
-        .bind(&tag_arr)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT id, category, content, created_at, project, summary, tags, updated_at
-             FROM memories
-             WHERE category = $1 AND project = $2
-               AND ($3::TEXT[] IS NULL OR tags @> $3::TEXT[])
-             ORDER BY updated_at DESC",
-        )
-        .bind(Category::Rule)
-        .bind(project)
-        .bind(&tag_arr)
-        .fetch_all(pool)
-        .await?
-    };
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags,
+                updated_at, policy_key, policy_revision, policy_delivery_class,
+                policy_state, policy_supersedes
+         FROM memories
+         WHERE category = 'rule'
+           AND (project = $1 OR ($2 AND project = 'general'))
+           AND (policy_state IS NULL OR policy_state = 'active')
+           AND ($3::TEXT[] IS NULL OR tags @> $3::TEXT[])
+         ORDER BY CASE WHEN project = 'general' AND project <> $1 THEN 0 ELSE 1 END,
+                  CASE WHEN policy_key IS NULL THEN 1 ELSE 0 END,
+                  policy_key COLLATE \"C\" ASC NULLS LAST,
+                  policy_revision ASC NULLS LAST,
+                  CASE WHEN policy_key IS NULL THEN updated_at END DESC,
+                  id ASC",
+    )
+    .bind(project)
+    .bind(include_general)
+    .bind(&tag_arr)
+    .fetch_all(pool)
+    .await?;
     rows.iter().map(row_to_summary).collect()
 }
 
@@ -845,7 +837,7 @@ pub async fn list(
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
                  FROM memories
                  WHERE project = $1 AND category = $2
                    AND ($5::TEXT[] IS NULL OR tags @> $5::TEXT[])
@@ -862,7 +854,7 @@ pub async fn list(
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
                  FROM memories
                  WHERE project = $1
                    AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
@@ -1259,8 +1251,12 @@ pub async fn update(
             embedding = COALESCE($3, embedding),
             summary = COALESCE($4, summary),
             tags = COALESCE($5, tags),
-            updated_at = NOW()
-         WHERE id = $1",
+            updated_at = CASE
+                WHEN category = 'rule' THEN
+                    GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+                ELSE NOW()
+            END
+         WHERE id = $1 AND policy_key IS NULL",
     )
     .bind(id)
     .bind(content)
@@ -1649,7 +1645,7 @@ const HYBRID_CATEGORY_INCLUSIVE_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1684,7 +1680,7 @@ const HYBRID_CATEGORY_DEFAULT_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1717,7 +1713,7 @@ const HYBRID_INCLUSIVE_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1752,7 +1748,7 @@ const HYBRID_DEFAULT_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1886,6 +1882,7 @@ fn row_to_session_summary(row: &sqlx::postgres::PgRow) -> Result<SessionSummary,
 fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Error> {
     Ok(MemorySummary {
         id: row.try_get("id")?,
+        policy: row_to_policy(row)?,
         category: row.try_get("category")?,
         content: row.try_get("content")?,
         created_at: row.try_get("created_at")?,
@@ -1894,6 +1891,57 @@ fn row_to_summary(row: &sqlx::postgres::PgRow) -> Result<MemorySummary, sqlx::Er
         tags: row.try_get("tags")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn row_to_policy(row: &sqlx::postgres::PgRow) -> Result<Option<PolicyMetadata>, sqlx::Error> {
+    let key: Option<String> = row.try_get("policy_key")?;
+    let revision: Option<i64> = row.try_get("policy_revision")?;
+    let delivery: Option<String> = row.try_get("policy_delivery_class")?;
+    let publication_state: Option<String> = row.try_get("policy_state")?;
+    let supersedes: Option<Uuid> = row.try_get("policy_supersedes")?;
+    let Some(policy_key) = key else {
+        if revision.is_some()
+            || delivery.is_some()
+            || publication_state.is_some()
+            || supersedes.is_some()
+        {
+            return Err(sqlx::Error::Protocol(
+                "partial legacy policy metadata".to_owned(),
+            ));
+        }
+        return Ok(None);
+    };
+    let revision =
+        revision.ok_or_else(|| sqlx::Error::Protocol("missing policy revision".to_owned()))?;
+    let delivery = delivery
+        .ok_or_else(|| sqlx::Error::Protocol("missing policy delivery class".to_owned()))?;
+    let publication_state = publication_state
+        .ok_or_else(|| sqlx::Error::Protocol("missing policy state".to_owned()))?;
+    let delivery_class = match delivery.as_str() {
+        "contextual" => DeliveryClass::Contextual,
+        "mandatory" => DeliveryClass::Mandatory,
+        value => {
+            return Err(sqlx::Error::Protocol(format!(
+                "invalid policy delivery class: {value}"
+            )));
+        }
+    };
+    let state = match publication_state.as_str() {
+        "active" => PolicyState::Active,
+        "superseded" => PolicyState::Superseded,
+        value => {
+            return Err(sqlx::Error::Protocol(format!(
+                "invalid policy state: {value}"
+            )));
+        }
+    };
+    Ok(Some(PolicyMetadata {
+        policy_key,
+        revision,
+        delivery_class,
+        state,
+        supersedes,
+    }))
 }
 
 #[cfg(test)]
@@ -1911,6 +1959,7 @@ mod tests {
     fn test_memory(id: Uuid, project: &str) -> Memory {
         Memory {
             id,
+            policy: None,
             category: Category::Context,
             content: "test content".to_owned(),
             created_at: Utc::now(),

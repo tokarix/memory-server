@@ -6,6 +6,7 @@ use crate::model::{
     Category, EdgeOrigin, EdgeRelation, MemoryEdgeSummary, MemorySummary, SessionLogSummary,
     SessionMessageSummary, SessionSummary,
 };
+use crate::policy::{PolicyMetadata, PolicyWrite};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ListMemoriesRequest {
@@ -44,6 +45,7 @@ pub struct SearchMemoriesRequest {
 pub struct StoreMemoryRequest {
     pub category: Category,
     pub content: String,
+    pub policy: Option<PolicyWrite>,
     pub project: String,
     pub summary: String,
     pub tags: Option<Vec<String>>,
@@ -52,7 +54,9 @@ pub struct StoreMemoryRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UpdateMemoryRequest {
     pub content: Option<String>,
+    pub expected_updated_at: Option<String>,
     pub id: Uuid,
+    pub policy: Option<PolicyWrite>,
     pub summary: Option<String>,
     pub tags: Option<Vec<String>>,
 }
@@ -113,6 +117,8 @@ pub enum SearchOutcome {
 #[derive(Deserialize, Serialize)]
 pub struct PatchMemoryRequest {
     pub content: Option<String>,
+    pub expected_updated_at: Option<String>,
+    pub policy: Option<PolicyWrite>,
     pub summary: Option<String>,
     pub tags: Option<Vec<String>>,
 }
@@ -228,6 +234,7 @@ pub struct MemoryDto {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub id: Uuid,
+    pub policy: Option<PolicyMetadata>,
     pub project: String,
     pub summary: String,
     pub tags: Vec<String>,
@@ -347,6 +354,7 @@ impl From<MemorySummary> for MemoryDto {
             content: memory.content,
             created_at: memory.created_at,
             id: memory.id,
+            policy: memory.policy,
             project: memory.project,
             summary: memory.summary,
             tags: memory.tags,
@@ -362,6 +370,7 @@ impl From<MemoryDto> for MemorySummary {
             content: memory.content,
             created_at: memory.created_at,
             id: memory.id,
+            policy: memory.policy,
             project: memory.project,
             summary: memory.summary,
             tags: memory.tags,
@@ -479,5 +488,47 @@ impl From<BootstrapPayload> for BootstrapEnvelope {
                 .map(Into::into)
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+
+    use crate::policy::{DeliveryClass, PolicyMetadata, PolicyState};
+
+    use super::{Category, MemoryDto, MemorySummary, Uuid};
+
+    #[test]
+    fn policy_dto_round_trip_and_legacy_omission() {
+        let now = DateTime::parse_from_rfc3339("2026-09-26T12:34:27.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let dto = MemoryDto {
+            category: Category::Rule,
+            content: "Rule text".to_owned(),
+            created_at: now,
+            id: Uuid::from_u128(1),
+            policy: Some(PolicyMetadata {
+                policy_key: "build.storage".to_owned(),
+                revision: 2,
+                delivery_class: DeliveryClass::Mandatory,
+                state: PolicyState::Active,
+                supersedes: Some(Uuid::from_u128(2)),
+            }),
+            project: "project-a".to_owned(),
+            summary: "Rule summary".to_owned(),
+            tags: vec!["lang:rust".to_owned()],
+            updated_at: now,
+        };
+        let summary: MemorySummary = dto.clone().into();
+        let round_trip: MemoryDto = summary.into();
+        assert_eq!(round_trip.policy, dto.policy);
+        assert_eq!(round_trip.updated_at, now);
+        let mut legacy = serde_json::to_value(round_trip).unwrap();
+        legacy.as_object_mut().unwrap().remove("policy");
+        let parsed: MemoryDto = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.policy.is_none());
+        assert!(serde_json::to_value(parsed).unwrap()["policy"].is_null());
     }
 }

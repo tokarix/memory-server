@@ -18,6 +18,7 @@ use crate::protocol::{
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use memory_common::http_client::HttpMemoryClient;
+use memory_common::policy::{DeliveryClass, PolicyState, PolicyWrite, format_updated_at};
 
 #[derive(Clone)]
 pub enum MemoryBackend {
@@ -231,6 +232,8 @@ pub struct StoreParams {
     category: Category,
     /// Full content of the memory
     content: String,
+    /// Complete policy metadata for a classified Rule revision
+    policy: Option<PolicyWrite>,
     /// Project this memory belongs to
     project: String,
     /// Brief summary for display and embedding
@@ -243,8 +246,13 @@ pub struct StoreParams {
 pub struct UpdateParams {
     /// Updated content (if changing)
     content: Option<String>,
+    /// Exact `updated_at` header copied from `memory_get` for Rule adoption
+    #[schemars(extend("format" = "date-time"))]
+    expected_updated_at: Option<String>,
     /// UUID of the memory to update
     id: Uuid,
+    /// Complete metadata to assign to an existing legacy Rule
+    policy: Option<PolicyWrite>,
     /// Updated summary (if changing)
     summary: Option<String>,
     /// Updated tags (if changing)
@@ -503,6 +511,7 @@ impl MemoryServer {
             .store_memory(StoreMemoryRequest {
                 category: params.category,
                 content: params.content,
+                policy: params.policy,
                 project: params.project,
                 summary: params.summary,
                 tags: params.tags,
@@ -527,7 +536,9 @@ impl MemoryServer {
             .backend
             .update_memory(UpdateMemoryRequest {
                 content: params.content,
+                expected_updated_at: params.expected_updated_at,
                 id: params.id,
+                policy: params.policy,
                 summary: params.summary,
                 tags: params.tags,
             })
@@ -881,7 +892,7 @@ impl MemoryBackend {
 
 fn format_single_memory(m: &model::MemorySummary) -> String {
     format!(
-        "## [{}] {} (importance: {:.2})\nID: {}\nProject: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}",
+        "## [{}] {} (importance: {:.2})\nID: {}\nProject: {}\nTags: {}\nCreated: {}\nUpdated: {}{}\n\n{}",
         m.category,
         m.summary,
         m.category.importance(),
@@ -890,6 +901,7 @@ fn format_single_memory(m: &model::MemorySummary) -> String {
         m.tags.join(", "),
         m.created_at.format("%Y-%m-%d %H:%M"),
         m.updated_at.format("%Y-%m-%d %H:%M"),
+        rule_metadata(m, false),
         m.content,
     )
 }
@@ -899,7 +911,7 @@ fn format_memory_list(memories: &[model::MemorySummary]) -> String {
     for (i, m) in memories.iter().enumerate() {
         let _ = write!(
             out,
-            "\n### {}. [{}] {} (importance: {:.2})\nID: {}\nTags: {}\nCreated: {}\nUpdated: {}\n\n{}\n\n---\n",
+            "\n### {}. [{}] {} (importance: {:.2})\nID: {}\nTags: {}\nCreated: {}\nUpdated: {}{}\n\n{}\n\n---\n",
             i + 1,
             m.category,
             m.summary,
@@ -908,6 +920,7 @@ fn format_memory_list(memories: &[model::MemorySummary]) -> String {
             m.tags.join(", "),
             m.created_at.format("%Y-%m-%d %H:%M"),
             m.updated_at.format("%Y-%m-%d %H:%M"),
+            rule_metadata(m, false),
             m.content,
         );
     }
@@ -919,7 +932,7 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
     for (i, (m, similarity)) in results.iter().enumerate() {
         let _ = write!(
             out,
-            "\n### {}. [{}] {} (importance: {:.2}, similarity: {:.2})\nID: {}\nTags: {}\nCreated: {}\n\n{}\n\n---\n",
+            "\n### {}. [{}] {} (importance: {:.2}, similarity: {:.2})\nID: {}\nTags: {}\nCreated: {}{}\n\n{}\n\n---\n",
             i + 1,
             m.category,
             m.summary,
@@ -928,6 +941,7 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
             m.id,
             m.tags.join(", "),
             m.created_at.format("%Y-%m-%d %H:%M"),
+            rule_metadata(m, false),
             m.content,
         );
     }
@@ -959,13 +973,14 @@ fn append_memory_section(out: &mut String, title: &str, memories: &[model::Memor
     for (index, memory) in memories.iter().enumerate() {
         let _ = write!(
             out,
-            "\n{}. [{}] {}\nProject: {}\nTags: {}\nUpdated: {}\n\n{}\n",
+            "\n{}. [{}] {}\nProject: {}\nTags: {}\nUpdated: {}{}\n\n{}\n",
             index + 1,
             memory.category,
             memory.summary,
             memory.project,
             memory.tags.join(", "),
             memory.updated_at.format("%Y-%m-%d %H:%M"),
+            rule_metadata(memory, true),
             memory.content,
         );
     }
@@ -976,7 +991,7 @@ fn format_neighbor_list(neighbors: &[(model::MemoryEdgeSummary, model::MemorySum
     for (i, (edge, memory)) in neighbors.iter().enumerate() {
         let _ = write!(
             out,
-            "\n### {}. [{}] {} (weight: {:.2})\nID: {}\nEdge: {} via {} (confidence: {:.2})\nProject: {}\nTags: {}\n\n{}\n\n---\n",
+            "\n### {}. [{}] {} (weight: {:.2})\nID: {}\nEdge: {} via {} (confidence: {:.2})\nProject: {}\nTags: {}{}\n\n{}\n\n---\n",
             i + 1,
             memory.category,
             memory.summary,
@@ -987,10 +1002,48 @@ fn format_neighbor_list(neighbors: &[(model::MemoryEdgeSummary, model::MemorySum
             edge.confidence,
             memory.project,
             memory.tags.join(", "),
+            rule_metadata(memory, false),
             memory.content,
         );
     }
     out
+}
+
+fn rule_metadata(memory: &model::MemorySummary, include_id: bool) -> String {
+    if memory.category != Category::Rule {
+        return String::new();
+    }
+    let mut output = String::new();
+    if include_id {
+        let _ = write!(output, "\nID: {}", memory.id);
+    }
+    let _ = write!(
+        output,
+        "\nupdated_at: {}",
+        format_updated_at(memory.updated_at)
+    );
+    match &memory.policy {
+        None => output.push_str("\npolicy: null\neffective_delivery_class: contextual"),
+        Some(metadata) => {
+            let delivery = match metadata.delivery_class {
+                DeliveryClass::Contextual => "contextual",
+                DeliveryClass::Mandatory => "mandatory",
+            };
+            let state = match metadata.state {
+                PolicyState::Active => "active",
+                PolicyState::Superseded => "superseded",
+            };
+            let predecessor = metadata
+                .supersedes
+                .map_or_else(|| "null".to_owned(), |id| id.to_string());
+            let _ = write!(
+                output,
+                "\npolicy_key: {}\nrevision: {}\ndelivery_class: {delivery}\nstate: {state}\nsupersedes: {predecessor}",
+                metadata.policy_key, metadata.revision,
+            );
+        }
+    }
+    output
 }
 
 fn format_session_log_results(results: &[(model::SessionLogSummary, f64)]) -> String {
@@ -1094,6 +1147,7 @@ mod tests {
     fn sample_summary_with_id(id: Uuid) -> model::MemorySummary {
         model::MemorySummary {
             id,
+            policy: None,
             category: Category::Decision,
             content: "Use pgvector for semantic search.".to_owned(),
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
@@ -1247,6 +1301,7 @@ mod tests {
             .memory_store(Parameters(StoreParams {
                 category: Category::Decision,
                 content: "Use memoryd behind the MCP adapter.".to_owned(),
+                policy: None,
                 project: "memory-server".to_owned(),
                 summary: "Split MCP from HTTP service".to_owned(),
                 tags: Some(vec!["split".to_owned(), "http".to_owned()]),
@@ -1268,7 +1323,9 @@ mod tests {
         let update = server
             .memory_update(Parameters(UpdateParams {
                 content: Some("Use memoryd over HTTP for the MCP adapter.".to_owned()),
+                expected_updated_at: None,
                 id,
+                policy: None,
                 summary: Some("HTTP adapter uses exact API payloads".to_owned()),
                 tags: Some(vec![
                     "split".to_owned(),
@@ -1333,6 +1390,7 @@ mod tests {
             content: request.content,
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
             id: Uuid::new_v4(),
+            policy: None,
             project: request.project,
             summary: request.summary,
             tags: request.tags.unwrap_or_default(),
@@ -1399,6 +1457,7 @@ mod tests {
                 content: "Use hooks to block unsafe actions.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
                 id: Uuid::from_u128(99),
+                policy: None,
                 project: "general".to_owned(),
                 summary: "General safety rules".to_owned(),
                 tags: vec!["rules".to_owned()],
@@ -1419,6 +1478,7 @@ mod tests {
                 content: "Use hooks to block unsafe actions.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
                 id: Uuid::from_u128(99),
+                policy: None,
                 project: "general".to_owned(),
                 summary: "General safety rules".to_owned(),
                 tags: vec!["rules".to_owned()],
@@ -1431,6 +1491,7 @@ mod tests {
                 content: "Prefer the HTTP adapter boundary.".to_owned(),
                 created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
                 id: Uuid::from_u128(100),
+                policy: None,
                 project: "memory-server".to_owned(),
                 summary: "Adapter boundary decision".to_owned(),
                 tags: vec!["decision".to_owned()],

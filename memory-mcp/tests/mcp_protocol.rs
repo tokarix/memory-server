@@ -21,6 +21,7 @@ const ID: &str = "00000000-0000-0000-0000-000000000001";
 const MISSING: &str = "00000000-0000-0000-0000-000000000002";
 const DEADLINE: Duration = Duration::from_secs(10);
 const VERSIONS: [&str; 4] = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../migrations");
 
 #[derive(Clone, Default)]
 struct Backend {
@@ -33,13 +34,13 @@ struct Backend {
 fn memory() -> Value {
     json!({"id":ID,"project":"fixture","category":"decision","summary":"Choice",
         "content":"Use a synthetic backend.","tags":["review-needed"],
-        "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:00Z"})
+        "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:27.123456Z"})
 }
 
 fn rule(id: &str, project: &str, summary: &str) -> Value {
     json!({"id":id,"project":project,"category":"rule","summary":summary,
         "content":summary,"tags":["lang:rust"],
-        "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:00Z"})
+        "created_at":"2025-06-15T12:00:00Z","updated_at":"2025-06-15T12:00:27.123456Z"})
 }
 
 async fn backend(State(state): State<Backend>, method: Method, uri: Uri, bytes: Bytes) -> Response {
@@ -70,6 +71,10 @@ async fn backend(State(state): State<Backend>, method: Method, uri: Uri, bytes: 
                 if !body[key].is_null() {
                     value[key] = body[key].clone();
                 }
+            }
+            if !body["policy"].is_null() {
+                value["policy"] = body["policy"].clone();
+                value["policy"]["state"] = json!("active");
             }
             *stored = Some(value.clone());
             json!({"memory":value})
@@ -121,6 +126,10 @@ async fn backend(State(state): State<Backend>, method: Method, uri: Uri, bytes: 
                         value[key] = body[key].clone();
                     }
                 }
+                if !body["policy"].is_null() {
+                    value["policy"] = body["policy"].clone();
+                    value["policy"]["state"] = json!("active");
+                }
             }
             json!({"memory":value})
         }
@@ -156,9 +165,27 @@ impl Fixture {
                 .await
                 .unwrap();
         });
+        Self::start_on(&format!("http://{address}"), state, stop, server)
+    }
+
+    fn start_real(url: &str) -> Self {
+        let state = Backend::default();
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let _ = stopped.await;
+        });
+        Self::start_on(url, state, stop, server)
+    }
+
+    fn start_on(
+        url: &str,
+        state: Backend,
+        stop: oneshot::Sender<()>,
+        server: JoinHandle<()>,
+    ) -> Self {
         let config =
             std::env::temp_dir().join(format!("mcp-contract-{}.toml", uuid::Uuid::new_v4()));
-        std::fs::write(&config, format!("memoryd_url = \"http://{address}\"\n")).unwrap();
+        std::fs::write(&config, format!("memoryd_url = \"{url}\"\n")).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_memory-mcp"))
             .arg(&config)
             .stdin(Stdio::piped())
@@ -269,8 +296,340 @@ fn golden(name: &str, actual: &Value) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(format!("{name}.json"));
+    if std::env::var_os("UPDATE_MCP_GOLDENS").is_some() {
+        let mut bytes = serde_json::to_vec_pretty(actual).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        return;
+    }
     let expected: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     assert_eq!(*actual, expected, "rmcp 1.5 wire contract: {name}");
+}
+
+fn tool_text(response: &Value) -> &str {
+    response["result"]["content"][0]["text"].as_str().unwrap()
+}
+
+fn metadata_header<'a>(text: &'a str, name: &str) -> &'a str {
+    text.split_once("\n\n")
+        .unwrap()
+        .0
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+        .unwrap()
+}
+
+async fn mock_policy_embed() -> Json<Value> {
+    Json(json!({"embeddings":[vec![1.0_f32; 1024]]}))
+}
+
+async fn mock_policy_show() -> Json<Value> {
+    Json(json!({"model_info":{"general.architecture":"llama","llama.context_length":8192}}))
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn mcp_read_token_assigns_and_detects_same_minute_edits(pool: sqlx::PgPool) {
+    use axum::routing::post;
+    use memoryd::api::{ApiState, router};
+    use memoryd::app::MemoryApp;
+    use memoryd::embed;
+
+    let embed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let embed_address = embed_listener.local_addr().unwrap();
+    let (embed_stop, embed_stopped) = oneshot::channel();
+    let embed_server = tokio::spawn(async move {
+        axum::serve(
+            embed_listener,
+            Router::new()
+                .route("/api/embed", post(mock_policy_embed))
+                .route("/api/show", post(mock_policy_show)),
+        )
+        .with_graceful_shutdown(async {
+            let _ = embed_stopped.await;
+        })
+        .await
+        .unwrap();
+    });
+    let embed_url = format!("http://{embed_address}");
+    let app = MemoryApp::new(
+        pool.clone(),
+        Arc::new(embed::Client::new(
+            embed_url.clone(),
+            "test-model".to_owned(),
+            None,
+            None,
+        )),
+        "test-model".to_owned(),
+        1024,
+        reqwest::Client::new(),
+        embed_url,
+        "test-model".to_owned(),
+        1024,
+    );
+    let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_address = api_listener.local_addr().unwrap();
+    let (api_stop, api_stopped) = oneshot::channel();
+    let api_server = tokio::spawn(async move {
+        axum::serve(
+            api_listener,
+            router(ApiState {
+                app,
+                bearer_token: None,
+            }),
+        )
+        .with_graceful_shutdown(async {
+            let _ = api_stopped.await;
+        })
+        .await
+        .unwrap();
+    });
+
+    let mut fixture = Fixture::start_real(&format!("http://{api_address}"));
+    fixture.initialize(VERSIONS[3]).await;
+    let stored = fixture
+        .call(
+            "memory_store",
+            json!({
+                "category":"rule","project":"policy-contract","content":"Original text",
+                "summary":"Original summary","tags":["initial"]
+            }),
+        )
+        .await;
+    let id = tool_text(&stored).split_whitespace().nth(2).unwrap();
+    let id = uuid::Uuid::parse_str(id).unwrap();
+    sqlx::query("UPDATE memories SET updated_at = $2 WHERE id = $1")
+        .bind(id)
+        .bind(chrono::DateTime::parse_from_rfc3339("2099-09-26T12:34:27.123456Z").unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fetched = fixture.call("memory_get", json!({"id":id})).await;
+    let token = metadata_header(tool_text(&fetched), "updated_at").to_owned();
+    assert_eq!(token, "2099-09-26T12:34:27.123456000Z");
+    let root_policy =
+        json!({"policy_key":"build.storage","revision":1,"delivery_class":"contextual"});
+    let precision_mismatch = fixture
+        .call(
+            "memory_update",
+            json!({
+                "id":id,"expected_updated_at":"2099-09-26T12:34:27.123456001Z",
+                "policy":root_policy
+            }),
+        )
+        .await;
+    assert_eq!(
+        precision_mismatch["error"]["data"]["code"],
+        "policy_stale_assignment"
+    );
+    for (request, expected_code) in [
+        (
+            json!({"id":id,"policy":root_policy}),
+            "policy_missing_precondition",
+        ),
+        (
+            json!({"id":id,"expected_updated_at":"2099-09-26T12:34:27.123456000","policy":root_policy}),
+            "policy_invalid_metadata",
+        ),
+        (
+            json!({"id":id,"expected_updated_at":"2099-09-26T12:34:27.1234560001Z","policy":root_policy}),
+            "policy_invalid_metadata",
+        ),
+        (
+            json!({"id":id,"expected_updated_at":token}),
+            "policy_invalid_precondition",
+        ),
+    ] {
+        let rejected = fixture.call("memory_update", request).await;
+        assert_eq!(rejected["error"]["code"], -32008);
+        assert_eq!(rejected["error"]["data"]["code"], expected_code);
+    }
+    let unchanged = fixture.call("memory_get", json!({"id":id})).await;
+    assert!(tool_text(&unchanged).contains("policy: null"));
+    assert_eq!(metadata_header(tool_text(&unchanged), "updated_at"), token);
+    let assigned = fixture
+        .call(
+            "memory_update",
+            json!({
+                "id":id,"expected_updated_at":token,
+                "policy":root_policy
+            }),
+        )
+        .await;
+    assert!(assigned.get("error").is_none(), "{assigned}");
+    let verified = fixture.call("memory_get", json!({"id":id})).await;
+    assert!(tool_text(&verified).contains("policy_key: build.storage"));
+    assert!(tool_text(&verified).contains(&format!("ID: {id}")));
+
+    let revised = fixture
+        .call(
+            "memory_store",
+            json!({
+                "category":"rule","project":"policy-contract","content":"Revised text",
+                "summary":"Revised summary","tags":["initial"],
+                "policy":{"policy_key":"build.storage","revision":2,
+                          "delivery_class":"mandatory","supersedes":id}
+            }),
+        )
+        .await;
+    assert!(revised.get("error").is_none(), "{revised}");
+    let successor =
+        uuid::Uuid::parse_str(tool_text(&revised).split_whitespace().nth(2).unwrap()).unwrap();
+    let history = fixture.call("memory_get", json!({"id":id})).await;
+    assert!(tool_text(&history).contains("state: superseded"));
+    let current = fixture.call("memory_get", json!({"id":successor})).await;
+    assert!(tool_text(&current).contains("delivery_class: mandatory"));
+    assert!(tool_text(&current).contains(&format!("supersedes: {id}")));
+    for name in ["memory_rules", "memory_bootstrap"] {
+        let response = fixture
+            .call(
+                name,
+                json!({"project":"policy-contract","include_general":false}),
+            )
+            .await;
+        let text = tool_text(&response);
+        assert!(text.contains(&format!("ID: {successor}")));
+        assert!(!text.contains(&format!("ID: {id}")));
+    }
+    let listed = fixture
+        .call("memory_list", json!({"project":"policy-contract"}))
+        .await;
+    assert!(tool_text(&listed).contains("state: superseded"));
+    assert!(tool_text(&listed).contains("state: active"));
+    let immutable = fixture
+        .call("memory_update", json!({"id":id,"tags":["changed"]}))
+        .await;
+    assert_eq!(
+        immutable["error"]["data"]["code"],
+        "policy_immutable_revision"
+    );
+    let stale_head = fixture
+        .call(
+            "memory_store",
+            json!({
+                "category":"rule","project":"policy-contract","content":"Wrong predecessor",
+                "summary":"Wrong predecessor","tags":[],
+                "policy":{"policy_key":"build.storage","revision":3,
+                          "delivery_class":"contextual","supersedes":id}
+            }),
+        )
+        .await;
+    assert_eq!(stale_head["error"]["data"]["code"], "policy_stale_head");
+
+    for field in ["content", "summary", "tags"] {
+        let stored = fixture
+            .call(
+                "memory_store",
+                json!({
+                    "category":"rule","project":"policy-contract","content":"Before",
+                    "summary":"Before","tags":["before"]
+                }),
+            )
+            .await;
+        let id =
+            uuid::Uuid::parse_str(tool_text(&stored).split_whitespace().nth(2).unwrap()).unwrap();
+        sqlx::query("UPDATE memories SET updated_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(chrono::DateTime::parse_from_rfc3339("2099-09-26T12:34:27.123456Z").unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = fixture.call("memory_get", json!({"id":id})).await;
+        let old_token = metadata_header(tool_text(&before), "updated_at").to_owned();
+        let old_minute = metadata_header(tool_text(&before), "Updated").to_owned();
+        let edit = match field {
+            "content" => json!({"id":id,"content":"After content"}),
+            "summary" => json!({"id":id,"summary":"After summary"}),
+            _ => json!({"id":id,"tags":["after"]}),
+        };
+        let changed = fixture.call("memory_update", edit).await;
+        assert!(changed.get("error").is_none(), "{changed}");
+        let after = fixture.call("memory_get", json!({"id":id})).await;
+        let new_token = metadata_header(tool_text(&after), "updated_at").to_owned();
+        assert_ne!(new_token, old_token);
+        assert_eq!(metadata_header(tool_text(&after), "Updated"), old_minute);
+
+        let policy = json!({"policy_key":format!("test.{field}"),"revision":1,"delivery_class":"contextual"});
+        let stale = fixture
+            .call(
+                "memory_update",
+                json!({"id":id,"expected_updated_at":old_token,"policy":policy}),
+            )
+            .await;
+        assert_eq!(stale["error"]["code"], -32009);
+        assert_eq!(stale["error"]["data"]["code"], "policy_stale_assignment");
+        let inspected = fixture.call("memory_get", json!({"id":id})).await;
+        assert!(tool_text(&inspected).contains("policy: null"));
+        match field {
+            "content" => assert!(tool_text(&inspected).contains("After content")),
+            "summary" => assert!(tool_text(&inspected).contains("After summary")),
+            _ => assert!(tool_text(&inspected).contains("Tags: after")),
+        }
+        assert_eq!(
+            metadata_header(tool_text(&inspected), "updated_at"),
+            new_token
+        );
+        let retry = fixture
+            .call(
+                "memory_update",
+                json!({"id":id,"expected_updated_at":new_token,"policy":policy}),
+            )
+            .await;
+        assert!(retry.get("error").is_none(), "{retry}");
+    }
+
+    fixture.finish(true).await;
+    api_stop.send(()).unwrap();
+    embed_stop.send(()).unwrap();
+    timeout(DEADLINE, api_server).await.unwrap().unwrap();
+    timeout(DEADLINE, embed_server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn adoption_header_schema_and_patch_are_stable_across_protocol_versions() {
+    for version in VERSIONS {
+        let mut fixture = Fixture::start().await;
+        fixture.initialize(version).await;
+        let listed = fixture.request("tools/list", json!({})).await;
+        let update = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "memory_update")
+            .unwrap();
+        assert_eq!(
+            update["inputSchema"]["properties"]["expected_updated_at"]["format"],
+            "date-time"
+        );
+        assert!(update["inputSchema"]["properties"].get("policy").is_some());
+        fixture
+            .call(
+                "memory_store",
+                json!({
+                    "category":"rule","project":"fixture","content":"Legacy policy",
+                    "summary":"Legacy policy","tags":["lang:rust"]
+                }),
+            )
+            .await;
+        let fetched = fixture.call("memory_get", json!({"id":ID})).await;
+        let token = metadata_header(tool_text(&fetched), "updated_at").to_owned();
+        assert_eq!(token, "2025-06-15T12:00:27.123456000Z");
+        assert!(tool_text(&fetched).contains("policy: null"));
+        let assigned = fixture
+            .call("memory_update", json!({
+                "id":ID,"expected_updated_at":token,
+                "policy":{"policy_key":"build.storage","revision":1,"delivery_class":"contextual"}
+            }))
+            .await;
+        assert!(assigned.get("error").is_none(), "{assigned}");
+        let requests = fixture.state.requests.lock().unwrap().clone();
+        let patch = requests
+            .iter()
+            .find(|request| request["method"] == "PATCH")
+            .unwrap();
+        assert_eq!(patch["body"]["expected_updated_at"], token);
+        assert_eq!(patch["body"]["policy"]["policy_key"], "build.storage");
+        fixture.finish(true).await;
+    }
 }
 
 #[tokio::test]

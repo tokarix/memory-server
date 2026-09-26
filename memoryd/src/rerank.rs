@@ -198,6 +198,7 @@ mod tests {
     fn make_summary(id: Uuid) -> model::MemorySummary {
         model::MemorySummary {
             id,
+            policy: None,
             category: Category::Context,
             content: "test content".to_owned(),
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
@@ -389,6 +390,7 @@ mod tests {
     fn make_summary_with_category(id: Uuid, category: Category) -> model::MemorySummary {
         model::MemorySummary {
             id,
+            policy: None,
             category,
             content: "test content".to_owned(),
             created_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),

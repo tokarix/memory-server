@@ -10,6 +10,7 @@
       "body": {
         "category": "decision",
         "content": "Before",
+        "policy": null,
         "project": "fixture",
         "summary": "Stored",
         "tags": [
@@ -27,6 +28,8 @@
     {
       "body": {
         "content": "After",
+        "expected_updated_at": null,
+        "policy": null,
         "summary": "Updated",
         "tags": [
           "changed"
@@ -256,6 +259,8 @@
     {
       "body": {
         "content": "missing",
+        "expected_updated_at": null,
+        "policy": null,
         "summary": null,
         "tags": null
       },

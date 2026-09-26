@@ -341,6 +341,58 @@
     {
       "description": "Store a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance.",
       "inputSchema": {
+        "$defs": {
+          "DeliveryClass": {
+            "description": "Whether a policy is contextual guidance or requires later mandatory delivery.",
+            "oneOf": [
+              {
+                "const": "contextual",
+                "description": "Delivered only through the existing contextual rule filters.",
+                "type": "string"
+              },
+              {
+                "const": "mandatory",
+                "description": "Marked for mandatory delivery by a future policy resolver.",
+                "type": "string"
+              }
+            ]
+          },
+          "PolicyWrite": {
+            "additionalProperties": false,
+            "description": "Complete client supplied metadata for a new policy revision.",
+            "properties": {
+              "delivery_class": {
+                "$ref": "#/$defs/DeliveryClass",
+                "description": "Classification of this revision."
+              },
+              "policy_key": {
+                "description": "Stable key within the memory's project; 1–128 ASCII bytes.",
+                "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "revision": {
+                "description": "Positive revision number, stored in a signed 64-bit database column.",
+                "format": "int64",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "supersedes": {
+                "description": "Current active predecessor, omitted for a root revision.",
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "policy_key",
+              "revision",
+              "delivery_class"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "category": {
@@ -350,6 +402,17 @@
           "content": {
             "description": "Full content of the memory",
             "type": "string"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PolicyWrite"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Complete policy metadata for a classified Rule revision"
           },
           "project": {
             "description": "Project this memory belongs to",
@@ -384,6 +447,58 @@
     {
       "description": "Update a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead.",
       "inputSchema": {
+        "$defs": {
+          "DeliveryClass": {
+            "description": "Whether a policy is contextual guidance or requires later mandatory delivery.",
+            "oneOf": [
+              {
+                "const": "contextual",
+                "description": "Delivered only through the existing contextual rule filters.",
+                "type": "string"
+              },
+              {
+                "const": "mandatory",
+                "description": "Marked for mandatory delivery by a future policy resolver.",
+                "type": "string"
+              }
+            ]
+          },
+          "PolicyWrite": {
+            "additionalProperties": false,
+            "description": "Complete client supplied metadata for a new policy revision.",
+            "properties": {
+              "delivery_class": {
+                "$ref": "#/$defs/DeliveryClass",
+                "description": "Classification of this revision."
+              },
+              "policy_key": {
+                "description": "Stable key within the memory's project; 1–128 ASCII bytes.",
+                "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "revision": {
+                "description": "Positive revision number, stored in a signed 64-bit database column.",
+                "format": "int64",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "supersedes": {
+                "description": "Current active predecessor, omitted for a root revision.",
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "policy_key",
+              "revision",
+              "delivery_class"
+            ],
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "content": {
@@ -393,10 +508,29 @@
               "null"
             ]
           },
+          "expected_updated_at": {
+            "description": "Exact `updated_at` header copied from `memory_get` for Rule adoption",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "description": "UUID of the memory to update",
             "format": "uuid",
             "type": "string"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PolicyWrite"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Complete metadata to assign to an existing legacy Rule"
           },
           "summary": {
             "description": "Updated summary (if changing)",

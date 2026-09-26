@@ -105,8 +105,10 @@ struct ApiErrorEnvelope {
 
 #[derive(serde::Serialize)]
 struct ApiErrorBody {
-    code: &'static str,
+    code: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -276,7 +278,9 @@ async fn update_memory(
     authorize(&state, &headers)?;
     let request = UpdateMemoryRequest {
         content: request.content,
+        expected_updated_at: request.expected_updated_at,
         id: path.id,
+        policy: request.policy,
         summary: request.summary,
         tags: request.tags,
     };
@@ -473,7 +477,8 @@ fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
 
 #[derive(Debug)]
 struct ApiError {
-    code: &'static str,
+    code: String,
+    details: Option<serde_json::Value>,
     message: String,
     status: StatusCode,
 }
@@ -481,7 +486,8 @@ struct ApiError {
 impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
-            code: "bad_request",
+            code: "bad_request".to_owned(),
+            details: None,
             message: message.into(),
             status: StatusCode::BAD_REQUEST,
         }
@@ -489,7 +495,8 @@ impl ApiError {
 
     fn not_found(message: String) -> Self {
         Self {
-            code: "not_found",
+            code: "not_found".to_owned(),
+            details: None,
             message,
             status: StatusCode::NOT_FOUND,
         }
@@ -497,7 +504,8 @@ impl ApiError {
 
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
-            code: "unauthorized",
+            code: "unauthorized".to_owned(),
+            details: None,
             message: message.into(),
             status: StatusCode::UNAUTHORIZED,
         }
@@ -529,24 +537,43 @@ impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
         match error {
             Error::Database(inner) => Self {
-                code: "database_error",
+                code: "database_error".to_owned(),
+                details: None,
                 message: inner.clone(),
                 status: StatusCode::INTERNAL_SERVER_ERROR,
             },
             Error::Embedding(message) => Self {
-                code: "embedding_error",
+                code: "embedding_error".to_owned(),
+                details: None,
                 message,
                 status: StatusCode::BAD_GATEWAY,
             },
             Error::NotFound(message) => Self {
-                code: "not_found",
+                code: "not_found".to_owned(),
+                details: None,
                 message,
                 status: StatusCode::NOT_FOUND,
             },
             Error::Transport(message) => Self {
-                code: "transport_error",
+                code: "transport_error".to_owned(),
+                details: None,
                 message,
                 status: StatusCode::BAD_GATEWAY,
+            },
+            Error::Policy {
+                code,
+                message,
+                details,
+                conflict,
+            } => Self {
+                code,
+                details: Some(details),
+                message,
+                status: if conflict {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
             },
         }
     }
@@ -560,6 +587,7 @@ impl IntoResponse for ApiError {
                 error: ApiErrorBody {
                     code: self.code,
                     message: self.message,
+                    details: self.details,
                 },
             }),
         )

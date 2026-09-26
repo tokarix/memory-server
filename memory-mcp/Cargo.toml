@@ -24,4 +24,7 @@ serde-aux = "4.7.0"
 [dev-dependencies]
 axum = { version = "0.8.8", features = ["json", "macros", "query", "tokio"] }
 chrono.workspace = true
+memoryd = { path = "../memoryd" }
+reqwest.workspace = true
+sqlx.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }

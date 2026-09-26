@@ -8,6 +8,7 @@ pub mod edges;
 pub mod embed;
 pub mod expand;
 pub mod ollama;
+pub mod policy;
 pub mod rerank;
 pub mod ui;
 pub mod workflow;

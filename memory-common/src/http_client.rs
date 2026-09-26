@@ -23,6 +23,19 @@ pub struct HttpMemoryClient {
     http: reqwest::Client,
 }
 
+#[derive(serde::Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    code: String,
+    message: String,
+    #[serde(default)]
+    details: serde_json::Value,
+}
+
 impl HttpMemoryClient {
     /// Build an HTTP client for `memoryd`.
     ///
@@ -405,6 +418,8 @@ impl HttpMemoryClient {
         let id = request.id.to_string();
         let body = PatchMemoryRequest {
             content: request.content,
+            expected_updated_at: request.expected_updated_at,
+            policy: request.policy,
             summary: request.summary,
             tags: request.tags,
         };
@@ -491,6 +506,17 @@ impl HttpMemoryClient {
             .text()
             .await
             .unwrap_or_else(|_| "<unreadable>".to_owned());
+        if matches!(status, StatusCode::BAD_REQUEST | StatusCode::CONFLICT)
+            && let Ok(envelope) = serde_json::from_str::<ErrorEnvelope>(&body)
+            && envelope.error.code.starts_with("policy_")
+        {
+            return Err(Error::Policy {
+                code: envelope.error.code,
+                message: envelope.error.message,
+                details: envelope.error.details,
+                conflict: status == StatusCode::CONFLICT,
+            });
+        }
         match status {
             StatusCode::NOT_FOUND => Err(Error::NotFound(body)),
             _ => Err(Error::Transport(body)),

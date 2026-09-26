@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::policy::PolicyMetadata;
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
@@ -105,6 +107,7 @@ impl fmt::Display for Category {
 
 pub struct Memory {
     pub id: Uuid,
+    pub policy: Option<PolicyMetadata>,
     pub category: Category,
     pub content: String,
     pub created_at: DateTime<Utc>,
@@ -119,6 +122,7 @@ pub struct Memory {
 #[derive(Clone)]
 pub struct MemorySummary {
     pub id: Uuid,
+    pub policy: Option<PolicyMetadata>,
     pub category: Category,
     pub content: String,
     pub created_at: DateTime<Utc>,

@@ -13,7 +13,7 @@ use crate::protocol::{
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
-use crate::{db, edges, expand, rerank, transcript, workflow};
+use crate::{db, edges, expand, policy, rerank, transcript, workflow};
 
 const CHUNK_OVERLAP: usize = 200;
 const CHUNK_SIZE: usize = 4000;
@@ -68,7 +68,14 @@ impl MemoryApp {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_memory(&self, id: Uuid) -> Result<bool, Error> {
-        db::delete(&self.pool, id).await.map_err(Error::from)
+        let deleted = db::delete(&self.pool, id).await.map_err(Error::from)?;
+        if !deleted
+            && let Some(memory) = db::get(&self.pool, id).await.map_err(Error::from)?
+            && memory.policy.is_some()
+        {
+            return Err(immutable_revision_error(&memory));
+        }
+        Ok(deleted)
     }
 
     /// Fetch one memory by ID.
@@ -492,6 +499,9 @@ impl MemoryApp {
         &self,
         request: StoreMemoryRequest,
     ) -> Result<model::MemorySummary, Error> {
+        if let Some(ref metadata) = request.policy {
+            policy::validate_store(metadata, &request.category)?;
+        }
         let embedding = self
             .embed_client
             .embed(&request.summary, &request.content)
@@ -499,6 +509,7 @@ impl MemoryApp {
         let now = Utc::now();
         let memory = model::Memory {
             id: Uuid::new_v4(),
+            policy: None,
             category: request.category,
             content: request.content,
             created_at: now,
@@ -508,6 +519,13 @@ impl MemoryApp {
             tags: request.tags.unwrap_or_default(),
             updated_at: now,
         };
+        if let Some(ref metadata) = request.policy {
+            let summary = policy::publish_new(&self.pool, &memory, metadata).await?;
+            if let Err(e) = edges::build_write_time_edges(&self.pool, &summary).await {
+                tracing::warn!(id = %summary.id, error = %e, "failed to build policy graph edges");
+            }
+            return Ok(summary);
+        }
         if matches!(memory.category, Category::Plan | Category::Decision) {
             db::insert_with_workflow_provenance(&self.pool, &memory)
                 .await
@@ -515,16 +533,10 @@ impl MemoryApp {
         } else {
             db::insert(&self.pool, &memory).await.map_err(Error::from)?;
         }
-        let summary = model::MemorySummary {
-            id: memory.id,
-            category: memory.category,
-            content: memory.content,
-            created_at: memory.created_at,
-            project: memory.project,
-            summary: memory.summary,
-            tags: memory.tags,
-            updated_at: memory.updated_at,
-        };
+        let summary = db::get(&self.pool, memory.id)
+            .await
+            .map_err(Error::from)?
+            .ok_or_else(|| Error::Database(format!("stored memory {} disappeared", memory.id)))?;
 
         if let Err(e) = edges::build_write_time_edges(&self.pool, &summary).await {
             tracing::warn!(id = %summary.id, error = %e, "failed to build write-time edges");
@@ -542,6 +554,37 @@ impl MemoryApp {
         &self,
         request: UpdateMemoryRequest,
     ) -> Result<Option<model::MemorySummary>, Error> {
+        if let Some(ref metadata) = request.policy {
+            if request.content.is_some() || request.summary.is_some() || request.tags.is_some() {
+                return Err(Error::Policy {
+                    code: "policy_invalid_adoption".to_owned(),
+                    message: "adoption must contain only id, policy, and expected_updated_at"
+                        .to_owned(),
+                    details: serde_json::json!({"id": request.id, "policy_key": metadata.policy_key}),
+                    conflict: false,
+                });
+            }
+            let token = request.expected_updated_at.as_deref().ok_or_else(|| Error::Policy {
+                code: "policy_missing_precondition".to_owned(),
+                message: "copy the exact updated_at header from memory_get".to_owned(),
+                details: serde_json::json!({"id": request.id, "policy_key": metadata.policy_key}),
+                conflict: false,
+            })?;
+            let expected = policy::parse_expected_updated_at(token, metadata)?;
+            let summary = policy::adopt(&self.pool, request.id, metadata, expected).await?;
+            if let Err(e) = edges::build_write_time_edges(&self.pool, &summary).await {
+                tracing::warn!(id = %summary.id, error = %e, "failed to rebuild policy graph edges");
+            }
+            return Ok(Some(summary));
+        }
+        if request.expected_updated_at.is_some() {
+            return Err(Error::Policy {
+                code: "policy_invalid_precondition".to_owned(),
+                message: "expected_updated_at is only valid with policy adoption".to_owned(),
+                details: serde_json::json!({"id": request.id}),
+                conflict: false,
+            });
+        }
         let current = db::get(&self.pool, request.id).await.map_err(Error::from)?;
         let Some(current) = current else {
             if request.summary.is_some() || request.content.is_some() {
@@ -549,6 +592,12 @@ impl MemoryApp {
             }
             return Ok(None);
         };
+        if request.content.is_none() && request.summary.is_none() && request.tags.is_none() {
+            return Ok(Some(current));
+        }
+        if current.policy.is_some() {
+            return Err(immutable_revision_error(&current));
+        }
         let embedding = if request.summary.is_some() || request.content.is_some() {
             let summary = request.summary.as_deref().unwrap_or(&current.summary);
             let content = request.content.as_deref().unwrap_or(&current.content);
@@ -583,6 +632,11 @@ impl MemoryApp {
         .map_err(Error::from)?;
 
         if !updated {
+            if let Some(memory) = db::get(&self.pool, request.id).await.map_err(Error::from)?
+                && memory.policy.is_some()
+            {
+                return Err(immutable_revision_error(&memory));
+            }
             return Ok(None);
         }
 
@@ -645,6 +699,9 @@ impl MemoryApp {
         let Some(original) = db::get(&self.pool, memory_id).await.map_err(Error::from)? else {
             return Ok(None);
         };
+        if original.policy.is_some() {
+            return Err(immutable_revision_error(&original));
+        }
 
         let normalized_verdict = verdict.trim().to_lowercase();
         let review_project = project.unwrap_or_else(|| original.project.clone());
@@ -670,6 +727,7 @@ impl MemoryApp {
             .store_memory(StoreMemoryRequest {
                 category: Category::Decision,
                 content: review_content,
+                policy: None,
                 project: review_project,
                 summary: review_summary,
                 tags: Some(vec![
@@ -683,7 +741,9 @@ impl MemoryApp {
 
         self.update_memory(UpdateMemoryRequest {
             content: None,
+            expected_updated_at: None,
             id: memory_id,
+            policy: None,
             summary: None,
             tags: Some(updated_tags),
         })
@@ -823,6 +883,22 @@ fn format_session_label(message: &model::SessionMessageSummary) -> String {
     }
 }
 
+fn immutable_revision_error(memory: &model::MemorySummary) -> Error {
+    Error::Policy {
+        code: "policy_immutable_revision".to_owned(),
+        message: format!(
+            "Rule {} is a classified policy revision; publish a successor instead",
+            memory.id
+        ),
+        details: serde_json::json!({
+            "id": memory.id,
+            "project": memory.project,
+            "policy": memory.policy,
+        }),
+        conflict: true,
+    }
+}
+
 fn capitalize_category(category: &Category) -> String {
     let s = category.to_string();
     let mut chars = s.chars();
@@ -885,14 +961,19 @@ pub(crate) fn outer_rrf(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::{Category, Memory};
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
     use axum::{Json, Router, routing::post};
     use chrono::Utc;
+    use memory_common::policy::{DeliveryClass, PolicyState, PolicyWrite};
     use sqlx::PgPool;
-    use std::sync::Arc;
     use tokio::net::TcpListener;
     use uuid::Uuid;
+
+    use crate::model::{Category, Memory};
+
+    use super::*;
 
     async fn mock_embed() -> Json<serde_json::Value> {
         Json(serde_json::json!({
@@ -921,6 +1002,122 @@ mod tests {
         format!("http://{addr}")
     }
 
+    fn policy_request(supersedes: Option<Uuid>, revision: i64) -> StoreMemoryRequest {
+        StoreMemoryRequest {
+            category: Category::Rule,
+            content: format!("Policy revision {revision}"),
+            policy: Some(PolicyWrite {
+                policy_key: "build.storage".to_owned(),
+                revision,
+                delivery_class: DeliveryClass::Contextual,
+                supersedes,
+            }),
+            project: "project-a".to_owned(),
+            summary: format!("Revision {revision}"),
+            tags: Some(vec!["policy".to_owned()]),
+        }
+    }
+
+    fn app_with_mock(pool: PgPool, url: String) -> MemoryApp {
+        MemoryApp::new(
+            pool,
+            Arc::new(crate::embed::Client::new(
+                url.clone(),
+                "test-model".to_owned(),
+                None,
+                None,
+            )),
+            "test-model".to_owned(),
+            1024,
+            reqwest::Client::new(),
+            url,
+            "test-model".to_owned(),
+            1024,
+        )
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn graph_failure_after_commit_keeps_published_revision(pool: PgPool) {
+        let app = app_with_mock(pool.clone(), spawn_mock_server().await);
+        sqlx::query("DROP TABLE memory_edges")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let published = app.store_memory(policy_request(None, 1)).await.unwrap();
+        assert_eq!(
+            published.policy.as_ref().unwrap().state,
+            PolicyState::Active
+        );
+        assert!(db::get(&pool, published.id).await.unwrap().is_some());
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn embedding_failure_does_not_supersede_current_head(pool: PgPool) {
+        let working_app = app_with_mock(pool.clone(), spawn_mock_server().await);
+        let head = working_app
+            .store_memory(policy_request(None, 1))
+            .await
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/api/embed", post(|| async { StatusCode::BAD_GATEWAY }))
+                    .route("/api/show", post(mock_show)),
+            )
+            .await
+            .unwrap();
+        });
+        let failing_app = app_with_mock(pool.clone(), format!("http://{addr}"));
+        assert!(
+            failing_app
+                .store_memory(policy_request(Some(head.id), 2))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            db::get(&pool, head.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .policy
+                .unwrap()
+                .state,
+            PolicyState::Active
+        );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn classified_rule_review_and_delete_conflict_without_side_effects(pool: PgPool) {
+        let app = app_with_mock(pool.clone(), spawn_mock_server().await);
+        let head = app.store_memory(policy_request(None, 1)).await.unwrap();
+        let review = app
+            .submit_review(
+                head.id,
+                None,
+                "reviewer".to_owned(),
+                "approved".to_owned(),
+                "notes".to_owned(),
+            )
+            .await;
+        assert!(
+            matches!(review, Err(Error::Policy { code, .. }) if code == "policy_immutable_revision")
+        );
+        let deletion = app.delete_memory(head.id).await;
+        assert!(
+            matches!(deletion, Err(Error::Policy { code, .. }) if code == "policy_immutable_revision")
+        );
+        let decisions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memories WHERE category = 'decision'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(decisions, 0);
+        assert!(db::get(&pool, head.id).await.unwrap().is_some());
+    }
+
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn search_workflow_policy_reaches_storage_and_graph(pool: PgPool) {
         let mock_url = spawn_mock_server().await;
@@ -945,6 +1142,7 @@ mod tests {
                 app.store_memory(StoreMemoryRequest {
                     category: Category::Plan,
                     content: "nebula retrieval".to_owned(),
+                    policy: None,
                     project: "search-policy".to_owned(),
                     summary: "nebula retrieval".to_owned(),
                     tags: Some(tags),
@@ -1014,6 +1212,7 @@ mod tests {
         let memory_id = Uuid::new_v4();
         let mem = Memory {
             id: memory_id,
+            policy: None,
             category: Category::Plan,
             content: "old plan content".to_owned(),
             created_at: Utc::now(),
@@ -1095,6 +1294,7 @@ mod tests {
 
         let make_memory = |category, content: &str, tags| Memory {
             id: Uuid::new_v4(),
+            policy: None,
             category,
             content: content.to_owned(),
             created_at: Utc::now(),

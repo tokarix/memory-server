@@ -172,6 +172,55 @@ OpenAPI:
 - Define one bearer auth scheme
 - Apply it globally except for `health`
 
+## Classified Rule metadata
+
+`POST /api/v1/memories` accepts optional `policy` only for category `rule`.
+The write object requires `policy_key`, positive signed 64-bit `revision`, and
+`delivery_class` (`contextual` or `mandatory`); it may include the active
+predecessor UUID as `supersedes`. Clients cannot set `state`. The read object
+adds `state` (`active` or `superseded`). A missing or null `policy` means an
+unclassified legacy Rule or an ordinary non-Rule memory. There is no automatic
+backfill or inference from content, summaries, tags, or timestamps.
+
+The identity is `(project, policy_key)`. A first revision may use any positive
+number and omits `supersedes`. Every later revision uses a larger number and
+names the current active predecessor. General and project Rules with the same
+key are independent. Classified revisions cannot be edited or deleted through
+generic memory endpoints; publish a successor instead. Superseded Rules are
+omitted from Rule lists, bootstrap, and direct core recall, but remain available
+through direct get, ordinary lists, search, and neighbors. `mandatory` does not
+bypass existing filters or trigger automatic delivery in this release.
+
+`PATCH /api/v1/memories/{id}` also accepts a metadata-only adoption request
+for a legacy Rule. Read the Rule first, inspect its contents, then send only
+`policy` and `expected_updated_at`. The latter must be a timezone-qualified
+RFC3339 string copied exactly from the MCP `memory_get` metadata header (or
+the persisted `updated_at` value in the HTTP GET response). Example:
+
+```json
+{
+  "expected_updated_at": "2026-09-26T12:34:27.123456000Z",
+  "policy": {
+    "policy_key": "build.storage",
+    "revision": 1,
+    "delivery_class": "contextual"
+  }
+}
+```
+
+Replace the example timestamp with the actual value read for that UUID.
+Adoption preserves the UUID, text, tags, embedding, and creation time. An
+intervening edit produces HTTP 409 `policy_stale_assignment`; inspect the
+changed Rule before retrying. Missing, malformed, or zoneless tokens produce
+HTTP 400. The old human-readable minute display is not a token. Policy
+validation and immutable-revision errors use a stable `policy_*` code and
+structured `details` in the error envelope; the MCP bridge preserves both.
+
+The reversible SQL migration has an intentionally conservative down path:
+it refuses to run once any structured policy metadata exists. Stop old
+write-capable daemon instances before publishing policies, and use a separately
+authorized export or restore if classified history must be removed.
+
 ## Error model
 
 Use a consistent JSON error envelope.

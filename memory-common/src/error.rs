@@ -6,6 +6,13 @@ pub enum Error {
     Embedding(String),
     #[error("{0} not found")]
     NotFound(String),
+    #[error("{message}")]
+    Policy {
+        code: String,
+        message: String,
+        details: serde_json::Value,
+        conflict: bool,
+    },
     #[error("transport error: {0}")]
     Transport(String),
 }
@@ -20,9 +27,15 @@ impl From<sqlx::Error> for Error {
 #[cfg(feature = "rmcp")]
 impl From<Error> for rmcp::ErrorData {
     fn from(err: Error) -> Self {
+        let data = match &err {
+            Error::Policy { code, details, .. } => {
+                Some(serde_json::json!({"code": code, "details": details}))
+            }
+            _ => None,
+        };
         Self {
             code: error_code(&err),
-            data: None,
+            data,
             message: err.to_string().into(),
         }
     }
@@ -35,6 +48,10 @@ fn error_code(err: &Error) -> rmcp::model::ErrorCode {
         Error::Embedding(_) => rmcp::model::ErrorCode(-32_001),
         Error::Transport(_) => rmcp::model::ErrorCode(-32_002),
         Error::NotFound(_) => rmcp::model::ErrorCode(-32_004),
+        Error::Policy { conflict: true, .. } => rmcp::model::ErrorCode(-32_009),
+        Error::Policy {
+            conflict: false, ..
+        } => rmcp::model::ErrorCode(-32_008),
     }
 }
 
