@@ -71,13 +71,16 @@ Both endpoints return separate `general_rules` and `project_rules` arrays,
 plus `canonical` schema version 1. `canonical.effective` includes all returned
 Rules in a total order: mandatory first, then key, source project, revision,
 UUID; legacy contextual Rules follow by UUID. `canonical.mandatory` is the
-mandatory-only ordered projection for a later guardrails consumer. Each entry
+mandatory-only ordered projection used by guardrail delivery. Each entry
 contains source project, UUID, key/revision/class when classified, selectors,
 declared values, exact content, and replacement provenance. It excludes
 timestamps, embeddings, similarity, and recall. The separate response
 `context` and `options` record trusted execution facts and request choices.
-This release does not publish
-digests or implement guardrail enforcement.
+The strict `/api/v1/projects/{project}/guardrails` endpoint resolves with
+`include_general=true`, `shadow_general=true`, and no tag filter, then
+publishes only `canonical.mandatory`. It fails on an empty or excessive pack.
+See [guardrail delivery](guardrail-delivery.md) for the digest and MCP
+connection contract. Delivery does not enforce downstream client behavior.
 
 Deploy compatible daemon, MCP shim, and hooks before adopting scoped data.
 Old unscoped requests continue to work. Once scoped data exists, requests
