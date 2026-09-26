@@ -843,6 +843,47 @@ pub async fn load_rule_candidates(
     rows.iter().map(row_to_summary).collect()
 }
 
+/// Load the complete Rule snapshot inside a caller-owned conversion transaction.
+///
+/// # Errors
+/// Returns an error if a candidate cannot be loaded or decoded.
+pub(crate) async fn load_rule_candidates_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project: &str,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags,
+                updated_at, policy_key, policy_revision, policy_delivery_class,
+                policy_state, policy_supersedes, policy_selectors, policy_values
+         FROM memories
+         WHERE category = 'rule' AND (project = $1 OR project = 'general')",
+    )
+    .bind(project)
+    .fetch_all(&mut **transaction)
+    .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
+/// Read one memory in a caller-owned conversion transaction.
+///
+/// # Errors
+/// Returns an error if the memory cannot be loaded or decoded.
+pub(crate) async fn get_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<Option<MemorySummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags,
+                updated_at, policy_key, policy_revision, policy_delivery_class,
+                policy_state, policy_supersedes, policy_selectors, policy_values
+         FROM memories WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.as_ref().map(row_to_summary).transpose()
+}
+
 /// List memories for a project with optional filtering.
 ///
 /// # Errors

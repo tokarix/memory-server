@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "preview_project": "memory-server",
+  "host_first": {
+    "source": {
+      "id": "eaeb57ed-95b4-486f-89db-f3327db91468",
+      "expected_updated_at": "2026-09-05T10:13:16.039146Z",
+      "expected_content": "Explicit user correction on 2026-09-05 during the BreakerBoxx audit: /tmp is tmpfs with limited space/quota, and Rust builds have filled it repeatedly. Do not place Cargo target directories or other large compilation artifacts under /tmp on this workstation, including for isolated reviews, tests, Clippy, WASM, and Trunk. Before building, check the backing filesystem, available space, and any known quota. Use a persistent disk-backed build/cache directory and set CARGO_TARGET_DIR accordingly. Isolating a checkout does not require putting compilation output on tmpfs. This explicit user requirement overrides older general memories suggesting CARGO_TARGET_DIR=/tmp/target for CI/NFS workflows when working on this machine. If a build hits space/quota limits, stop it and clean only the current task's artifacts; do not retry in /tmp with reduced debug settings.",
+      "expected_summary": "User requirement: never use /tmp for Rust build artifacts on this workstation; it is limited tmpfs. Check backing filesystem and use persistent disk-backed targets.",
+      "expected_tags": [
+        "lang:rust",
+        "build",
+        "storage",
+        "tmpfs",
+        "user-preference",
+        "environment:workstation"
+      ]
+    },
+    "policy": {
+      "policy_key": "rust.build.storage.workstation",
+      "revision": 1,
+      "delivery_class": "mandatory",
+      "supersedes": null,
+      "selectors": {
+        "profile": [
+          "workstation-host"
+        ],
+        "language": [
+          "rust"
+        ]
+      },
+      "values": {
+        "rust.build.target_storage": "persistent-disk"
+      }
+    }
+  },
+  "host_second": {
+    "source": {
+      "id": "809cbf86-cd77-41a4-af56-0fccbd8b18ba",
+      "expected_updated_at": "2026-09-05T15:12:07.367338Z",
+      "expected_content": "Explicit user instruction, reiterated during the BreakerBoxx audit on 2026-09-05: /tmp is a small tmpfs and repeated Rust builds exhaust it. Never put Rust build targets, source worktrees used for builds, compiler temporary files, browser profiles/downloads for build testing, or other large build artifacts there. Use persistent disk-backed storage under the repository's target directory; set both CARGO_TARGET_DIR and TMPDIR explicitly for Cargo, Trunk, wasm-pack and browser tools. For BreakerBoxx use /var/home/stintel/breakerboxx/target/codex-audit/{cargo,tmp} and worktrees under /var/home/stintel/breakerboxx/target. This user instruction overrides skills whose examples use /tmp.",
+      "expected_summary": "Never use /tmp tmpfs for Stijn's Rust builds or large build artifacts",
+      "expected_tags": [
+        "lang:rust",
+        "phase:build",
+        "user-preference",
+        "tmpfs",
+        "storage"
+      ]
+    },
+    "policy": {
+      "policy_key": "rust.build.storage.workstation",
+      "revision": 2,
+      "delivery_class": "mandatory",
+      "supersedes": "eaeb57ed-95b4-486f-89db-f3327db91468",
+      "selectors": {
+        "profile": [
+          "workstation-host"
+        ],
+        "language": [
+          "rust"
+        ]
+      },
+      "values": {
+        "rust.build.target_storage": "persistent-disk",
+        "rust.build.compiler_tmp_storage": "persistent-disk"
+      }
+    }
+  },
+  "host_active": {
+    "id": "837df8c2-ce10-4150-9321-d3b8f0bd2a67",
+    "content": "For Rust work executed on a workstation host, keep build artifacts and compiler temporary files on persistent disk-backed storage. Before a build, inspect the backing filesystem and available space. Set both CARGO_TARGET_DIR and TMPDIR explicitly to disk-backed directories under the repository's target area for Cargo, Clippy, tests, Trunk, wasm-pack, and browser-assisted build checks. Do not put build targets, compiler temporary files, source worktrees used for builds, browser profiles, or build downloads on the host's small /tmp tmpfs. For BreakerBoxx, use /var/home/stintel/breakerboxx/target/codex-audit/{cargo,tmp} and worktrees under /var/home/stintel/breakerboxx/target. If space or quota runs out, stop and clean only the current task's artifacts; do not retry in /tmp. This policy applies to workstation-host execution in planning, implementation, review, and build phases.",
+    "summary": "Disk-backed Rust build and compiler temporary storage on workstation hosts",
+    "tags": [
+      "lang:rust",
+      "build",
+      "storage",
+      "environment:workstation"
+    ],
+    "policy": {
+      "policy_key": "rust.build.storage.workstation",
+      "revision": 3,
+      "delivery_class": "mandatory",
+      "supersedes": "809cbf86-cd77-41a4-af56-0fccbd8b18ba",
+      "selectors": {
+        "profile": [
+          "workstation-host"
+        ],
+        "language": [
+          "rust"
+        ]
+      },
+      "values": {
+        "rust.build.target_storage": "persistent-disk",
+        "rust.build.compiler_tmp_storage": "persistent-disk"
+      }
+    }
+  },
+  "guidance_source": {
+    "source": {
+      "id": "7404e1ce-1058-46b3-9c19-53235735e708",
+      "expected_updated_at": "2026-08-20T23:15:49.108685Z",
+      "expected_content": "# Canonical Rust CI policy for Woodpecker\n\nThis is the reusable default for Rust repositories running on Woodpecker CI. It complements the general Rust verification rule 481b7ed0-96d8-4267-aaa6-39c5278013f1, but this memory is authoritative for Woodpecker pipeline structure and command spelling.\n\n## Design goals\n\n- Keep lint policy in Cargo.toml so local development and every CI system enforce the same policy.\n- Do not pass the Clippy pedantic group explicitly on the command line.\n- Do not use --locked.\n- Set CARGO_TARGET_DIR=/tmp/target because the Woodpecker workspace may be on NFS; Cargo compilation in the workspace can fail or perform badly there.\n- Minimize CPU and duplicated compilation on constrained runners.\n- Never run cargo build when formatting, Clippy, or tests have failed.\n- Avoid repeated apt installation in isolated Woodpecker step containers.\n- Use all workspace members, features, and targets unless a repository documents a concrete exception.\n- Pin the Rust toolchain/image to an intentional version rather than latest.\n\n## Cargo lint policy\n\nPrefer Cargo.toml over .cargo/config.toml for lint policy. Cargo metadata is visible to developers, editors, local Cargo commands, and CI. Reserve .cargo/config.toml for build configuration such as target, linker, aliases, and network settings.\n\nAt the workspace root:\n\n```toml\n[workspace.lints.rust]\nwarnings = \"deny\"\n\n[workspace.lints.clippy]\n# Apply the group first so specific exceptions below can override it.\npedantic = { level = \"deny\", priority = -1 }\n\n# Add narrowly justified exceptions when a repository needs them.\n# module_name_repetitions = \"allow\"\n```\n\nEvery workspace member must opt in; workspace lints are not inherited automatically:\n\n```toml\n[lints]\nworkspace = true\n```\n\nFor a single-package repository, use package lint tables directly:\n\n```toml\n[lints.rust]\nwarnings = \"deny\"\n\n[lints.clippy]\npedantic = { level = \"deny\", priority = -1 }\n```\n\nWith this policy, CI does not need a trailing \"-- -D clippy::pedantic -D warnings\". The normal Clippy invocation is enough:\n\n```sh\ncargo clippy --workspace --all-features --all-targets --no-deps\n```\n\n## Why one compile-heavy step\n\nWoodpecker steps run in isolated containers or pods. The workspace is shared, but packages installed into a container filesystem are not. A preliminary apt-install step cannot prepare later steps.\n\nCARGO_TARGET_DIR=/tmp/target is deliberately pod-local to avoid NFS. Consequently, separate check, Clippy, test, and build steps cannot share compiled artifacts from /tmp. Parallel check and Clippy steps duplicate dependency compilation and consume extra CPU.\n\nUse:\n\n1. A separate cheap formatting step for fast, clear feedback.\n2. One compile-heavy verification step containing Clippy, tests, and build in that order.\n\nDo not run a separate cargo check by default: cargo clippy checks the same workspace/features/targets and also applies the lint policy. Add cargo check only when a repository has a documented configuration that Clippy does not cover.\n\nWoodpecker executes step commands with fail-fast shell behavior. In the ordered verification step, a Clippy or test failure prevents cargo build from running.\n\n## Recommended custom CI image\n\nThe clean solution to repeated apt and rustup installation is a versioned internal image based on the selected Rust slim image. Build it separately and update its version intentionally when changing Rust or system packages.\n\nExample Dockerfile:\n\n```dockerfile\nFROM rust:1.94-slim\n\nRUN apt-get update \\\n    && apt-get install -y --no-install-recommends \\\n        g++ \\\n        git \\\n        python3 \\\n        postgresql-client \\\n    && rustup component add rustfmt clippy \\\n    && rm -rf /var/lib/apt/lists/*\n```\n\nThe package list is an organizational baseline, not a requirement for every Rust project. Use a smaller base image or versioned variants when repositories have materially different native dependencies. The PostgreSQL client is needed only by pipelines using pg_isready.\n\nUse an immutable internal image version such as:\n\n```text\nregistry.example.invalid/ci/rust:1.94-1\n```\n\nDo not build this image during every repository pipeline.\n\n## Complete default .woodpecker.yml\n\nReplace the image and default branch with the repository's actual values.\n\n```yaml\nwhen:\n  - event: pull_request\n  - event: push\n    branch: main\n\nsteps:\n  fmt:\n    image: registry.example.invalid/ci/rust:1.94-1\n    commands:\n      - cargo fmt --all -- --check\n\n  verify:\n    image: registry.example.invalid/ci/rust:1.94-1\n    environment:\n      # Required: the Woodpecker workspace may be NFS-backed.\n      CARGO_TARGET_DIR: /tmp/target\n    commands:\n      # Cargo.toml owns warning and pedantic lint levels.\n      - cargo clippy --workspace --all-features --all-targets --no-deps\n\n      # Test before build so a failing suite does not waste CPU on build.\n      - cargo test --workspace --all-features --all-targets\n\n      # Keep an explicit ordinary build, but only after tests pass.\n      - cargo build --workspace --all-features --all-targets\n    depends_on:\n      - fmt\n```\n\nProperties of this template:\n\n- no --locked;\n- no explicit pedantic or warning flags in the CI command;\n- no separate cargo check;\n- no compilation on the shared/NFS workspace;\n- no repeated package installation;\n- no cargo build after a test failure;\n- no duplicated /tmp target trees across compile-heavy steps.\n\n## Stock-image fallback\n\nIf an internal CI image is not yet available, install native packages exactly once in the single compile-heavy step. Keep formatting separate and run it before any apt work.\n\n```yaml\nwhen:\n  - event: pull_request\n  - event: push\n    branch: main\n\nsteps:\n  fmt:\n    image: rust:1.94-slim\n    commands:\n      - rustup component add rustfmt\n      - cargo fmt --all -- --check\n\n  verify:\n    image: rust:1.94-slim\n    environment:\n      CARGO_TARGET_DIR: /tmp/target\n    commands:\n      - apt-get update -qq\n      - apt-get install -y -qq --no-install-recommends g++ git python3\n      - rustup component add clippy\n      - cargo clippy --workspace --all-features --all-targets --no-deps\n      - cargo test --workspace --all-features --all-targets\n      - cargo build --workspace --all-features --all-targets\n    depends_on:\n      - fmt\n```\n\nThis still downloads packages on every pipeline, but only once per pipeline rather than independently in check, Clippy, test, and build pods.\n\nDo not attempt to share installed system packages through the Woodpecker workspace. Caching apt archives there still leaves package installation and introduces NFS traffic. Prefer the custom image, whose layers are cached by the container runtime/registry.\n\n## PostgreSQL/pgvector integration-test variant\n\nFor repositories with PostgreSQL-backed tests, add a service and keep a bounded readiness probe immediately before tests. The custom CI image must contain postgresql-client.\n\n```yaml\nwhen:\n  - event: pull_request\n  - event: push\n    branch: main\n\nservices:\n  postgres:\n    image: pgvector/pgvector:pg17\n    environment:\n      POSTGRES_USER: ci\n      POSTGRES_PASSWORD: ci\n      POSTGRES_DB: rust_test\n\nsteps:\n  fmt:\n    image: registry.example.invalid/ci/rust:1.94-1\n    commands:\n      - cargo fmt --all -- --check\n\n  verify:\n    image: registry.example.invalid/ci/rust:1.94-1\n    environment:\n      CARGO_TARGET_DIR: /tmp/target\n      DATABASE_URL: postgres://ci:ci@postgres:5432/rust_test\n    commands:\n      - cargo clippy --workspace --all-features --all-targets --no-deps\n      - |\n        timeout 30s sh -c 'until pg_isready -h postgres -U ci -d rust_test; do echo \"waiting for postgres\"; sleep 1; done'\n      - cargo test --workspace --all-features --all-targets\n      - cargo build --workspace --all-features --all-targets\n    depends_on:\n      - fmt\n```\n\nUse non-production credentials dedicated to the ephemeral CI service. Keep readiness bounded so a broken service fails promptly instead of hanging the workflow.\n\n## Deliberate tradeoffs\n\n- Combining compilation checks reduces step-level status granularity, but saves CPU, package installation, and repeated dependency compilation.\n- The formatting step remains separate because it is cheap and provides fast feedback before consuming compile resources.\n- /tmp target data is intentionally not persisted across pipeline runs. Avoiding NFS correctness/performance problems is more important than cross-run target caching.\n- Registry and git dependency caching may be considered separately if backed by suitable node-local or object storage, but must not move target artifacts back onto NFS.\n- cargo build remains explicit because test builds and ordinary builds are not identical. Its placement after cargo test is intentional.\n- Repository-specific native dependencies and services should extend the image/template without weakening the common Rust verification policy.\n",
+      "expected_summary": "Canonical Rust-on-Woodpecker CI: Cargo.toml lint policy, NFS-safe local target directory, single compile-heavy step, custom image, and fail-fast templates.",
+      "expected_tags": [
+        "lang:rust",
+        "ci:woodpecker",
+        "woodpecker",
+        "cargo",
+        "clippy",
+        "pedantic",
+        "workflow",
+        "verification",
+        "nfs",
+        "ci-template"
+      ]
+    },
+    "policy": {
+      "policy_key": "rust.ci.woodpecker",
+      "revision": 1,
+      "delivery_class": "contextual",
+      "supersedes": null,
+      "selectors": {},
+      "values": {}
+    }
+  },
+  "guidance_active": {
+    "id": "26f78610-35df-472e-9633-43533b2580b1",
+    "content": "# Rust Woodpecker pipeline authoring guidance\n\nKeep warning and Clippy pedantic lint policy in Cargo.toml. Workspace members must opt in with [lints] workspace = true. Use cargo fmt --all -- --check as a cheap first step. In one fail-fast verification step run cargo clippy --workspace --all-features --all-targets --no-deps, then cargo test --workspace --all-features --all-targets, then cargo build --workspace --all-features --all-targets. Do not use --locked or repeat the pedantic flags on the command line when the manifest owns that policy. Do not run a separate cargo check by default unless a repository documents a configuration that Clippy misses.\n\nUse a pinned, versioned Rust image with the native packages and rustfmt/Clippy components required by the repository. Keep compilation in one step so isolated containers do not duplicate dependency builds or native package installation. A custom image avoids repeated package installation. If a stock image is necessary, install packages once in that verification step. For PostgreSQL integration tests, add a pgvector-enabled service and a bounded readiness probe immediately before tests. Use disposable CI credentials.\n\nStorage selection belongs to rust.build.storage.workstation and rust.build.storage.woodpecker. The trusted execution profile chooses the applicable storage policy. Pipeline examples must not prescribe a host storage path or a container storage path without an explicit execution profile.",
+    "summary": "Rust Woodpecker pipeline structure and verification guidance",
+    "tags": [
+      "lang:rust",
+      "ci:woodpecker",
+      "woodpecker",
+      "workflow",
+      "verification"
+    ],
+    "policy": {
+      "policy_key": "rust.ci.woodpecker",
+      "revision": 2,
+      "delivery_class": "contextual",
+      "supersedes": "7404e1ce-1058-46b3-9c19-53235735e708",
+      "selectors": {},
+      "values": {}
+    }
+  },
+  "container_active": {
+    "id": "bc49a0d8-0d8a-48d9-973d-e1fa1cdc8fa7",
+    "content": "For Rust builds executing inside an isolated Woodpecker step container, set CARGO_TARGET_DIR=/tmp/target so Cargo artifacts stay on the container-local filesystem when the shared workspace is NFS-backed. This setting applies only to the woodpecker-container execution profile. It does not authorize using /tmp for workstation-host builds.",
+    "summary": "Container-local Rust build artifacts in isolated Woodpecker steps",
+    "tags": [
+      "lang:rust",
+      "ci:woodpecker",
+      "storage",
+      "environment:woodpecker"
+    ],
+    "policy": {
+      "policy_key": "rust.build.storage.woodpecker",
+      "revision": 1,
+      "delivery_class": "mandatory",
+      "supersedes": null,
+      "selectors": {
+        "profile": [
+          "woodpecker-container"
+        ],
+        "language": [
+          "rust"
+        ]
+      },
+      "values": {
+        "rust.build.target_storage": "container-local-tmp"
+      }
+    }
+  }
+}

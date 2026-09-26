@@ -316,6 +316,8 @@ URL-encoded JSON `context` query value. The hook uses the operator-supplied
 participating scoped policy fails visibly with `policy_context_required`.
 See [policy resolution](docs/policy-resolution.md) for precedence, diagnostics,
 canonical output, and rollout details.
+The pinned host/container conversion manifest and operator steps are in
+[storage policy conversion](docs/storage-policy-conversion.md).
 
 To publish a new root, call `memory_store` with category `rule` and a complete
 write payload such as

@@ -21,15 +21,29 @@ pub async fn publish_new(
     memory: &Memory,
     policy: &PolicyWrite,
 ) -> Result<MemorySummary, Error> {
-    validate_store(policy, &memory.category)?;
     let mut transaction = pool.begin().await.map_err(Error::from)?;
     acquire_identity_lock(&mut transaction, &memory.project, &policy.policy_key).await?;
-    let head = current_head(&mut transaction, &memory.project, &policy.policy_key).await?;
+    publish_in_transaction(&mut transaction, memory, policy).await?;
+    transaction.commit().await.map_err(Error::from)?;
+    load_published(pool, memory.id).await
+}
+
+/// Publish into an existing transaction after the caller holds the identity lock.
+///
+/// # Errors
+/// Returns a typed publication error or a database error.
+pub(crate) async fn publish_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    memory: &Memory,
+    policy: &PolicyWrite,
+) -> Result<(), Error> {
+    validate_store(policy, &memory.category)?;
+    let head = current_head(transaction, &memory.project, &policy.policy_key).await?;
     if let Some((head_id, _)) = head {
-        lock_rows(&mut transaction, &[head_id]).await?;
+        lock_rows(transaction, &[head_id]).await?;
     }
-    validate_publication(&mut transaction, &memory.project, policy, head).await?;
-    supersede_head(&mut transaction, head).await?;
+    validate_publication(transaction, &memory.project, policy, head).await?;
+    supersede_head(transaction, head).await?;
     let delivery_class = delivery_class_name(policy.delivery_class);
     sqlx::query(
         "INSERT INTO memories
@@ -56,11 +70,10 @@ pub async fn publish_new(
             .map_err(|error| Error::Database(error.to_string()))?,
     )
     .bind(serde_json::to_value(&policy.values).map_err(|error| Error::Database(error.to_string()))?)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
     .map_err(|error| map_constraint(error, memory.id, &memory.project, policy))?;
-    transaction.commit().await.map_err(Error::from)?;
-    load_published(pool, memory.id).await
+    Ok(())
 }
 
 /// Assign an identity to an existing legacy Rule after an exact read token check.
@@ -85,18 +98,37 @@ pub async fn adopt(
     let project = candidate.project;
     let mut transaction = pool.begin().await.map_err(Error::from)?;
     acquire_identity_lock(&mut transaction, &project, &policy.policy_key).await?;
-    let head = current_head(&mut transaction, &project, &policy.policy_key).await?;
+    adopt_in_transaction(&mut transaction, id, &project, policy, expected_updated_at).await?;
+    transaction.commit().await.map_err(Error::from)?;
+    load_published(pool, id).await
+}
+
+/// Adopt a legacy Rule after its identity lock is held by the transaction.
+///
+/// # Errors
+/// Returns a typed stale or publication error, or a database error.
+pub(crate) async fn adopt_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    project: &str,
+    policy: &PolicyWrite,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<(), Error> {
+    policy
+        .validate()
+        .map_err(|message| validation(message, id, policy))?;
+    let head = current_head(transaction, project, &policy.policy_key).await?;
     let mut ids = vec![id];
     if let Some((head_id, _)) = head {
         ids.push(head_id);
     }
-    lock_rows(&mut transaction, &ids).await?;
+    lock_rows(transaction, &ids).await?;
     let row = sqlx::query(
         "SELECT category, project, policy_key, updated_at
          FROM memories WHERE id = $1",
     )
     .bind(id)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await
     .map_err(Error::from)?
     .ok_or_else(|| Error::NotFound(format!("memory {id}")))?;
@@ -116,7 +148,7 @@ pub async fn adopt(
             "policy_immutable_revision",
             format!("Rule {id} is already classified; publish a successor"),
             id,
-            &project,
+            project,
             policy,
             head.map(|(head_id, _)| head_id),
         ));
@@ -135,8 +167,8 @@ pub async fn adopt(
             conflict: true,
         });
     }
-    validate_publication(&mut transaction, &project, policy, head).await?;
-    supersede_head(&mut transaction, head).await?;
+    validate_publication(transaction, project, policy, head).await?;
+    supersede_head(transaction, head).await?;
     sqlx::query(
         "UPDATE memories SET
             policy_key = $2,
@@ -159,11 +191,10 @@ pub async fn adopt(
             .map_err(|error| Error::Database(error.to_string()))?,
     )
     .bind(serde_json::to_value(&policy.values).map_err(|error| Error::Database(error.to_string()))?)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
-    .map_err(|error| map_constraint(error, id, &project, policy))?;
-    transaction.commit().await.map_err(Error::from)?;
-    load_published(pool, id).await
+    .map_err(|error| map_constraint(error, id, project, policy))?;
+    Ok(())
 }
 
 async fn load_published(pool: &PgPool, id: Uuid) -> Result<MemorySummary, Error> {
@@ -259,7 +290,7 @@ fn conflict(
     }
 }
 
-async fn acquire_identity_lock(
+pub(crate) async fn acquire_identity_lock(
     transaction: &mut Transaction<'_, Postgres>,
     project: &str,
     key: &str,
@@ -298,7 +329,10 @@ async fn current_head(
     .map_err(Error::from)
 }
 
-async fn lock_rows(transaction: &mut Transaction<'_, Postgres>, ids: &[Uuid]) -> Result<(), Error> {
+pub(crate) async fn lock_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    ids: &[Uuid],
+) -> Result<(), Error> {
     let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
