@@ -292,6 +292,7 @@ pub struct PolicyMetadata {
 
 /// Stable identity used in resolution diagnostics and override provenance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyReference {
     /// Project that owns the revision.
     pub project: String,
@@ -309,6 +310,7 @@ pub struct PolicyReference {
 
 /// One canonical effective rule, free of timestamps and retrieval scores.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanonicalRule {
     /// Source project.
     pub project: String,

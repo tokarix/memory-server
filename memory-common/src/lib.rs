@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod error;
+pub mod guardrails;
 #[cfg(feature = "http-client")]
 pub mod http_client;
 pub mod model;
