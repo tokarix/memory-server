@@ -35,9 +35,9 @@ pub async fn publish_new(
         "INSERT INTO memories
             (id, category, content, created_at, embedding, project, summary, tags,
              updated_at, policy_key, policy_revision, policy_delivery_class,
-             policy_state, policy_supersedes)
+             policy_state, policy_supersedes, policy_selectors, policy_values)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp(),
-                 $9, $10, $11, 'active', $12)",
+                 $9, $10, $11, 'active', $12, $13, $14)",
     )
     .bind(memory.id)
     .bind(&memory.category)
@@ -51,6 +51,11 @@ pub async fn publish_new(
     .bind(policy.revision)
     .bind(delivery_class)
     .bind(policy.supersedes)
+    .bind(
+        serde_json::to_value(&policy.selectors)
+            .map_err(|error| Error::Database(error.to_string()))?,
+    )
+    .bind(serde_json::to_value(&policy.values).map_err(|error| Error::Database(error.to_string()))?)
     .execute(&mut *transaction)
     .await
     .map_err(|error| map_constraint(error, memory.id, &memory.project, policy))?;
@@ -139,6 +144,8 @@ pub async fn adopt(
             policy_delivery_class = $4,
             policy_state = 'active',
             policy_supersedes = $5,
+            policy_selectors = $6,
+            policy_values = $7,
             updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
          WHERE id = $1 AND policy_key IS NULL",
     )
@@ -147,6 +154,11 @@ pub async fn adopt(
     .bind(policy.revision)
     .bind(delivery_class_name(policy.delivery_class))
     .bind(policy.supersedes)
+    .bind(
+        serde_json::to_value(&policy.selectors)
+            .map_err(|error| Error::Database(error.to_string()))?,
+    )
+    .bind(serde_json::to_value(&policy.values).map_err(|error| Error::Database(error.to_string()))?)
     .execute(&mut *transaction)
     .await
     .map_err(|error| map_constraint(error, id, &project, policy))?;
@@ -409,6 +421,7 @@ fn map_constraint(error: sqlx::Error, id: Uuid, project: &str, policy: &PolicyWr
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -447,7 +460,93 @@ mod tests {
             revision,
             delivery_class: DeliveryClass::Contextual,
             supersedes,
+            selectors: memory_common::policy::PolicySelectors::default(),
+            values: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn scoped_metadata_round_trips_and_sql_rejects_bad_shapes(pool: PgPool) {
+        let source = memory("app");
+        let mut policy = write("storage.host", 1, None);
+        policy.selectors.profile = Some(BTreeSet::from(["workstation-host".to_owned()]));
+        policy
+            .values
+            .insert("build.target".to_owned(), "persistent-disk".to_owned());
+        let published = publish_new(&pool, &source, &policy).await.unwrap();
+        let stored = published.policy.unwrap();
+        assert_eq!(stored.selectors, policy.selectors);
+        assert_eq!(stored.values, policy.values);
+        let candidates = db::load_rule_candidates(&pool, "app").await.unwrap();
+        assert_eq!(
+            candidates[0].policy.as_ref().unwrap().selectors,
+            policy.selectors
+        );
+
+        for sql in [
+            "UPDATE memories SET policy_selectors = '[]'::jsonb WHERE id = $1",
+            "UPDATE memories SET policy_selectors = '{\"other\":[]}'::jsonb WHERE id = $1",
+            "UPDATE memories SET policy_selectors = '{\"phase\":null}'::jsonb WHERE id = $1",
+            "UPDATE memories SET policy_selectors = '{\"phase\":[42]}'::jsonb WHERE id = $1",
+            "UPDATE memories SET policy_values = '[]'::jsonb WHERE id = $1",
+            "UPDATE memories SET policy_values = '{\"build.target\":42}'::jsonb WHERE id = $1",
+        ] {
+            assert!(
+                sqlx::query(sql)
+                    .bind(source.id)
+                    .execute(&pool)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn scope_downgrade_refuses_loss_and_empty_extensions_roll_back(pool: PgPool) {
+        let source = memory("app");
+        publish_new(&pool, &source, &write("plain", 1, None))
+            .await
+            .unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260927000000_policy_scope.down.sql"
+        ))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260927000000_policy_scope.up.sql"
+        ))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        transaction.rollback().await.unwrap();
+        assert!(db::get(&pool, source.id).await.unwrap().is_some());
+
+        let scoped = memory("app");
+        let mut policy = write("scoped", 1, None);
+        policy.selectors.language = Some(BTreeSet::from(["rust".to_owned()]));
+        publish_new(&pool, &scoped, &policy).await.unwrap();
+        let mut transaction = pool.begin().await.unwrap();
+        assert!(
+            sqlx::raw_sql(include_str!(
+                "../../migrations/20260927000000_policy_scope.down.sql"
+            ))
+            .execute(&mut *transaction)
+            .await
+            .is_err()
+        );
+        transaction.rollback().await.unwrap();
+        assert_eq!(
+            db::get(&pool, scoped.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .policy
+                .unwrap()
+                .selectors,
+            policy.selectors
+        );
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]

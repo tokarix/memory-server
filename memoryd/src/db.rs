@@ -1,6 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use memory_common::policy::{DeliveryClass, PolicyMetadata, PolicyState};
+use memory_common::policy::{
+    DeliveryClass, PolicyMetadata, PolicySelectors, PolicyState, PolicyWrite,
+};
 use pgvector::Vector;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -222,7 +224,7 @@ pub async fn list_neighbors(
         SELECT r.edge_id, r.confidence, r.edge_created_at, r.dst_id, r.dst_project,
                r.evidence, r.origin, r.relation, r.src_id, r.src_project, r.suppressed,
                r.edge_updated_at, r.weight,
-               m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes
+               m.id, m.category, m.content, m.created_at, m.project, m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values
          FROM ranked r
          JOIN memories m ON m.id = r.neighbor_id
          WHERE r.rn = 1
@@ -278,7 +280,7 @@ pub async fn list_search_neighbors(
                r.dst_project, r.evidence, r.origin, r.relation, r.src_id,
                r.src_project, r.suppressed, r.edge_updated_at, r.weight,
                m.id, m.category, m.content, m.created_at, m.project,
-               m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes
+               m.summary, m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values
         FROM ranked r
         JOIN memories m ON m.id = r.neighbor_id
         WHERE r.rn = 1
@@ -556,7 +558,7 @@ pub async fn append_session_message(
 /// Returns an error if the query fails.
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Option<MemorySummary>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
          FROM memories WHERE id = $1",
     )
     .bind(id)
@@ -692,13 +694,13 @@ pub async fn list_core(
     .collect();
 
     let statement = if include_workflow_artifacts {
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
          FROM memories
          WHERE project = $1 AND category = ANY($2)
            AND (policy_state IS NULL OR policy_state = 'active')
          ORDER BY updated_at DESC"
     } else {
-        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+        "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
          FROM memories
          WHERE project = $1 AND category = ANY($2)
            AND workflow_artifact = FALSE
@@ -724,7 +726,7 @@ pub async fn list_maintenance_candidates(
 ) -> Result<Vec<MemorySummary>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, category, content, created_at, project, summary, tags,
-                updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+                updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
          FROM memories
          WHERE project = $1
            AND workflow_artifact = FALSE
@@ -751,7 +753,7 @@ pub async fn list_review_queue(
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
                  FROM memories
                  WHERE project = $1
                    AND category = $2
@@ -767,7 +769,7 @@ pub async fn list_review_queue(
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
                  FROM memories
                  WHERE project = $1
                    AND tags @> ARRAY['review-needed']::TEXT[]
@@ -799,7 +801,7 @@ pub async fn list_rules(
     let rows = sqlx::query(
         "SELECT id, category, content, created_at, project, summary, tags,
                 updated_at, policy_key, policy_revision, policy_delivery_class,
-                policy_state, policy_supersedes
+                policy_state, policy_supersedes, policy_selectors, policy_values
          FROM memories
          WHERE category = 'rule'
            AND (project = $1 OR ($2 AND project = 'general'))
@@ -815,6 +817,27 @@ pub async fn list_rules(
     .bind(project)
     .bind(include_general)
     .bind(&tag_arr)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_summary).collect()
+}
+
+/// Load every project and general Rule from one database statement for resolution.
+///
+/// # Errors
+/// Returns an error if a candidate row cannot be loaded or decoded.
+pub async fn load_rule_candidates(
+    pool: &PgPool,
+    project: &str,
+) -> Result<Vec<MemorySummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, category, content, created_at, project, summary, tags,
+                updated_at, policy_key, policy_revision, policy_delivery_class,
+                policy_state, policy_supersedes, policy_selectors, policy_values
+         FROM memories
+         WHERE category = 'rule' AND (project = $1 OR project = 'general')",
+    )
+    .bind(project)
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_summary).collect()
@@ -837,7 +860,7 @@ pub async fn list(
     let rows = match category {
         Some(cat) => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
                  FROM memories
                  WHERE project = $1 AND category = $2
                    AND ($5::TEXT[] IS NULL OR tags @> $5::TEXT[])
@@ -854,7 +877,7 @@ pub async fn list(
         }
         None => {
             sqlx::query(
-                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes
+                "SELECT id, category, content, created_at, project, summary, tags, updated_at, policy_key, policy_revision, policy_delivery_class, policy_state, policy_supersedes, policy_selectors, policy_values
                  FROM memories
                  WHERE project = $1
                    AND ($4::TEXT[] IS NULL OR tags @> $4::TEXT[])
@@ -1645,7 +1668,7 @@ const HYBRID_CATEGORY_INCLUSIVE_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1680,7 +1703,7 @@ const HYBRID_CATEGORY_DEFAULT_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1713,7 +1736,7 @@ const HYBRID_INCLUSIVE_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1748,7 +1771,7 @@ const HYBRID_DEFAULT_SQL: &str = r"
         FULL OUTER JOIN fts_results f ON v.id = f.id
     )
     SELECT m.id, m.category, m.content, m.created_at, m.project, m.summary,
-           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, c.rrf_score AS similarity
+           m.tags, m.updated_at, m.policy_key, m.policy_revision, m.policy_delivery_class, m.policy_state, m.policy_supersedes, m.policy_selectors, m.policy_values, c.rrf_score AS similarity
     FROM combined c
     JOIN memories m ON m.id = c.id
     ORDER BY c.rrf_score DESC
@@ -1899,11 +1922,19 @@ fn row_to_policy(row: &sqlx::postgres::PgRow) -> Result<Option<PolicyMetadata>, 
     let delivery: Option<String> = row.try_get("policy_delivery_class")?;
     let publication_state: Option<String> = row.try_get("policy_state")?;
     let supersedes: Option<Uuid> = row.try_get("policy_supersedes")?;
+    let selectors_json: serde_json::Value = row.try_get("policy_selectors")?;
+    let values_json: serde_json::Value = row.try_get("policy_values")?;
+    let selectors: PolicySelectors = serde_json::from_value(selectors_json)
+        .map_err(|error| sqlx::Error::Protocol(format!("invalid policy selectors: {error}")))?;
+    let values: BTreeMap<String, String> = serde_json::from_value(values_json)
+        .map_err(|error| sqlx::Error::Protocol(format!("invalid policy values: {error}")))?;
     let Some(policy_key) = key else {
         if revision.is_some()
             || delivery.is_some()
             || publication_state.is_some()
             || supersedes.is_some()
+            || selectors != PolicySelectors::default()
+            || !values.is_empty()
         {
             return Err(sqlx::Error::Protocol(
                 "partial legacy policy metadata".to_owned(),
@@ -1935,12 +1966,27 @@ fn row_to_policy(row: &sqlx::postgres::PgRow) -> Result<Option<PolicyMetadata>, 
             )));
         }
     };
+    let write = PolicyWrite {
+        policy_key: policy_key.clone(),
+        revision,
+        delivery_class,
+        supersedes,
+        selectors: selectors.clone(),
+        values: values.clone(),
+    };
+    write.validate().map_err(|message| {
+        sqlx::Error::Protocol(format!(
+            "invalid persisted policy {policy_key}@{revision}: {message}"
+        ))
+    })?;
     Ok(Some(PolicyMetadata {
         policy_key,
         revision,
         delivery_class,
         state,
         supersedes,
+        selectors,
+        values,
     }))
 }
 

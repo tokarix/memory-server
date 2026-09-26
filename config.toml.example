@@ -1,5 +1,9 @@
 http_bind = "127.0.0.1:8080"
 memoryd_url = "http://127.0.0.1:8080"
+# MCP execution target, supplied by the operator; omit for unknown context.
+# Host example: resolution_context = { profile = "workstation-host", phase = "implementing", language = ["rust"] }
+# CI example: resolution_context = { profile = "woodpecker-container", language = ["rust"] }
+# Direct HTTP callers supply the same typed object in the `context` query field.
 # api_token = "replace-me-for-memoryd"
 database_url = "postgres://memory:memory@localhost/memory"
 ollama_url = "http://localhost:11434"

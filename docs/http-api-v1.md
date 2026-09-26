@@ -188,8 +188,16 @@ names the current active predecessor. General and project Rules with the same
 key are independent. Classified revisions cannot be edited or deleted through
 generic memory endpoints; publish a successor instead. Superseded Rules are
 omitted from Rule lists, bootstrap, and direct core recall, but remain available
-through direct get, ordinary lists, search, and neighbors. `mandatory` does not
-bypass existing filters or trigger automatic delivery in this release.
+through direct get, ordinary lists, search, and neighbors. Applicable mandatory
+Rules bypass tag and optional-general filters during resolution.
+
+Optional `selectors` contains `profile`, `phase`, `language`, and `tool`
+dimensions. Each present dimension is a nonempty array of at most 32 canonical
+identifiers. Members are OR; dimensions are AND. Missing dimensions are
+universal. Optional `values` maps at most 64 canonical setting keys to exact,
+nonblank strings of at most 1024 UTF-8 bytes. Conflicting values for one key
+fail resolution, including across distinct policy keys. Neither selectors nor
+values are inferred from tags or policy prose.
 
 `PATCH /api/v1/memories/{id}` also accepts a metadata-only adoption request
 for a legacy Rule. Read the Rule first, inspect its contents, then send only
@@ -534,19 +542,24 @@ Purpose:
 Query parameters:
 
 - `include_general=true` optional, default `true`
-- `tags` optional, comma-separated; every returned rule must contain all tags
-- `shadow_general` optional, default `true`; deprecated compatibility parameter
+- `tags` optional, comma-separated; ALL-of filter for contextual Rules only
+- `shadow_general` optional, default `true`
+- `context` optional, URL-encoded JSON object with `profile` and `phase`
+  scalars and `language` and `tool` arrays
 
 Behavior:
 
 - include project-specific rules
-- optionally union with `project = "general"`
-- tagged project and general rules are additive for both `shadow_general`
-  values; the old blanket shadowing behavior is deprecated
-- return general and project rules separately so callers can apply
-  precedence without reparsing a merged list
-- precise overrides require stable policy identity and are deferred to a
-  follow-up issue; tags, summaries, and content do not identify replacements
+- always include applicable mandatory general policies, even when
+  `include_general=false`; optional general guidance obeys the flag
+- project policies replace same-key contextual general policies only when
+  their selector domain is equal or narrower and `shadow_general=true`
+- a same-key collision with mandatory general policy is HTTP 409, regardless
+  of tags, `include_general`, or `shadow_general`
+- unknown required context is HTTP 400; incompatible values or ambiguous
+  overrides are HTTP 409, with sorted references and corrective action
+- return stable `general_rules`, `project_rules`, `context`, and a versioned
+  `canonical` representation with `effective` and `mandatory` projections
 
 ### `GET /api/v1/projects/{project}/bootstrap`
 
@@ -558,12 +571,15 @@ Query parameters:
 
 - `include_general=true` optional, default `true`
 - `include_recall=true` optional, default `true`
+- `context` optional, with the same typed JSON contract as rules
 
 Behavior:
 
 - return `general_rules`
 - return `project_rules`
 - return non-rule `recall_memories` for the project
+- resolve the complete policy set before recall; conflict responses contain
+  no partial bootstrap or recall payload
 - omit every Plan and review Decision from `recall_memories`, independent of
   the standalone recall opt-in
 - the review exclusion applies to Decisions tagged `review`; other categories

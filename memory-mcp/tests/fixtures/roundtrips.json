@@ -82,12 +82,12 @@
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true"
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&context=%7B%7D"
     },
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true&context=%7B%7D"
     },
     {
       "body": null,
@@ -116,12 +116,12 @@
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&tags=lang%3Arust"
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&context=%7B%7D&tags=lang%3Arust"
     },
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true&context=%7B%7D"
     },
     {
       "body": null,
@@ -154,12 +154,12 @@
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/rules?include_general=false&shadow_general=false&tags=lang%3Arust"
+      "uri": "/api/v1/projects/fixture/rules?include_general=false&shadow_general=false&context=%7B%7D&tags=lang%3Arust"
     },
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/bootstrap?include_general=false&include_recall=false"
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=false&include_recall=false&context=%7B%7D"
     },
     {
       "body": null,
@@ -192,12 +192,12 @@
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&tags=lang%3Arust"
+      "uri": "/api/v1/projects/fixture/rules?include_general=true&shadow_general=true&context=%7B%7D&tags=lang%3Arust"
     },
     {
       "body": null,
       "method": "GET",
-      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true"
+      "uri": "/api/v1/projects/fixture/bootstrap?include_general=true&include_recall=true&context=%7B%7D"
     },
     {
       "body": null,
@@ -654,7 +654,7 @@
         "result": {
           "content": [
             {
-              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "text": "## Rule Set (0 rules)\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -680,7 +680,7 @@
         "result": {
           "content": [
             {
-              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "text": "## Bootstrap\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -764,7 +764,7 @@
         "result": {
           "content": [
             {
-              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "text": "## Rule Set (0 rules)\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -792,7 +792,7 @@
         "result": {
           "content": [
             {
-              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "text": "## Bootstrap\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -892,7 +892,7 @@
         "result": {
           "content": [
             {
-              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "text": "## Rule Set (0 rules)\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -920,7 +920,7 @@
         "result": {
           "content": [
             {
-              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "text": "## Bootstrap\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -1020,7 +1020,7 @@
         "result": {
           "content": [
             {
-              "text": "## Rule Set (0 rules)\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
+              "text": "## Rule Set (0 rules)\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n",
               "type": "text"
             }
           ],
@@ -1048,7 +1048,7 @@
         "result": {
           "content": [
             {
-              "text": "## Bootstrap\nProject: fixture\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
+              "text": "## Bootstrap\nProject: fixture\nContext: {}\nCanonical policy schema: 1\n\n### General Rules (0)\nNone.\n\n### Project Rules (0)\nNone.\n\n### Core Recall (0)\nNone.\n",
               "type": "text"
             }
           ],

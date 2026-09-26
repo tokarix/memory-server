@@ -6,7 +6,9 @@ use crate::model::{
     Category, EdgeOrigin, EdgeRelation, MemoryEdgeSummary, MemorySummary, SessionLogSummary,
     SessionMessageSummary, SessionSummary,
 };
-use crate::policy::{PolicyMetadata, PolicyWrite};
+use crate::policy::{
+    CanonicalPolicySet, PolicyMetadata, PolicyWrite, ResolutionContext, ResolutionOptions,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ListMemoriesRequest {
@@ -98,6 +100,9 @@ pub struct FinalizeSessionRequest {
 pub struct RuleList {
     pub general_rules: Vec<MemorySummary>,
     pub project_rules: Vec<MemorySummary>,
+    pub canonical: CanonicalPolicySet,
+    pub context: ResolutionContext,
+    pub options: ResolutionOptions,
 }
 
 #[derive(Clone)]
@@ -106,6 +111,9 @@ pub struct BootstrapPayload {
     pub project: String,
     pub project_rules: Vec<MemorySummary>,
     pub recall_memories: Vec<MemorySummary>,
+    pub canonical: CanonicalPolicySet,
+    pub context: ResolutionContext,
+    pub options: ResolutionOptions,
 }
 
 pub enum SearchOutcome {
@@ -143,6 +151,12 @@ pub struct MemoryListEnvelope {
 pub struct RuleListEnvelope {
     pub general_rules: Vec<MemoryDto>,
     pub project_rules: Vec<MemoryDto>,
+    #[serde(default)]
+    pub canonical: CanonicalPolicySet,
+    #[serde(default)]
+    pub context: ResolutionContext,
+    #[serde(default)]
+    pub options: ResolutionOptions,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -151,6 +165,12 @@ pub struct BootstrapEnvelope {
     pub project: String,
     pub project_rules: Vec<MemoryDto>,
     pub recall_memories: Vec<MemoryDto>,
+    #[serde(default)]
+    pub canonical: CanonicalPolicySet,
+    #[serde(default)]
+    pub context: ResolutionContext,
+    #[serde(default)]
+    pub options: ResolutionOptions,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -472,6 +492,9 @@ impl From<RuleList> for RuleListEnvelope {
         Self {
             general_rules: rules.general_rules.into_iter().map(Into::into).collect(),
             project_rules: rules.project_rules.into_iter().map(Into::into).collect(),
+            canonical: rules.canonical,
+            context: rules.context,
+            options: rules.options,
         }
     }
 }
@@ -487,6 +510,9 @@ impl From<BootstrapPayload> for BootstrapEnvelope {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            canonical: payload.canonical,
+            context: payload.context,
+            options: payload.options,
         }
     }
 }
@@ -515,6 +541,8 @@ mod tests {
                 delivery_class: DeliveryClass::Mandatory,
                 state: PolicyState::Active,
                 supersedes: Some(Uuid::from_u128(2)),
+                selectors: crate::policy::PolicySelectors::default(),
+                values: std::collections::BTreeMap::new(),
             }),
             project: "project-a".to_owned(),
             summary: "Rule summary".to_owned(),

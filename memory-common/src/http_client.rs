@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::error::Error;
 use crate::model;
+use crate::policy::ResolutionContext;
 use crate::protocol::{
     AppendSessionMessageDto, BootstrapEnvelope, CreateSessionDto, DeleteEnvelope,
     FinalizeSessionDto, FinalizeSessionEnvelope, HealthResponse, MemoryEnvelope,
@@ -21,6 +22,7 @@ pub struct HttpMemoryClient {
     base_url: reqwest::Url,
     bearer_token: Option<String>,
     http: reqwest::Client,
+    context: ResolutionContext,
 }
 
 #[derive(serde::Deserialize)]
@@ -49,7 +51,15 @@ impl HttpMemoryClient {
             base_url,
             bearer_token,
             http: reqwest::Client::new(),
+            context: ResolutionContext::default(),
         })
+    }
+
+    /// Bind trusted execution facts supplied by the MCP operator.
+    #[must_use]
+    pub fn with_context(mut self, context: ResolutionContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Fetch the remote server version string.
@@ -182,6 +192,12 @@ impl HttpMemoryClient {
             let mut query = url.query_pairs_mut();
             query.append_pair("include_general", &include_general.to_string());
             query.append_pair("shadow_general", &shadow_general.to_string());
+            query.append_pair(
+                "context",
+                &serde_json::to_string(&self.context).map_err(|error| {
+                    Error::Transport(format!("encode execution context: {error}"))
+                })?,
+            );
             if let Some(tags) = tags {
                 query.append_pair("tags", &tags.join(","));
             }
@@ -190,6 +206,9 @@ impl HttpMemoryClient {
         Ok(RuleList {
             general_rules: response.general_rules.into_iter().map(Into::into).collect(),
             project_rules: response.project_rules.into_iter().map(Into::into).collect(),
+            canonical: response.canonical,
+            context: response.context,
+            options: response.options,
         })
     }
 
@@ -209,6 +228,12 @@ impl HttpMemoryClient {
             let mut query = url.query_pairs_mut();
             query.append_pair("include_general", &include_general.to_string());
             query.append_pair("include_recall", &include_recall.to_string());
+            query.append_pair(
+                "context",
+                &serde_json::to_string(&self.context).map_err(|error| {
+                    Error::Transport(format!("encode execution context: {error}"))
+                })?,
+            );
         }
         let response: BootstrapEnvelope = self.request_url(Method::GET, url, None::<&()>).await?;
         Ok(BootstrapPayload {
@@ -220,6 +245,9 @@ impl HttpMemoryClient {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            canonical: response.canonical,
+            context: response.context,
+            options: response.options,
         })
     }
 

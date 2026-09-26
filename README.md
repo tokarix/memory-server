@@ -294,9 +294,28 @@ and remains contextual; existing rows are never classified from their text or
 tags. A classified Rule has a project-local `policy_key`, a positive `revision`,
 a `delivery_class` of `contextual` or `mandatory`, a server-controlled `state`,
 and an optional predecessor UUID in `supersedes`. The active revision is
-returned by `memory_rules` and `memory_bootstrap`; superseded revisions remain
-available through `memory_get`, `memory_list`, and search. Mandatory is stored
-classification only in this release: existing rule filters still apply.
+resolved by `memory_rules` and `memory_bootstrap`; superseded revisions remain
+available through `memory_get`, `memory_list`, and search. Applicable mandatory
+Rules are delivered regardless of tags or `include_general`.
+
+Classified Rules may also declare `selectors` for `profile`, `phase`,
+`language`, and `tool`, plus exact `values` for shared settings. Omitted
+selector dimensions match every execution. Selector members within one
+dimension are alternatives; dimensions combine. For example,
+`{"selectors":{"profile":["workstation-host"],"language":["rust"]},"values":{"rust.build.target_storage":"persistent-disk"}}`
+applies only to Rust work on the workstation host. These fields are immutable
+within a revision. One active revision remains per `(project, policy_key)`;
+environment variants use distinct keys.
+
+MCP execution context comes from the operator's `resolution_context` in
+`config.toml`, not from tool arguments, tags, the daemon's host, or model text.
+The default is unknown. A tool `context` argument can only assert values
+already bound at startup. Direct authenticated HTTP callers may pass a typed
+URL-encoded JSON `context` query value. The hook uses the operator-supplied
+`MEMORY_RESOLUTION_CONTEXT` JSON environment value. Missing context for a
+participating scoped policy fails visibly with `policy_context_required`.
+See [policy resolution](docs/policy-resolution.md) for precedence, diagnostics,
+canonical output, and rollout details.
 
 To publish a new root, call `memory_store` with category `rule` and a complete
 write payload such as
@@ -564,9 +583,13 @@ manage the workflow.
 
 When launching short-lived, targeted worker sessions, you must avoid context dilution. Unrestricted bootstraps (`memory_bootstrap`) in highly specialized workers (e.g. ones that solely write frontend CSS vs ones that manage SQL migrations) will pollute the AI's context with rules and guidelines meant for entirely different phases of the project.
 
-For isolated workers, you should completely avoid `memory_bootstrap` or pass `include_recall=false` minus the general rules, and instead rely on **Tag-Based Filtering**. Rules and memories can be scoped using tags such as `lang:rust`, `lang:typescript`, `phase:planning`, or `phase:styling`. 
+For isolated workers, configure the execution context at MCP startup. Use
+`include_recall=false` when only policies are needed. Tags can reduce optional
+contextual guidance, but they never select an execution profile or suppress
+applicable mandatory policies. Rules and memories can still carry tags such as
+`lang:rust` or `phase:planning` for contextual retrieval.
 
-1. At session start, specialized workers MUST be instructed to call `memory_rules(project, tags=["lang:rust"])` or multi-tag combinations like `tags=["lang:rust", "phase:planning"]`.
+1. At session start, specialized workers call `memory_rules(project)` with a trusted startup context; optional tags filter contextual guidance only.
 2. For retrieval, workers must exclusively use `memory_search(tags=...)` targeted to their operational domain.
 3. If creating rules or plans intended for specialized agents, always ensure they are tagged with the relevant `lang:*` or `phase:*` identifiers.
 

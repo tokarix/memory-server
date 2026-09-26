@@ -17,8 +17,10 @@ pub async fn run_http(config_path: Option<&str>) -> Result<(), Box<dyn std::erro
         None => config::Config::default(),
     };
 
-    let client = HttpMemoryClient::new(&config.memoryd_url, config.api_token)?;
-    let server = tools::MemoryServer::new(tools::MemoryBackend::Http(client));
+    let context = config.resolution_context;
+    let client =
+        HttpMemoryClient::new(&config.memoryd_url, config.api_token)?.with_context(context.clone());
+    let server = tools::MemoryServer::with_context(tools::MemoryBackend::Http(client), context);
     start_stdio(server).await
 }
 

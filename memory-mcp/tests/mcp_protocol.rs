@@ -169,12 +169,16 @@ impl Fixture {
     }
 
     fn start_real(url: &str) -> Self {
+        Self::start_real_with_context(url, None)
+    }
+
+    fn start_real_with_context(url: &str, context: Option<&str>) -> Self {
         let state = Backend::default();
         let (stop, stopped) = oneshot::channel();
         let server = tokio::spawn(async move {
             let _ = stopped.await;
         });
-        Self::start_on(url, state, stop, server)
+        Self::start_on_with_context(url, state, stop, server, context)
     }
 
     fn start_on(
@@ -183,9 +187,22 @@ impl Fixture {
         stop: oneshot::Sender<()>,
         server: JoinHandle<()>,
     ) -> Self {
+        Self::start_on_with_context(url, state, stop, server, None)
+    }
+
+    fn start_on_with_context(
+        url: &str,
+        state: Backend,
+        stop: oneshot::Sender<()>,
+        server: JoinHandle<()>,
+        context: Option<&str>,
+    ) -> Self {
         let config =
             std::env::temp_dir().join(format!("mcp-contract-{}.toml", uuid::Uuid::new_v4()));
-        std::fs::write(&config, format!("memoryd_url = \"{url}\"\n")).unwrap();
+        let context_line = context.map_or_else(String::new, |value| {
+            format!("resolution_context = {value}\n")
+        });
+        std::fs::write(&config, format!("memoryd_url = \"{url}\"\n{context_line}")).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_memory-mcp"))
             .arg(&config)
             .stdin(Stdio::piped())
@@ -317,6 +334,150 @@ fn metadata_header<'a>(text: &'a str, name: &str) -> &'a str {
         .lines()
         .find_map(|line| line.strip_prefix(&format!("{name}: ")))
         .unwrap()
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn trusted_mcp_context_reaches_real_policy_resolution(pool: sqlx::PgPool) {
+    use chrono::Utc;
+    use memory_common::policy::{DeliveryClass, PolicySelectors, PolicyWrite};
+    use memoryd::api::{ApiState, router};
+    use memoryd::app::MemoryApp;
+    use memoryd::embed;
+    use memoryd::model::{Category, Memory};
+
+    for (id, key, profile) in [
+        (101, "storage.host", "workstation-host"),
+        (102, "storage.ci", "woodpecker-container"),
+    ] {
+        let now = Utc::now();
+        let memory = Memory {
+            id: uuid::Uuid::from_u128(id),
+            policy: None,
+            category: Category::Rule,
+            content: format!("Required {profile} storage"),
+            created_at: now,
+            embedding: vec![0.0; 1024],
+            project: "general".to_owned(),
+            summary: format!("{profile} storage"),
+            tags: vec!["storage".to_owned()],
+            updated_at: now,
+        };
+        let policy = PolicyWrite {
+            policy_key: key.to_owned(),
+            revision: 1,
+            delivery_class: DeliveryClass::Mandatory,
+            supersedes: None,
+            selectors: PolicySelectors {
+                profile: Some([profile.to_owned()].into()),
+                language: Some(["rust".to_owned()].into()),
+                ..PolicySelectors::default()
+            },
+            values: std::collections::BTreeMap::new(),
+        };
+        memoryd::policy::publish_new(&pool, &memory, &policy)
+            .await
+            .unwrap();
+    }
+    let url = "http://127.0.0.1:1".to_owned();
+    let app = MemoryApp::new(
+        pool,
+        Arc::new(embed::Client::new(
+            url.clone(),
+            "unused".to_owned(),
+            None,
+            None,
+        )),
+        "unused".to_owned(),
+        1024,
+        reqwest::Client::new(),
+        url,
+        "unused".to_owned(),
+        1024,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(ApiState {
+                app,
+                bearer_token: None,
+            }),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stopped.await;
+        })
+        .await
+        .unwrap();
+    });
+    let api_url = format!("http://{address}");
+    for (profile, expected, excluded) in [
+        (
+            "workstation-host",
+            "Required workstation-host storage",
+            "Required woodpecker-container storage",
+        ),
+        (
+            "woodpecker-container",
+            "Required woodpecker-container storage",
+            "Required workstation-host storage",
+        ),
+    ] {
+        let mut fixture = Fixture::start_real_with_context(
+            &api_url,
+            Some(&format!(
+                "{{ profile = \"{profile}\", language = [\"rust\"] }}"
+            )),
+        );
+        fixture.initialize(VERSIONS[3]).await;
+        for tool in ["memory_rules", "memory_bootstrap"] {
+            let response = fixture
+                .call(
+                    tool,
+                    json!({"project":"app","include_general":false,
+                "tags":["missing"],"include_recall":false}),
+                )
+                .await;
+            let text = tool_text(&response);
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains(excluded), "{text}");
+        }
+        let rejected = fixture
+            .call(
+                "memory_rules",
+                json!({"project":"app",
+            "context":{"profile":"different"}}),
+            )
+            .await;
+        assert_eq!(rejected["error"]["data"]["code"], "policy_context_mismatch");
+        fixture.finish(true).await;
+    }
+    let mut unknown = Fixture::start_real(&api_url);
+    unknown.initialize(VERSIONS[3]).await;
+    let missing = unknown.call("memory_rules", json!({"project":"app"})).await;
+    assert_eq!(missing["error"]["data"]["code"], "policy_context_required");
+    assert_eq!(
+        missing["error"]["data"]["details"]["references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let assertion = unknown
+        .call(
+            "memory_rules",
+            json!({"project":"app",
+        "context":{"profile":"workstation-host","language":["rust"]}}),
+        )
+        .await;
+    assert_eq!(
+        assertion["error"]["data"]["code"],
+        "policy_context_mismatch"
+    );
+    unknown.finish(true).await;
+    stop.send(()).unwrap();
+    timeout(DEADLINE, server).await.unwrap().unwrap();
 }
 
 async fn mock_policy_embed() -> Json<Value> {

@@ -4,12 +4,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use memory_common::policy::ResolutionContext;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::app::MemoryApp;
 use crate::error::Error;
 use crate::model::Category;
+use crate::policy_resolution::ResolutionRequest;
 use crate::protocol::{
     AppendSessionMessageDto, AppendSessionMessageRequest, BootstrapEnvelope, CreateSessionRequest,
     DeleteEnvelope, FinalizeSessionDto, FinalizeSessionEnvelope, FinalizeSessionRequest,
@@ -59,12 +61,14 @@ struct RulesQuery {
     shadow_general: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_comma_tags")]
     tags: Option<Vec<String>>,
+    context: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct BootstrapQuery {
     include_general: Option<bool>,
     include_recall: Option<bool>,
+    context: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -366,12 +370,13 @@ async fn list_rules(
     authorize(&state, &headers)?;
     let rules = state
         .app
-        .list_rules(
-            &path.project,
-            query.include_general.unwrap_or(true),
-            query.shadow_general.unwrap_or(true),
-            query.tags.as_deref(),
-        )
+        .resolve_rules(ResolutionRequest {
+            project: path.project,
+            include_general: query.include_general.unwrap_or(true),
+            shadow_general: query.shadow_general.unwrap_or(true),
+            tags: query.tags,
+            context: parse_context(query.context.as_deref())?,
+        })
         .await?;
     Ok(Json(rules.into()))
 }
@@ -385,13 +390,39 @@ async fn project_bootstrap(
     authorize(&state, &headers)?;
     let payload = state
         .app
-        .bootstrap_project(
+        .bootstrap_project_with_context(
             &path.project,
             query.include_general.unwrap_or(true),
             query.include_recall.unwrap_or(true),
+            parse_context(query.context.as_deref())?,
         )
         .await?;
     Ok(Json(payload.into()))
+}
+
+fn parse_context(raw: Option<&str>) -> Result<ResolutionContext, ApiError> {
+    let context = raw
+        .map_or_else(
+            || Ok(ResolutionContext::default()),
+            serde_json::from_str::<ResolutionContext>,
+        )
+        .map_err(|error| {
+            ApiError::from(Error::Policy {
+                code: "policy_context_invalid".to_owned(),
+                message: format!("Invalid execution context: {error}"),
+                details: serde_json::json!({"action": "Supply a URL-encoded JSON context object"}),
+                conflict: false,
+            })
+        })?;
+    context.validate().map_err(|message| {
+        ApiError::from(Error::Policy {
+            code: "policy_context_invalid".to_owned(),
+            message: message.to_owned(),
+            details: serde_json::json!({"context": context}),
+            conflict: false,
+        })
+    })?;
+    Ok(context)
 }
 
 async fn submit_review(

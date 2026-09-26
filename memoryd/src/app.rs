@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::embed;
 use crate::error::Error;
 use crate::model::{self, Category, MemoryEdgeSummary};
+use crate::policy_resolution::{self, ResolutionRequest};
 use crate::protocol::{
     AppendSessionMessageRequest, BootstrapPayload, CreateSessionRequest, FinalizeSessionRequest,
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
@@ -315,16 +316,25 @@ impl MemoryApp {
         shadow_general: bool,
         tags: Option<&[String]>,
     ) -> Result<RuleList, Error> {
-        let rules = db::list_rules(&self.pool, project, include_general, shadow_general, tags)
+        self.resolve_rules(ResolutionRequest {
+            project: project.to_owned(),
+            include_general,
+            shadow_general,
+            tags: tags.map(<[String]>::to_vec),
+            context: memory_common::policy::ResolutionContext::default(),
+        })
+        .await
+    }
+
+    /// Resolve policies from a complete one-statement Rule snapshot.
+    ///
+    /// # Errors
+    /// Returns a database or typed policy resolution error.
+    pub async fn resolve_rules(&self, request: ResolutionRequest) -> Result<RuleList, Error> {
+        let candidates = db::load_rule_candidates(&self.pool, &request.project)
             .await
             .map_err(Error::from)?;
-        let (general_rules, project_rules): (Vec<_>, Vec<_>) = rules
-            .into_iter()
-            .partition(|memory| memory.project == GENERAL_RULE_PROJECT);
-        Ok(RuleList {
-            general_rules,
-            project_rules,
-        })
+        policy_resolution::resolve(candidates, &request)
     }
 
     /// Load effective rules and optional recall memories for a project.
@@ -338,8 +348,34 @@ impl MemoryApp {
         include_general: bool,
         include_recall: bool,
     ) -> Result<BootstrapPayload, Error> {
+        self.bootstrap_project_with_context(
+            project,
+            include_general,
+            include_recall,
+            memory_common::policy::ResolutionContext::default(),
+        )
+        .await
+    }
+
+    /// Resolve bootstrap policies using the supplied trusted execution context.
+    ///
+    /// # Errors
+    /// Returns a policy error before loading recall if resolution fails.
+    pub async fn bootstrap_project_with_context(
+        &self,
+        project: &str,
+        include_general: bool,
+        include_recall: bool,
+        context: memory_common::policy::ResolutionContext,
+    ) -> Result<BootstrapPayload, Error> {
         let rules = self
-            .list_rules(project, include_general, false, None)
+            .resolve_rules(ResolutionRequest {
+                project: project.to_owned(),
+                include_general,
+                shadow_general: true,
+                tags: None,
+                context,
+            })
             .await?;
         let recall_memories = if include_recall {
             self.recall_project(project, None)
@@ -360,6 +396,9 @@ impl MemoryApp {
             project: project.to_owned(),
             project_rules: rules.project_rules,
             recall_memories,
+            canonical: rules.canonical,
+            context: rules.context,
+            options: rules.options,
         })
     }
 
@@ -1011,6 +1050,8 @@ mod tests {
                 revision,
                 delivery_class: DeliveryClass::Contextual,
                 supersedes,
+                selectors: memory_common::policy::PolicySelectors::default(),
+                values: std::collections::BTreeMap::new(),
             }),
             project: "project-a".to_owned(),
             summary: format!("Revision {revision}"),
@@ -1087,6 +1128,174 @@ mod tests {
                 .state,
             PolicyState::Active
         );
+    }
+
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn real_http_rules_and_bootstrap_resolve_scoped_policies(pool: PgPool) {
+        use std::collections::BTreeSet;
+
+        use crate::api::{self, ApiState};
+
+        fn scoped_memory(project: &str, id: u128) -> Memory {
+            let now = Utc::now();
+            Memory {
+                id: Uuid::from_u128(id),
+                policy: None,
+                category: Category::Rule,
+                content: format!("Policy {id}"),
+                created_at: now,
+                embedding: vec![0.0; 1024],
+                project: project.to_owned(),
+                summary: format!("Policy {id}"),
+                tags: vec!["hidden".to_owned()],
+                updated_at: now,
+            }
+        }
+
+        let app = app_with_mock(pool.clone(), spawn_mock_server().await);
+        for (id, key, profile, storage) in [
+            (1, "storage.host", "workstation-host", "persistent-disk"),
+            (
+                2,
+                "storage.ci",
+                "woodpecker-container",
+                "container-local-tmp",
+            ),
+        ] {
+            let mut write = policy_request(None, 1).policy.unwrap();
+            write.policy_key = key.to_owned();
+            write.delivery_class = DeliveryClass::Mandatory;
+            write.selectors.profile = Some(BTreeSet::from([profile.to_owned()]));
+            write
+                .values
+                .insert("build.target".to_owned(), storage.to_owned());
+            crate::policy::publish_new(&pool, &scoped_memory("general", id), &write)
+                .await
+                .unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                api::router(ApiState {
+                    app,
+                    bearer_token: None,
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = |endpoint: &str, pairs: &[(&str, &str)]| {
+            let mut url =
+                reqwest::Url::parse(&format!("http://{addr}/api/v1/projects/app/{endpoint}"))
+                    .unwrap();
+            url.query_pairs_mut().extend_pairs(pairs.iter().copied());
+            url
+        };
+        for (profile, expected_id) in [("workstation-host", 1), ("woodpecker-container", 2)] {
+            for endpoint in ["rules", "bootstrap"] {
+                let context = format!("{{\"profile\":\"{profile}\"}}");
+                let response = client
+                    .get(url(
+                        endpoint,
+                        &[
+                            ("include_general", "false"),
+                            ("include_recall", "false"),
+                            ("tags", "missing"),
+                            ("context", &context),
+                        ],
+                    ))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(
+                    body["canonical"]["mandatory"][0]["id"],
+                    Uuid::from_u128(expected_id).to_string()
+                );
+                assert_eq!(body["canonical"]["effective"].as_array().unwrap().len(), 1);
+            }
+        }
+        for endpoint in ["rules", "bootstrap"] {
+            let response = client
+                .get(url(endpoint, &[("include_recall", "false")]))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], "policy_context_required");
+            assert_eq!(
+                body["error"]["details"]["references"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+
+        let mut incompatible = policy_request(None, 1).policy.unwrap();
+        incompatible.policy_key = "storage.other".to_owned();
+        incompatible.delivery_class = DeliveryClass::Mandatory;
+        incompatible.selectors.profile = Some(BTreeSet::from(["workstation-host".to_owned()]));
+        incompatible
+            .values
+            .insert("build.target".to_owned(), "other".to_owned());
+        crate::policy::publish_new(&pool, &scoped_memory("app", 4), &incompatible)
+            .await
+            .unwrap();
+        let response = client
+            .get(url(
+                "rules",
+                &[
+                    ("context", r#"{"profile":"workstation-host"}"#),
+                    ("tags", "missing"),
+                ],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "policy_value_conflict");
+        assert_eq!(
+            body["error"]["details"]["detail"]["setting_key"],
+            "build.target"
+        );
+
+        incompatible.revision = 2;
+        incompatible.supersedes = Some(Uuid::from_u128(4));
+        incompatible
+            .values
+            .insert("build.target".to_owned(), "persistent-disk".to_owned());
+        crate::policy::publish_new(&pool, &scoped_memory("app", 5), &incompatible)
+            .await
+            .unwrap();
+
+        let mut collision = policy_request(None, 1).policy.unwrap();
+        collision.policy_key = "storage.host".to_owned();
+        collision.selectors.profile = Some(BTreeSet::from(["workstation-host".to_owned()]));
+        crate::policy::publish_new(&pool, &scoped_memory("app", 3), &collision)
+            .await
+            .unwrap();
+        let response = client
+            .get(url(
+                "bootstrap",
+                &[
+                    ("context", r#"{"profile":"workstation-host"}"#),
+                    ("include_recall", "false"),
+                ],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "policy_mandatory_override");
+        assert!(body.get("recall_memories").is_none());
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]

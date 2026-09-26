@@ -2,8 +2,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::policy::ResolutionContext;
+
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+    #[serde(default)]
+    resolution_context: ResolutionContext,
     #[serde(default)]
     api_token: Option<String>,
     #[serde(default = "default_database_url")]
@@ -38,6 +42,7 @@ struct RawConfig {
 impl Default for RawConfig {
     fn default() -> Self {
         Self {
+            resolution_context: ResolutionContext::default(),
             api_token: None,
             database_url: default_database_url(),
             dream_model: default_dream_model(),
@@ -60,6 +65,8 @@ impl Default for RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(from = "RawConfig")]
 pub struct Config {
+    /// Trusted execution assertions bound at MCP startup.
+    pub resolution_context: ResolutionContext,
     pub api_token: Option<String>,
     pub database_url: String,
     pub dream_model: String,
@@ -79,6 +86,7 @@ pub struct Config {
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
         Self {
+            resolution_context: raw.resolution_context,
             api_token: raw.api_token,
             database_url: raw.database_url,
             dream_model: raw.dream_model,
@@ -112,6 +120,10 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&contents)?;
+        config
+            .resolution_context
+            .validate()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
         Ok(config)
     }
 }

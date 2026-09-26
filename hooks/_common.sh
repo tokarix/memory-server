@@ -103,13 +103,26 @@ fetch_bootstrap() {
     local out_file="$2"
     local url
     url="$(memoryd_url)/api/v1/projects/${project}/bootstrap?include_general=true&include_recall=true"
+    local context configured
+    configured="${MEMORY_RESOLUTION_CONTEXT-}"
+    if [ -z "$configured" ]; then
+        configured='{}'
+    fi
+    context="$(printf '%s' "$configured" | jq -ce 'if type == "object" then . else error("execution context must be a JSON object") end')"
 
     local curl_args=()
     while IFS= read -r -d '' arg; do
         curl_args+=("$arg")
     done < <(auth_args)
 
-    curl -fsS "${curl_args[@]}" "$url" >"$out_file"
+    if curl --fail-with-body -sS --get --data-urlencode "context=${context}" \
+        "${curl_args[@]}" "$url" >"$out_file"; then
+        return 0
+    else
+        local status=$?
+        printf 'memory bootstrap failed: %s\n' "$(<"$out_file")" >&2
+        return "$status"
+    fi
 }
 
 extract_text() {

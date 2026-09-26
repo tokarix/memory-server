@@ -1,10 +1,66 @@
 {
   "tools": [
     {
-      "description": "Load all effective rules plus non-rule core recall memories for a project in a single call. Prefer `memory_rules` with `tags` filters for scoped, targeted rule retrieval — this avoids loading irrelevant rules and wasting context.",
+      "description": "Resolve effective rules for the operator-bound execution context, then load non-rule core recall memories. Policy conflicts fail the whole request.",
       "inputSchema": {
+        "$defs": {
+          "ResolutionContext": {
+            "additionalProperties": false,
+            "description": "Trusted execution facts. Missing and explicitly empty sets have different meanings.",
+            "properties": {
+              "language": {
+                "description": "Known languages, including an empty set when none apply.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "phase": {
+                "description": "Current work phase, if asserted by orchestration.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The execution target, such as `workstation-host` or `woodpecker-container`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool": {
+                "description": "Known tools, including an empty set when none apply.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              }
+            },
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ResolutionContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional assertion that must agree with the operator-bound execution context"
+          },
           "include_general": {
             "description": "Whether to include rules stored under the shared `general` project",
             "type": [
@@ -177,12 +233,68 @@
       "name": "memory_recall"
     },
     {
-      "description": "Load durable rule memories for a project, optionally unioned with shared general rules. Targeted worker workflows should use `tags` to exclusively filter rules (e.g. `['lang:rust']` or `['phase:planning']`) when starting targeted worker runs. This avoids polluting context with irrelevant language/phase rules.",
+      "description": "Resolve effective project and mandatory general policies for the operator-bound execution context. Tags filter contextual guidance only; they cannot select a profile or hide mandatory policies.",
       "inputSchema": {
+        "$defs": {
+          "ResolutionContext": {
+            "additionalProperties": false,
+            "description": "Trusted execution facts. Missing and explicitly empty sets have different meanings.",
+            "properties": {
+              "language": {
+                "description": "Known languages, including an empty set when none apply.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "phase": {
+                "description": "Current work phase, if asserted by orchestration.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "profile": {
+                "description": "The execution target, such as `workstation-host` or `woodpecker-container`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool": {
+                "description": "Known tools, including an empty set when none apply.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              }
+            },
+            "type": "object"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ResolutionContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional assertion that must agree with the operator-bound execution context"
+          },
           "include_general": {
-            "description": "Whether to include rules stored under the shared `general` project",
+            "description": "Whether to include optional general contextual guidance; mandatory general policies always participate",
             "type": [
               "boolean",
               "null"
@@ -193,14 +305,14 @@
             "type": "string"
           },
           "shadow_general": {
-            "description": "Deprecated compatibility parameter (default: true); both values include matching general rules until keyed overrides exist",
+            "description": "Permit equal-or-narrower same-key project overrides of contextual general policies",
             "type": [
               "boolean",
               "null"
             ]
           },
           "tags": {
-            "description": "Filter to rules containing all of these exact tags (e.g. `[\"lang:rust\", \"phase:planning\"]`)",
+            "description": "Filter effective contextual rules by ALL-of tags; this cannot select an execution context",
             "items": {
               "type": "string"
             },
@@ -357,6 +469,57 @@
               }
             ]
           },
+          "PolicySelectors": {
+            "additionalProperties": false,
+            "description": "Structured execution domain of a policy. An omitted dimension is universal.",
+            "properties": {
+              "language": {
+                "description": "Source languages accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "phase": {
+                "description": "Work phases accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "profile": {
+                "description": "Execution target profiles accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "tool": {
+                "description": "Tools accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              }
+            },
+            "type": "object"
+          },
           "PolicyWrite": {
             "additionalProperties": false,
             "description": "Complete client supplied metadata for a new policy revision.",
@@ -376,6 +539,11 @@
                 "minimum": 1,
                 "type": "integer"
               },
+              "selectors": {
+                "$ref": "#/$defs/PolicySelectors",
+                "default": {},
+                "description": "Structured execution domain; omitted dimensions match all executions."
+              },
               "supersedes": {
                 "description": "Current active predecessor, omitted for a root revision.",
                 "format": "uuid",
@@ -383,6 +551,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "values": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {},
+                "description": "Exact requirements shared with other effective policies.",
+                "type": "object"
               }
             },
             "required": [
@@ -463,6 +639,57 @@
               }
             ]
           },
+          "PolicySelectors": {
+            "additionalProperties": false,
+            "description": "Structured execution domain of a policy. An omitted dimension is universal.",
+            "properties": {
+              "language": {
+                "description": "Source languages accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "phase": {
+                "description": "Work phases accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "profile": {
+                "description": "Execution target profiles accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              },
+              "tool": {
+                "description": "Tools accepted by this policy.",
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "uniqueItems": true
+              }
+            },
+            "type": "object"
+          },
           "PolicyWrite": {
             "additionalProperties": false,
             "description": "Complete client supplied metadata for a new policy revision.",
@@ -482,6 +709,11 @@
                 "minimum": 1,
                 "type": "integer"
               },
+              "selectors": {
+                "$ref": "#/$defs/PolicySelectors",
+                "default": {},
+                "description": "Structured execution domain; omitted dimensions match all executions."
+              },
               "supersedes": {
                 "description": "Current active predecessor, omitted for a root revision.",
                 "format": "uuid",
@@ -489,6 +721,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "values": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {},
+                "description": "Exact requirements shared with other effective policies.",
+                "type": "object"
               }
             },
             "required": [

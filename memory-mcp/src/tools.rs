@@ -18,7 +18,13 @@ use crate::protocol::{
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
 use memory_common::http_client::HttpMemoryClient;
-use memory_common::policy::{DeliveryClass, PolicyState, PolicyWrite, format_updated_at};
+#[cfg(test)]
+use memory_common::policy::CanonicalPolicySet;
+#[cfg(test)]
+use memory_common::policy::ResolutionOptions;
+use memory_common::policy::{
+    DeliveryClass, PolicyState, PolicyWrite, ResolutionContext, format_updated_at,
+};
 
 #[derive(Clone)]
 pub enum MemoryBackend {
@@ -27,6 +33,7 @@ pub enum MemoryBackend {
 
 pub struct MemoryServer {
     backend: MemoryBackend,
+    context: ResolutionContext,
     pub(crate) tool_router: ToolRouter<Self>,
 }
 
@@ -87,14 +94,16 @@ pub struct RecallParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RulesParams {
-    /// Whether to include rules stored under the shared `general` project
+    /// Whether to include optional general contextual guidance; mandatory general policies always participate
     include_general: Option<bool>,
-    /// Deprecated compatibility parameter (default: true); both values include matching general rules until keyed overrides exist
+    /// Permit equal-or-narrower same-key project overrides of contextual general policies
     shadow_general: Option<bool>,
     /// Project name to load rules for
     project: String,
-    /// Filter to rules containing all of these exact tags (e.g. `["lang:rust", "phase:planning"]`)
+    /// Filter effective contextual rules by ALL-of tags; this cannot select an execution context
     tags: Option<Vec<String>>,
+    /// Optional assertion that must agree with the operator-bound execution context
+    context: Option<ResolutionContext>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -105,6 +114,8 @@ pub struct BootstrapParams {
     include_recall: Option<bool>,
     /// Project name to bootstrap
     project: String,
+    /// Optional assertion that must agree with the operator-bound execution context
+    context: Option<ResolutionContext>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -265,10 +276,56 @@ pub struct UpdateParams {
 impl MemoryServer {
     #[must_use]
     pub fn new(backend: MemoryBackend) -> Self {
+        Self::with_context(backend, ResolutionContext::default())
+    }
+
+    /// Bind operator-supplied execution facts for rules and bootstrap.
+    #[must_use]
+    pub fn with_context(backend: MemoryBackend, context: ResolutionContext) -> Self {
         Self {
             backend,
+            context,
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn assert_context(&self, assertion: Option<&ResolutionContext>) -> Result<(), Error> {
+        let Some(assertion) = assertion else {
+            return Ok(());
+        };
+        assertion.validate().map_err(|message| Error::Policy {
+            code: "policy_context_mismatch".to_owned(),
+            message: message.to_owned(),
+            details: serde_json::json!({"bound_context": self.context, "assertion": assertion}),
+            conflict: false,
+        })?;
+        if assertion
+            .profile
+            .as_ref()
+            .is_some_and(|value| self.context.profile.as_ref() != Some(value))
+            || assertion
+                .phase
+                .as_ref()
+                .is_some_and(|value| self.context.phase.as_ref() != Some(value))
+            || assertion
+                .language
+                .as_ref()
+                .is_some_and(|value| self.context.language.as_ref() != Some(value))
+            || assertion
+                .tool
+                .as_ref()
+                .is_some_and(|value| self.context.tool.as_ref() != Some(value))
+        {
+            return Err(Error::Policy {
+                code: "policy_context_mismatch".to_owned(),
+                message: "Context assertion differs from trusted MCP startup configuration"
+                    .to_owned(),
+                details: serde_json::json!({"bound_context": self.context, "assertion": assertion,
+                    "action": "Configure execution context at MCP startup"}),
+                conflict: false,
+            });
+        }
+        Ok(())
     }
 
     #[tool(description = "Return the memory server version (includes git hash)")]
@@ -411,12 +468,14 @@ impl MemoryServer {
 
     #[tool(
         input_schema = schema_for_type::<RulesParams>(),
-        description = "Load durable rule memories for a project, optionally unioned with shared general rules. Targeted worker workflows should use `tags` to exclusively filter rules (e.g. `['lang:rust']` or `['phase:planning']`) when starting targeted worker runs. This avoids polluting context with irrelevant language/phase rules."
+        description = "Resolve effective project and mandatory general policies for the operator-bound execution context. Tags filter contextual guidance only; they cannot select a profile or hide mandatory policies."
     )]
     async fn memory_rules(
         &self,
         Parameters(params): Parameters<RulesParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.assert_context(params.context.as_ref())
+            .map_err(rmcp::ErrorData::from)?;
         let rules = self
             .backend
             .list_rules(
@@ -434,12 +493,14 @@ impl MemoryServer {
 
     #[tool(
         input_schema = schema_for_type::<BootstrapParams>(),
-        description = "Load all effective rules plus non-rule core recall memories for a project in a single call. Prefer `memory_rules` with `tags` filters for scoped, targeted rule retrieval — this avoids loading irrelevant rules and wasting context."
+        description = "Resolve effective rules for the operator-bound execution context, then load non-rule core recall memories. Policy conflicts fail the whole request."
     )]
     async fn memory_bootstrap(
         &self,
         Parameters(params): Parameters<BootstrapParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.assert_context(params.context.as_ref())
+            .map_err(rmcp::ErrorData::from)?;
         let payload = self
             .backend
             .bootstrap_project(
@@ -951,6 +1012,7 @@ fn format_search_results(results: &[(model::MemorySummary, f64)]) -> String {
 fn format_rule_list(project: &str, rules: &RuleList) -> String {
     let total = rules.general_rules.len() + rules.project_rules.len();
     let mut out = format!("## Rule Set ({total} rules)\nProject: {project}\n");
+    append_resolution_header(&mut out, &rules.context, &rules.canonical);
     append_memory_section(&mut out, "General Rules", &rules.general_rules);
     append_memory_section(&mut out, "Project Rules", &rules.project_rules);
     out
@@ -958,10 +1020,36 @@ fn format_rule_list(project: &str, rules: &RuleList) -> String {
 
 fn format_bootstrap(payload: &BootstrapPayload) -> String {
     let mut out = format!("## Bootstrap\nProject: {}\n", payload.project);
+    append_resolution_header(&mut out, &payload.context, &payload.canonical);
     append_memory_section(&mut out, "General Rules", &payload.general_rules);
     append_memory_section(&mut out, "Project Rules", &payload.project_rules);
     append_memory_section(&mut out, "Core Recall", &payload.recall_memories);
     out
+}
+
+fn append_resolution_header(
+    out: &mut String,
+    context: &ResolutionContext,
+    canonical: &memory_common::policy::CanonicalPolicySet,
+) {
+    let _ = writeln!(out, "Context: {}", serde_json::json!(context));
+    let _ = writeln!(out, "Canonical policy schema: {}", canonical.schema_version);
+    for (index, rule) in canonical.effective.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "Canonical order {}: {} ({})",
+            index + 1,
+            rule.id,
+            rule.project
+        );
+        if let Some(overridden) = &rule.overrides {
+            let _ = writeln!(
+                out,
+                "  Overrides: {} {}@{} ({})",
+                overridden.project, overridden.policy_key, overridden.revision, overridden.id
+            );
+        }
+    }
 }
 
 fn append_memory_section(out: &mut String, title: &str, memories: &[model::MemorySummary]) {
@@ -1038,8 +1126,11 @@ fn rule_metadata(memory: &model::MemorySummary, include_id: bool) -> String {
                 .map_or_else(|| "null".to_owned(), |id| id.to_string());
             let _ = write!(
                 output,
-                "\npolicy_key: {}\nrevision: {}\ndelivery_class: {delivery}\nstate: {state}\nsupersedes: {predecessor}",
-                metadata.policy_key, metadata.revision,
+                "\npolicy_key: {}\nrevision: {}\ndelivery_class: {delivery}\nstate: {state}\nsupersedes: {predecessor}\nselectors: {}\nvalues: {}",
+                metadata.policy_key,
+                metadata.revision,
+                serde_json::json!(metadata.selectors),
+                serde_json::json!(metadata.values),
             );
         }
     }
@@ -1240,6 +1331,9 @@ mod tests {
             &RuleList {
                 general_rules: vec![general],
                 project_rules: vec![project],
+                canonical: CanonicalPolicySet::default(),
+                context: ResolutionContext::default(),
+                options: ResolutionOptions::default(),
             },
         );
         assert!(output.contains("## Rule Set (2 rules)"));
@@ -1256,6 +1350,9 @@ mod tests {
             project: "test".to_owned(),
             project_rules: vec![sample_summary()],
             recall_memories: vec![sample_summary_with_id(Uuid::from_u128(2))],
+            canonical: CanonicalPolicySet::default(),
+            context: ResolutionContext::default(),
+            options: ResolutionOptions::default(),
         });
         assert!(output.contains("## Bootstrap"));
         assert!(output.contains("### General Rules (0)"));
@@ -1353,6 +1450,7 @@ mod tests {
                 shadow_general: Some(true),
                 project: "memory-server".to_owned(),
                 tags: None,
+                context: None,
             }))
             .await
             .unwrap();
@@ -1366,6 +1464,7 @@ mod tests {
                 include_general: Some(true),
                 include_recall: Some(true),
                 project: "memory-server".to_owned(),
+                context: None,
             }))
             .await
             .unwrap();
@@ -1464,6 +1563,9 @@ mod tests {
                 updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
             }],
             project_rules,
+            canonical: CanonicalPolicySet::default(),
+            context: ResolutionContext::default(),
+            options: ResolutionOptions::default(),
         })
     }
 
@@ -1497,6 +1599,9 @@ mod tests {
                 tags: vec!["decision".to_owned()],
                 updated_at: Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
             }],
+            canonical: CanonicalPolicySet::default(),
+            context: ResolutionContext::default(),
+            options: ResolutionOptions::default(),
         })
     }
 
