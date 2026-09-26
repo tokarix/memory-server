@@ -21,20 +21,27 @@ fn run() -> memory_hooks::Result<()> {
         return Ok(());
     }
     let mut config = None;
+    let mut cwd = None;
     while let Some(option) = args.next() {
         let value = args
             .next()
             .ok_or(memory_hooks::Error::ConfigInvalid("option value"))?;
         if option == "--config" && config.is_none() {
             config = Some(value);
+        } else if option == "--cwd" && cwd.is_none() {
+            cwd = Some(value);
         } else {
             return Err(memory_hooks::Error::ConfigInvalid("option"));
         }
     }
     let config = config.ok_or(memory_hooks::Error::ConfigInvalid("--config"))?;
-    let _trusted = TrustedHooksConfig::load(Path::new(&config))?;
-    if command == "check-config" {
+    let trusted = TrustedHooksConfig::load(Path::new(&config))?;
+    if command == "check-config" && cwd.is_none() {
         println!("{{\"version\":1,\"status\":\"valid\"}}");
+    } else if command == "resolve" {
+        let cwd = cwd.ok_or(memory_hooks::Error::ConfigInvalid("--cwd"))?;
+        let binding = trusted.resolve(Path::new(&cwd))?;
+        println!("{}", binding.public_json()?);
     } else {
         return Err(memory_hooks::Error::ConfigInvalid("command"));
     }

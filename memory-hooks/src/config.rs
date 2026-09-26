@@ -37,10 +37,6 @@ pub(crate) enum BindingIdentity {
 }
 
 /// Validated operator configuration; there is no unchecked public constructor.
-#[expect(
-    dead_code,
-    reason = "identity and state consumers arrive in the next commits"
-)]
 pub struct TrustedHooksConfig {
     pub(crate) git: PathBuf,
     pub(crate) config_path: PathBuf,
