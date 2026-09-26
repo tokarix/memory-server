@@ -493,6 +493,11 @@ Notes:
   from `MEMORY_SERVER_CONFIG` if you want to point at another config file.
 - Hook state is cached under `/tmp/memory-server-hooks/<external-session-id>/`.
 
+The separate [`memory-hooks` trust foundation](docs/hooks-trust.md) provides
+validated configuration, canonical repository bindings, and private state for
+future adapters. It is not wired into the scripts above. Its configuration and
+state are separate from the legacy hook files.
+
 For durable instruction enforcement, prefer the following flow over
 duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
 
