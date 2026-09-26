@@ -44,8 +44,10 @@ steps:
     environment:
       CARGO_TARGET_DIR: /tmp/target
       DATABASE_URL: postgres://tokarix:password@postgres:5432/memory_server_test
+      MEMORY_HOOKS_TEST_ROOT: /dev/shm
     commands:
-      - apt-get update && apt-get install -y g++ postgresql-client
+      - apt-get update && apt-get install -y acl g++ git postgresql-client
+      - test "$(stat -f -c %T /dev/shm)" = tmpfs && chmod 0700 /dev/shm
       - |
         timeout 30s bash -c 'until pg_isready -h postgres -U tokarix -d memory_server_test; do echo "Waiting for postgres..."; sleep 1; done'
       - cargo test --all-features --all-targets

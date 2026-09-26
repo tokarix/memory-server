@@ -1,0 +1,38 @@
+# Version-one configuration for the unwired memory-hooks foundation.
+# Install this file outside every configured checkout and directory scope.
+# The managed launcher must supply its fixed absolute path with --config.
+schema_version = 1
+state_root = "/var/lib/memory-hooks/state"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "workstation-host"
+phase = "implementing"
+language = ["rust"]
+tool = []
+
+# A bare repository with registered linked worktrees has no primary checkout.
+[[bindings]]
+kind = "git"
+label = "bare-backed"
+common_dir = "/srv/git/another.git"
+bare_backed = true
+guardrails_project = "another"
+[bindings.context]
+profile = "workstation-host"
+
+# Use this only for locations positively outside a Git checkout.
+[[bindings]]
+kind = "directory"
+label = "plain-documents"
+root = "/srv/documents"
+allow_subdirectories = false
+guardrails_project = "documents"
+[bindings.context]
+profile = "workstation-host"

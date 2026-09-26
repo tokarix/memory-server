@@ -1,0 +1,19 @@
+[package]
+name = "memory-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+libc = "0.2.189"
+memory-common = { version = "0.1.0", path = "../memory-common" }
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
