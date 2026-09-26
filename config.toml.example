@@ -1,5 +1,7 @@
 http_bind = "127.0.0.1:8080"
 memoryd_url = "http://127.0.0.1:8080"
+# Required for memory-mcp: explicit work project for mandatory guardrails.
+guardrails_project = "memory-server"
 # MCP execution target, supplied by the operator; omit for unknown context.
 # Host example: resolution_context = { profile = "workstation-host", phase = "implementing", language = ["rust"] }
 # CI example: resolution_context = { profile = "woodpecker-container", language = ["rust"] }

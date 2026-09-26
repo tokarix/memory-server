@@ -7,6 +7,8 @@ use crate::policy::ResolutionContext;
 #[derive(Debug, Deserialize)]
 struct RawConfig {
     #[serde(default)]
+    guardrails_project: Option<String>,
+    #[serde(default)]
     resolution_context: ResolutionContext,
     #[serde(default)]
     api_token: Option<String>,
@@ -42,6 +44,7 @@ struct RawConfig {
 impl Default for RawConfig {
     fn default() -> Self {
         Self {
+            guardrails_project: None,
             resolution_context: ResolutionContext::default(),
             api_token: None,
             database_url: default_database_url(),
@@ -65,6 +68,8 @@ impl Default for RawConfig {
 #[derive(Debug, Deserialize)]
 #[serde(from = "RawConfig")]
 pub struct Config {
+    /// Explicit work project for mandatory guardrail publication.
+    pub guardrails_project: Option<String>,
     /// Trusted execution assertions bound at MCP startup.
     pub resolution_context: ResolutionContext,
     pub api_token: Option<String>,
@@ -86,6 +91,7 @@ pub struct Config {
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
         Self {
+            guardrails_project: raw.guardrails_project,
             resolution_context: raw.resolution_context,
             api_token: raw.api_token,
             database_url: raw.database_url,

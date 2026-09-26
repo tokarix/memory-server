@@ -1,12 +1,16 @@
+use std::borrow::Cow;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use rmcp::handler::server::common::schema_for_type;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{CallToolResult, ContentBlock, ListToolsResult, MetaObject, Tool};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 use crate::error::Error;
@@ -17,9 +21,12 @@ use crate::protocol::{
     ListMemoriesRequest, RuleList, SearchMemoriesRequest, SearchOutcome, StoreMemoryRequest,
     StoreSessionLogRequest, UpdateMemoryRequest,
 };
+use memory_common::guardrails::{GuardrailPack, MAX_TOOLS_LIST_BYTES};
 use memory_common::http_client::HttpMemoryClient;
 #[cfg(test)]
 use memory_common::policy::CanonicalPolicySet;
+#[cfg(test)]
+use memory_common::policy::PolicySelectors;
 #[cfg(test)]
 use memory_common::policy::ResolutionOptions;
 use memory_common::policy::{
@@ -34,7 +41,50 @@ pub enum MemoryBackend {
 pub struct MemoryServer {
     backend: MemoryBackend,
     context: ResolutionContext,
+    snapshot: GuardrailPack,
+    publication: String,
+    descriptors: Vec<Tool>,
+    invalidation: Mutex<Option<GuardrailFailure>>,
     pub(crate) tool_router: ToolRouter<Self>,
+}
+
+#[derive(Clone)]
+struct GuardrailFailure {
+    code: String,
+    message: String,
+    details: serde_json::Value,
+}
+
+impl GuardrailFailure {
+    fn from_error(error: Error) -> Self {
+        match error {
+            Error::Policy {
+                code,
+                message,
+                details,
+                ..
+            } => Self {
+                code,
+                message,
+                details,
+            },
+            other => Self {
+                code: "guardrails_transport".to_owned(),
+                message: other.to_string(),
+                details: serde_json::json!({"action": "Reconnect after repairing the guardrail endpoint"}),
+            },
+        }
+    }
+
+    fn into_mcp(self) -> rmcp::ErrorData {
+        Error::Policy {
+            code: self.code,
+            message: self.message,
+            details: self.details,
+            conflict: false,
+        }
+        .into()
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -274,19 +324,190 @@ pub struct UpdateParams {
 // Newer SDK input-schema generation strips that metadata.
 #[tool_router]
 impl MemoryServer {
+    /// Acquire and prepare a complete immutable connection snapshot before serving.
+    ///
+    /// # Errors
+    /// Fails closed if the endpoint, scope, pack, or descriptor budget is invalid.
+    pub async fn prepare(
+        backend: MemoryBackend,
+        project: &str,
+        context: ResolutionContext,
+    ) -> Result<Self, Error> {
+        if project.trim().is_empty() || project != project.trim() {
+            return Err(Error::Policy {
+                code: "guardrails_scope_invalid".to_owned(),
+                message: "guardrails_project must be a nonblank explicit project".to_owned(),
+                details: serde_json::json!({"project": project}),
+                conflict: false,
+            });
+        }
+        let pack = backend.guardrails(project).await?;
+        pack.validate_for(project, &context)?;
+        Self::from_snapshot(backend, context, pack)
+    }
+
+    fn from_snapshot(
+        backend: MemoryBackend,
+        context: ResolutionContext,
+        snapshot: GuardrailPack,
+    ) -> Result<Self, Error> {
+        let publication = snapshot.publication()?;
+        let mut server = Self {
+            backend,
+            context,
+            snapshot,
+            publication,
+            descriptors: Vec::new(),
+            invalidation: Mutex::new(None),
+            tool_router: Self::tool_router(),
+        };
+        server.descriptors = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|mut tool| {
+                let original = tool
+                    .description
+                    .take()
+                    .map_or_else(String::new, Cow::into_owned);
+                tool.description = Some(Cow::Owned(format!(
+                    "{}\n\n{}",
+                    server.publication, original
+                )));
+                let mut meta = MetaObject::new();
+                meta.0.insert(
+                    "memory.server/guardrailsDigest".to_owned(),
+                    serde_json::json!(server.snapshot.digest),
+                );
+                meta.0.insert(
+                    "memory.server/guardrailsProject".to_owned(),
+                    serde_json::json!(server.snapshot.project),
+                );
+                meta.0.insert(
+                    "memory.server/guardrailsSchemaVersion".to_owned(),
+                    serde_json::json!(server.snapshot.schema_version),
+                );
+                tool.meta = Some(meta);
+                tool
+            })
+            .collect();
+        let size = serde_json::to_vec(&ListToolsResult::with_all_items(server.descriptors.clone()))
+            .map_err(|error| Error::Transport(format!("serialize tool descriptors: {error}")))?
+            .len();
+        if size > MAX_TOOLS_LIST_BYTES {
+            return Err(Error::Policy {
+                code: "guardrails_too_large".to_owned(),
+                message: "tools/list exceeds 524288 bytes".to_owned(),
+                details: serde_json::json!({"actual": size, "allowed": MAX_TOOLS_LIST_BYTES}),
+                conflict: false,
+            });
+        }
+        Ok(server)
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub fn new(backend: MemoryBackend) -> Self {
         Self::with_context(backend, ResolutionContext::default())
     }
 
-    /// Bind operator-supplied execution facts for rules and bootstrap.
+    /// Build an explicit prepared fixture for unit tests.
+    ///
+    /// # Panics
+    /// Panics if the fixture context is malformed.
+    #[cfg(test)]
     #[must_use]
     pub fn with_context(backend: MemoryBackend, context: ResolutionContext) -> Self {
-        Self {
-            backend,
-            context,
-            tool_router: Self::tool_router(),
+        let snapshot = GuardrailPack::new(
+            "fixture".to_owned(),
+            context.clone(),
+            1,
+            vec![memory_common::policy::CanonicalRule {
+                project: "general".to_owned(),
+                id: Uuid::from_u128(1),
+                policy_key: Some("fixture.guardrail".to_owned()),
+                revision: Some(1),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors::default(),
+                values: BTreeMap::default(),
+                content: "Fixture mandatory guardrail".to_owned(),
+                overrides: None,
+            }],
+        )
+        .unwrap();
+        Self::from_snapshot(backend, context, snapshot).unwrap()
+    }
+
+    /// Read the prepared instructions without network I/O.
+    #[must_use]
+    pub fn instructions(&self) -> &str {
+        &self.publication
+    }
+
+    /// Return the prepared immutable guardrail pack.
+    #[must_use]
+    pub fn guardrail_pack(&self) -> &GuardrailPack {
+        &self.snapshot
+    }
+
+    /// Return one prepared descriptor by name.
+    #[must_use]
+    pub fn descriptor(&self, name: &str) -> Option<Tool> {
+        self.descriptors
+            .iter()
+            .find(|tool| tool.name == name)
+            .cloned()
+    }
+
+    /// Revalidate and return all prepared descriptors.
+    ///
+    /// # Errors
+    /// Invalidates this connection on any changed or failed live resolution.
+    pub async fn list_descriptors(&self) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
+        Ok(ListToolsResult::with_all_items(self.descriptors.clone()))
+    }
+
+    async fn check_live(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<GuardrailFailure>>, rmcp::ErrorData> {
+        let mut guard = self.invalidation.lock().await;
+        if let Some(failure) = guard.as_ref() {
+            return Err(failure.clone().into_mcp());
         }
+        let result = self.backend.guardrails(&self.snapshot.project).await;
+        match result {
+            Ok(pack) if pack == self.snapshot => Ok(guard),
+            Ok(pack) => {
+                let failure = GuardrailFailure {
+                    code: "guardrails_changed".to_owned(),
+                    message:
+                        "mandatory guardrails changed; reconnect to receive the new instructions"
+                            .to_owned(),
+                    details: serde_json::json!({"old_digest": self.snapshot.digest, "new_digest": pack.digest,
+                        "project": self.snapshot.project, "context": self.context, "action": "Reconnect the MCP client"}),
+                };
+                *guard = Some(failure.clone());
+                Err(failure.into_mcp())
+            }
+            Err(error) => {
+                let failure = GuardrailFailure::from_error(error);
+                *guard = Some(failure.clone());
+                Err(failure.into_mcp())
+            }
+        }
+    }
+
+    fn invalidate_after_write(
+        guard: &mut MutexGuard<'_, Option<GuardrailFailure>>,
+        snapshot: &GuardrailPack,
+    ) {
+        **guard = Some(GuardrailFailure {
+            code: "guardrails_changed".to_owned(),
+            message: "a policy may have changed through this connection; reconnect".to_owned(),
+            details: serde_json::json!({"old_digest": snapshot.digest, "project": snapshot.project,
+                "context": snapshot.context, "action": "Reconnect the MCP client"}),
+        });
     }
 
     fn assert_context(&self, assertion: Option<&ResolutionContext>) -> Result<(), Error> {
@@ -328,6 +549,15 @@ impl MemoryServer {
         Ok(())
     }
 
+    #[tool(description = "Return the exact mandatory guardrail pack bound at MCP startup")]
+    async fn memory_guardrails(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
+        let text = serde_json::to_string(&self.snapshot).map_err(|error| {
+            rmcp::ErrorData::from(Error::Transport(format!("serialize guardrails: {error}")))
+        })?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
     #[tool(description = "Return the memory server version (includes git hash)")]
     async fn memory_server_version(&self) -> Result<CallToolResult, rmcp::ErrorData> {
         Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -346,12 +576,14 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<DeleteParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut guard = self.check_live().await?;
         let deleted = self
             .backend
             .delete_memory(params.id)
             .await
             .map_err(rmcp::ErrorData::from)?;
         if deleted {
+            Self::invalidate_after_write(&mut guard, &self.snapshot);
             Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Deleted memory {}",
                 params.id
@@ -567,6 +799,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<StoreParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let mut guard = self.check_live().await?;
+        let is_rule = params.category == Category::Rule;
         let memory = self
             .backend
             .store_memory(StoreMemoryRequest {
@@ -579,6 +813,9 @@ impl MemoryServer {
             })
             .await
             .map_err(rmcp::ErrorData::from)?;
+        if is_rule {
+            Self::invalidate_after_write(&mut guard, &self.snapshot);
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Stored memory {} ({}): {}",
             memory.id, memory.category, memory.summary
@@ -593,7 +830,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        if self
+        let mut guard = self.check_live().await?;
+        if let Some(memory) = self
             .backend
             .update_memory(UpdateMemoryRequest {
                 content: params.content,
@@ -605,8 +843,10 @@ impl MemoryServer {
             })
             .await
             .map_err(rmcp::ErrorData::from)?
-            .is_some()
         {
+            if memory.category == Category::Rule {
+                Self::invalidate_after_write(&mut guard, &self.snapshot);
+            }
             Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "Updated memory {}",
                 params.id
@@ -627,6 +867,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SessionLogStoreParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
         let chunk_count = self
             .backend
             .store_session_log(StoreSessionLogRequest {
@@ -653,6 +894,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SessionStartParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
         let session = self
             .backend
             .create_session(CreateSessionRequest {
@@ -677,6 +919,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SessionMessageParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
         let message = self
             .backend
             .append_session_message(AppendSessionMessageRequest {
@@ -703,6 +946,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SessionFinalizeParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
         let chunk_count = self
             .backend
             .finalize_session(FinalizeSessionRequest {
@@ -755,6 +999,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SubmitReviewParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let _guard = self.check_live().await?;
         let review = self
             .backend
             .submit_review(
@@ -780,6 +1025,12 @@ impl MemoryServer {
 }
 
 impl MemoryBackend {
+    async fn guardrails(&self, project: &str) -> Result<GuardrailPack, Error> {
+        match self {
+            Self::Http(client) => client.guardrails(project).await,
+        }
+    }
+
     async fn version(&self) -> Result<String, Error> {
         match self {
             Self::Http(client) => client.version().await,
@@ -1385,6 +1636,10 @@ mod tests {
                 get(stub_list_memories),
             )
             .route("/api/v1/projects/{project}/rules", get(stub_list_rules))
+            .route(
+                "/api/v1/projects/{project}/guardrails",
+                get(stub_guardrails),
+            )
             .route("/api/v1/projects/{project}/bootstrap", get(stub_bootstrap))
             .with_state(state.clone());
         let _server = tokio::spawn(async move {
@@ -1478,6 +1733,28 @@ mod tests {
             status: "ok".to_owned(),
             version: "test-version".to_owned(),
         })
+    }
+
+    async fn stub_guardrails() -> Json<GuardrailPack> {
+        Json(
+            GuardrailPack::new(
+                "fixture".to_owned(),
+                ResolutionContext::default(),
+                1,
+                vec![memory_common::policy::CanonicalRule {
+                    project: "general".to_owned(),
+                    id: Uuid::from_u128(1),
+                    policy_key: Some("fixture.guardrail".to_owned()),
+                    revision: Some(1),
+                    delivery_class: Some(DeliveryClass::Mandatory),
+                    selectors: PolicySelectors::default(),
+                    values: BTreeMap::default(),
+                    content: "Fixture mandatory guardrail".to_owned(),
+                    overrides: None,
+                }],
+            )
+            .unwrap(),
+        )
     }
 
     async fn stub_store_memory(

@@ -124,6 +124,7 @@ Configuration fields:
 | `database_url` | `postgres://memory:memory@localhost/memory` | PostgreSQL connection string |
 | `http_bind` | `127.0.0.1:8080` | Bind address for `memoryd` |
 | `memoryd_url` | `http://127.0.0.1:8080` | Base URL used by `memory-mcp` |
+| `guardrails_project` | required for MCP | Explicit work project for mandatory guardrails; use `general` for a general-only session |
 | `ollama_url` | `http://localhost:11434` | Ollama base URL |
 | `embedding_model` | `bge-m3` | Embedding model |
 | `embedding_tokenizer_repo` | `None` | HF hub repo (e.g. `BAAI/bge-m3`) to download tokenizer from for guided truncation |
@@ -165,11 +166,17 @@ Minimal `memory-mcp` config:
 
 ```toml
 memoryd_url = "http://127.0.0.1:8080"
+guardrails_project = "memory-server"
+resolution_context = { profile = "workstation-host", phase = "implementing", language = ["rust"] }
 # api_token = "replace-me"
 ```
 
-`memoryd` uses the full server config shown earlier. `memory-mcp` only
-needs `memoryd_url` and, if enabled on the server, `api_token`.
+`memoryd` uses the full server config shown earlier. `memory-mcp` also
+requires an explicit `guardrails_project` and a trusted context sufficient to
+resolve the policies in that project. Startup fails if the daemon cannot
+deliver a nonempty mandatory pack. Configure `api_token` if enabled on the
+daemon. See [guardrail delivery](docs/guardrail-delivery.md) for rollout and
+reconnection behavior.
 
 ### Codex
 

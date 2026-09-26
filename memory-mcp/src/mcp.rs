@@ -17,10 +17,15 @@ pub async fn run_http(config_path: Option<&str>) -> Result<(), Box<dyn std::erro
         None => config::Config::default(),
     };
 
+    let project = config.guardrails_project.as_deref().filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "guardrails_project must select a work project (use 'general' for a general-only session)")
+    })?;
     let context = config.resolution_context;
     let client =
         HttpMemoryClient::new(&config.memoryd_url, config.api_token)?.with_context(context.clone());
-    let server = tools::MemoryServer::with_context(tools::MemoryBackend::Http(client), context);
+    let server = tools::MemoryServer::prepare(tools::MemoryBackend::Http(client), project, context)
+        .await
+        .inspect_err(|error| tracing::error!("guardrail startup failed: {error:#?}"))?;
     start_stdio(server).await
 }
 

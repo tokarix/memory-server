@@ -1,5 +1,11 @@
 {
   "after_eof": [],
-  "http": [],
+  "http": [
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/guardrails?context=%7B%7D"
+    }
+  ],
   "transcript": []
 }

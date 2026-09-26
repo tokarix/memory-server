@@ -2,19 +2,19 @@
 
 use std::borrow::Cow;
 
+use rmcp::ServerHandler;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, ProtocolVersion, ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
-use rmcp::{ServerHandler, tool_handler};
 
 pub mod mcp;
 pub mod tools;
 
 pub use memory_common::{config, error, model, protocol};
 
-#[tool_handler(router = self.tool_router)]
 impl ServerHandler for tools::MemoryServer {
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         // Bound initialization, discovery and inline request negotiation together.
@@ -26,28 +26,57 @@ impl ServerHandler for tools::MemoryServer {
         request: CallToolRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        let structured = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2025_06_18);
         let context = ToolCallContext::new(self, request, context);
-        let name = context.name();
+        let name = context.name().to_owned();
         // Preserve 1.5's protocol errors for invalid arguments. ToolRouter::call
         // now converts these into isError results; domain isError results must
         // remain untouched. get() also rejects disabled routes.
-        if self.tool_router.get(name).is_none() {
+        if self.tool_router.get(&name).is_none() {
             return Err(rmcp::ErrorData::invalid_params("tool not found", None));
         }
         let route = self
             .tool_router
             .map
-            .get(name)
+            .get(name.as_str())
             .ok_or_else(|| rmcp::ErrorData::invalid_params("tool not found", None))?;
-        (route.call)(context).await
+        let mut response = (route.call)(context).await?;
+        if name == "memory_guardrails"
+            && structured
+            && let CallToolResponse::Complete(result) = &mut response
+        {
+            result.structured_content = Some(serde_json::to_value(self.guardrail_pack()).map_err(
+                |error| {
+                    rmcp::ErrorData::from(error::Error::Transport(format!(
+                        "serialize guardrails: {error}"
+                    )))
+                },
+            )?);
+        }
+        Ok(response)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        self.list_descriptors().await
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.descriptor(name)
     }
 
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_11_25)
-            .with_instructions(
-                "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
-            )
+            .with_instructions(format!(
+                "{}\n\nContextual guidance: use `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags. Use `memory_search` for retrieval, `memory_neighbors` for related memories, and `review_queue`/`review_submit` for review work.",
+                self.instructions()
+            ))
             .with_server_info(
                 rmcp::model::Implementation::new(
                     "memory-server",

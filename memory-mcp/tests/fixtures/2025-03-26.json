@@ -4,6 +4,16 @@
     {
       "body": null,
       "method": "GET",
+      "uri": "/api/v1/projects/fixture/guardrails?context=%7B%7D"
+    },
+    {
+      "body": null,
+      "method": "GET",
+      "uri": "/api/v1/projects/fixture/guardrails?context=%7B%7D"
+    },
+    {
+      "body": null,
+      "method": "GET",
       "uri": "/api/v1/health"
     },
     {
@@ -44,7 +54,7 @@
           "capabilities": {
             "tools": {}
           },
-          "instructions": "Semantic memory server: store, search, list, update, and delete memories.\n\nUse `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags to load scoped project rules. Use `memory_search` as the default retrieval entrypoint; it performs graph expansion and may fall back to session-log search. Query expansion and semantic reranking are disabled by default. Use `memory_neighbors` to follow up on promising hits. For cross-project search, use `include_general=true` or `cross_project=true` with `project_allowlist` when appropriate. Use `review_queue` to find `review-needed` items and `review_submit` to record decisions.",
+          "instructions": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nContextual guidance: use `memory_rules(tags=...)` with precise `lang:*` and `phase:*` tags. Use `memory_search` for retrieval, `memory_neighbors` for related memories, and `review_queue`/`review_submit` for review work.",
           "protocolVersion": "2025-03-26",
           "serverInfo": {
             "name": "memory-server",

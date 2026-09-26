@@ -1,7 +1,12 @@
 {
   "tools": [
     {
-      "description": "Resolve effective rules for the operator-bound execution context, then load non-rule core recall memories. Policy conflicts fail the whole request.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nResolve effective rules for the operator-bound execution context, then load non-rule core recall memories. Policy conflicts fail the whole request.",
       "inputSchema": {
         "$defs": {
           "ResolutionContext": {
@@ -89,7 +94,12 @@
       "name": "memory_bootstrap"
     },
     {
-      "description": "Delete a memory by UUID",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nDelete a memory by UUID",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -108,7 +118,12 @@
       "name": "memory_delete"
     },
     {
-      "description": "Retrieve a single memory by UUID",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nRetrieve a single memory by UUID",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -127,7 +142,25 @@
       "name": "memory_get"
     },
     {
-      "description": "Browse memories by project with optional category filter, paginated",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nReturn the exact mandatory guardrail pack bound at MCP startup",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "memory_guardrails"
+    },
+    {
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nBrowse memories by project with optional category filter, paginated",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -180,7 +213,12 @@
       "name": "memory_list"
     },
     {
-      "description": "The follow-up inspection tool after a promising memory_search or memory_get result. Exposes graph-connected context around a known memory, useful for tracing related decisions, plans, fixes, or rules.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nThe follow-up inspection tool after a promising memory_search or memory_get result. Exposes graph-connected context around a known memory, useful for tracing related decisions, plans, fixes, or rules.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -208,7 +246,12 @@
       "name": "memory_neighbors"
     },
     {
-      "description": "Recall core memories (importance >= 0.7) for a project at session start",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nRecall core memories (importance >= 0.7) for a project at session start",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -233,7 +276,12 @@
       "name": "memory_recall"
     },
     {
-      "description": "Resolve effective project and mandatory general policies for the operator-bound execution context. Tags filter contextual guidance only; they cannot select a profile or hide mandatory policies.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nResolve effective project and mandatory general policies for the operator-bound execution context. Tags filter contextual guidance only; they cannot select a profile or hide mandatory policies.",
       "inputSchema": {
         "$defs": {
           "ResolutionContext": {
@@ -331,7 +379,12 @@
       "name": "memory_rules"
     },
     {
-      "description": "The default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency. Targeted worker workflows should use `tags` to exclusively filter search hits.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nThe default retrieval entrypoint. Performs hybrid durable-memory search, expands via the memory graph, and may fall back to session-log search when no durable memories match. Query expansion and semantic reranking are opt-in (disabled by default) and can be requested for higher quality at the cost of latency. Targeted worker workflows should use `tags` to exclusively filter search hits.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -443,7 +496,12 @@
       "name": "memory_search"
     },
     {
-      "description": "Return the memory server version (includes git hash)",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nReturn the memory server version (includes git hash)",
       "inputSchema": {
         "properties": {},
         "type": "object"
@@ -451,7 +509,12 @@
       "name": "memory_server_version"
     },
     {
-      "description": "Store a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nStore a new memory. Each memory should cover one concept — prefer creating focused memories over expanding existing ones. Mentioning a UUID in content or using structural tags (plan:<uuid>, reviewed-item:<uuid>) creates graph edges at write time. Shared topical tags and embedding similarity create edges during maintenance.",
       "inputSchema": {
         "$defs": {
           "DeliveryClass": {
@@ -621,7 +684,12 @@
       "name": "memory_store"
     },
     {
-      "description": "Update a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nUpdate a memory's content/summary/tags (re-embeds if text changes). Use for corrections or refinements to the same concept — if the new information is a distinct concept, store a new memory instead.",
       "inputSchema": {
         "$defs": {
           "DeliveryClass": {
@@ -799,7 +867,12 @@
       "name": "memory_update"
     },
     {
-      "description": "Find pending review work by listing memories tagged review-needed, optionally narrowed by category.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nFind pending review work by listing memories tagged review-needed, optionally narrowed by category.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -833,7 +906,12 @@
       "name": "review_queue"
     },
     {
-      "description": "Record the review decision and complete the handoff by marking the original item reviewed.",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nRecord the review decision and complete the handoff by marking the original item reviewed.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -874,7 +952,12 @@
       "name": "review_submit"
     },
     {
-      "description": "Finalize a normalized session into searchable session-log chunks",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nFinalize a normalized session into searchable session-log chunks",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -900,7 +983,12 @@
       "name": "session_finalize"
     },
     {
-      "description": "Store a session log transcript for searchable archival",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nStore a session log transcript for searchable archival",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -942,7 +1030,12 @@
       "name": "session_log_store"
     },
     {
-      "description": "Append one message or tool event to a normalized shared session",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nAppend one message or tool event to a normalized shared session",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
@@ -992,7 +1085,12 @@
       "name": "session_message_append"
     },
     {
-      "description": "Create or upsert a normalized shared session for cross-agent capture",
+      "_meta": {
+        "memory.server/guardrailsDigest": "sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8",
+        "memory.server/guardrailsProject": "fixture",
+        "memory.server/guardrailsSchemaVersion": 1
+      },
+      "description": "Mandatory guardrails apply before state-changing work.\nWork project: fixture\nContext: {}\nDigest: sha256:489318300019086f240e903709d1e810653ef9e4ebc50689b6f769f4c497d8a8\nPolicy 1: {\"delivery_class\":\"mandatory\",\"id\":\"00000000-0000-0000-0000-00000000000a\",\"overrides\":null,\"policy_key\":\"fixture.mandatory\",\"project\":\"general\",\"revision\":1,\"selectors\":{},\"values\":{}}\nExact content (61 UTF-8 bytes):\nUse the exact mandatory fixture policy.\nKeep its text intact.\n\n\nCreate or upsert a normalized shared session for cross-agent capture",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
