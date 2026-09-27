@@ -9,6 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -366,6 +367,127 @@ fn repeated_supported_starts_fetch_and_commit_distinct_generations() {
             assert!(!request.contains("/recall"));
             assert!(!request.contains("/bootstrap"));
             assert!(!request.contains("/sessions"));
+        }
+    }
+}
+
+fn delayed_response(
+    listener: TcpListener,
+    body: Vec<u8>,
+    arrived: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "first fetch reached daemon");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("HTTP accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("request timeout");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let count = stream.read(&mut chunk).expect("request read");
+            assert!(count > 0, "complete request");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        arrived.send(()).expect("arrival signal");
+        release
+            .recv_timeout(Duration::from_secs(8))
+            .expect("release signal");
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .expect("response header");
+        stream.write_all(&body).expect("response body");
+        String::from_utf8(request).expect("request UTF-8")
+    })
+}
+
+#[test]
+fn older_fetch_cannot_restore_or_replace_a_newer_same_session_claim() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        for newer_emits in [false, true] {
+            let root = private_fixture();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("address").port();
+            let (installation, id, cwd) = configured(root.path(), adapter, port);
+            let expected = pack(&installation, &cwd);
+            let (arrived_tx, arrived_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let first_listener = listener.try_clone().expect("listener clone");
+            let first_body = serde_json::to_vec(&expected).expect("pack JSON");
+            let first_server = delayed_response(first_listener, first_body, arrived_tx, release_rx);
+            let first_cwd = cwd.clone();
+            let first = thread::spawn(move || invoke(id, &first_cwd, adapter, "startup"));
+            arrived_rx
+                .recv_timeout(Duration::from_secs(8))
+                .expect("first request arrived");
+            assert!(installation.read_snapshot("session", &cwd).is_err());
+
+            let newer_snapshot = if newer_emits {
+                let second_server = response(
+                    listener.try_clone().expect("listener clone"),
+                    serde_json::to_vec(&expected).expect("pack JSON"),
+                    "200 OK",
+                );
+                let output = invoke(id, &cwd, adapter, "resume");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(output.stderr.is_empty());
+                let decoded: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).expect("one output object");
+                assert_eq!(
+                    decoded["hookSpecificOutput"]["additionalContext"],
+                    expected.publication().expect("publication")
+                );
+                let request = second_server.join().expect("second request");
+                assert_eq!(request.matches("GET ").count(), 1);
+                Some(
+                    installation
+                        .read_snapshot("session", &cwd)
+                        .expect("newer emitted snapshot"),
+                )
+            } else {
+                let output = invoke(id, &cwd, adapter, "unsupported");
+                assert!(!output.status.success());
+                assert!(output.stdout.is_empty());
+                assert!(installation.read_snapshot("session", &cwd).is_err());
+                None
+            };
+            release_tx.send(()).expect("release first fetch");
+            let first_request = first_server.join().expect("first request");
+            assert_eq!(first_request.matches("GET ").count(), 1);
+            let first_output = first.join().expect("first helper");
+            assert!(!first_output.status.success());
+            assert!(first_output.stdout.is_empty());
+            if let Some(newer) = newer_snapshot {
+                let current = installation
+                    .read_snapshot("session", &cwd)
+                    .expect("newer remains current");
+                assert_eq!(current.generation, newer.generation);
+                assert_eq!(current.pack, expected);
+            } else {
+                assert!(installation.read_snapshot("session", &cwd).is_err());
+            }
         }
     }
 }
