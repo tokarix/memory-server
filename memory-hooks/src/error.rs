@@ -37,6 +37,14 @@ pub enum Error {
     InstallationInactive,
     /// Active configuration differs from the committed installation authority.
     InstallationMismatch,
+    /// A client session identifier or current generation is invalid.
+    SessionInvalid(&'static str),
+    /// A newer generation or installation activation superseded this work.
+    SessionStale,
+    /// The current head or exact snapshot payload is unavailable or corrupt.
+    SnapshotInvalid(&'static str),
+    /// Exact accepted output exceeds its framing bound.
+    OutputTooLarge,
     /// An operation failed; the OS code is safe to disclose.
     Io(&'static str, Option<i32>),
     /// A write may have been renamed but not durably synced.
@@ -68,6 +76,10 @@ impl Error {
             Self::InstallationInvalid(_) => "installation_invalid",
             Self::InstallationInactive => "installation_inactive",
             Self::InstallationMismatch => "installation_mismatch",
+            Self::SessionInvalid(_) => "session_invalid",
+            Self::SessionStale => "session_stale",
+            Self::SnapshotInvalid(_) => "snapshot_invalid",
+            Self::OutputTooLarge => "output_too_large",
             Self::Io(_, _) | Self::DurabilityUncertain => "io",
             Self::UnsupportedPlatform => "unsupported_platform",
         }
@@ -98,6 +110,9 @@ impl fmt::Display for Error {
             | Self::IdentityInvalid(field)
             | Self::StateInsecure(field) => write!(formatter, "{}: {field}{hint}", self.code()),
             Self::InstallationInvalid(field) => write!(formatter, "{}: {field}", self.code()),
+            Self::SessionInvalid(field) | Self::SnapshotInvalid(field) => {
+                write!(formatter, "{}: {field}", self.code())
+            }
             _ => write!(formatter, "{}{hint}", self.code()),
         }
     }

@@ -9,6 +9,8 @@ pub mod identity;
 pub mod installation;
 pub mod limits;
 #[cfg(target_os = "linux")]
+pub mod snapshot;
+#[cfg(target_os = "linux")]
 pub mod state;
 
 #[cfg(not(target_os = "linux"))]
@@ -34,4 +36,6 @@ pub use error::{Error, Result};
 pub use identity::{RepositoryIdentity, ResolvedBinding};
 #[cfg(target_os = "linux")]
 pub use installation::{ActiveInstallation, Installation, Lifecycle};
+#[cfg(target_os = "linux")]
+pub use snapshot::{DeliveryState, PendingGeneration, ValidatedSnapshot};
 pub use state::{PrivateStateStore, StateKey};

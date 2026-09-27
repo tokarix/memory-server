@@ -133,9 +133,29 @@ impl Installation {
         Ok(installation)
     }
 
-    fn lock(&self) -> Result<File> {
+    pub(crate) fn lock(&self) -> Result<File> {
         self.directory
             .lock(&format!("lock-installation-{}", self.id.simple()))
+    }
+
+    pub(crate) const fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub(crate) const fn client(&self) -> ClientAdapter {
+        self.client
+    }
+
+    pub(crate) const fn directory(&self) -> &PrivateDirectory {
+        &self.directory
+    }
+
+    pub(crate) fn epoch_locked(&self) -> Result<(u64, Uuid)> {
+        let manifest = self.clean_manifest()?;
+        if manifest.lifecycle != Lifecycle::Active {
+            return Err(Error::InstallationInactive);
+        }
+        Ok((manifest.epoch, manifest.nonce))
     }
 
     fn manifest(&self) -> Result<Manifest> {
@@ -350,6 +370,10 @@ impl Installation {
     /// Missing, retired, unresolved or mismatched authority is unusable.
     pub fn active(&self) -> Result<ActiveInstallation> {
         let _lock = self.lock()?;
+        self.active_locked()
+    }
+
+    pub(crate) fn active_locked(&self) -> Result<ActiveInstallation> {
         let manifest = self.clean_manifest()?;
         if manifest.lifecycle != Lifecycle::Active {
             return Err(Error::InstallationInactive);
