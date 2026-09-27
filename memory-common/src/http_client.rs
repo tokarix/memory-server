@@ -48,12 +48,27 @@ impl HttpMemoryClient {
     ///
     /// Returns an error if `base_url` is not a valid URL.
     pub fn new(base_url: &str, bearer_token: Option<String>) -> Result<Self, Error> {
+        Self::with_http_client(base_url, bearer_token, reqwest::Client::new())
+    }
+
+    /// Build a client with caller-supplied transport policy.
+    ///
+    /// This preserves URL routing for existing consumers while allowing a
+    /// managed hook to disable redirects and ambient proxy discovery.
+    ///
+    /// # Errors
+    /// Returns an error if `base_url` is not a valid URL.
+    pub fn with_http_client(
+        base_url: &str,
+        bearer_token: Option<String>,
+        http: reqwest::Client,
+    ) -> Result<Self, Error> {
         let base_url = reqwest::Url::parse(base_url)
             .map_err(|error| Error::Transport(format!("invalid memoryd_url: {error}")))?;
         Ok(Self {
             base_url,
             bearer_token,
-            http: reqwest::Client::new(),
+            http,
             context: ResolutionContext::default(),
         })
     }

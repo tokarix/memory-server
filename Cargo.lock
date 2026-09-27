@@ -1577,6 +1577,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "memory-common",
+ "reqwest",
  "rustix",
  "serde",
  "serde_json",

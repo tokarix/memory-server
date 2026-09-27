@@ -7,6 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use memory_common::policy::ResolutionContext;
+use reqwest::Url;
 use rustix::fs::{Mode, OFlags, fgetxattr, fstat, openat};
 use rustix::io::Errno;
 use serde::Deserialize;
@@ -44,6 +45,83 @@ pub struct TrustedHooksConfig {
     pub(crate) state_root: PathBuf,
     pub(crate) bindings: Vec<Binding>,
     pub(crate) fingerprint: String,
+    pub(crate) delivery: Option<DeliveryConfig>,
+}
+
+/// Trusted transport and managed client promise for schema v2.
+#[derive(Clone)]
+pub struct DeliveryConfig {
+    origin: String,
+    api_token: Option<String>,
+    credential_revision: String,
+    client: ManagedClient,
+}
+
+/// The installed helper's supported client adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+pub enum ClientAdapter {
+    /// Codex `SessionStart` hook protocol.
+    #[serde(rename = "codex-v1")]
+    CodexV1,
+    /// Claude `SessionStart` hook protocol.
+    #[serde(rename = "claude-v1")]
+    ClaudeV1,
+}
+
+impl ClientAdapter {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexV1 => "codex-v1",
+            Self::ClaudeV1 => "claude-v1",
+        }
+    }
+}
+
+/// Declared, operator-managed output contract for one client adapter.
+#[derive(Clone)]
+pub struct ManagedClient {
+    adapter: ClientAdapter,
+    timeout_seconds: u32,
+}
+
+impl ManagedClient {
+    /// Adapter pinned by the trusted configuration.
+    #[must_use]
+    pub const fn adapter(&self) -> ClientAdapter {
+        self.adapter
+    }
+
+    /// Minimum configured handler timeout, in seconds.
+    #[must_use]
+    pub const fn timeout_seconds(&self) -> u32 {
+        self.timeout_seconds
+    }
+}
+
+impl DeliveryConfig {
+    /// Normalized root origin; it has no URL path prefix.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Optional explicit bearer credential. Never include this in diagnostics.
+    #[must_use]
+    pub fn api_token(&self) -> Option<&str> {
+        self.api_token.as_deref()
+    }
+
+    /// Nonsecret operator revision, advanced when credential authority changes.
+    #[must_use]
+    pub fn credential_revision(&self) -> &str {
+        &self.credential_revision
+    }
+
+    /// Declared managed client settings.
+    #[must_use]
+    pub const fn client(&self) -> &ManagedClient {
+        &self.client
+    }
 }
 
 #[derive(Deserialize)]
@@ -53,6 +131,116 @@ struct RawConfig {
     state_root: PathBuf,
     git_executable: PathBuf,
     bindings: Vec<RawBinding>,
+    transport: Option<RawTransport>,
+    client: Option<RawClient>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransport {
+    memoryd_url: String,
+    api_token: Option<String>,
+    unauthenticated: bool,
+    credential_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClient {
+    adapter: ClientAdapter,
+    contract: String,
+    async_hook: bool,
+    timeout_seconds: u32,
+    additional_context_limit: Option<u32>,
+}
+
+impl RawTransport {
+    fn validate(self, client: ManagedClient) -> Result<DeliveryConfig> {
+        let origin = root_origin(&self.memoryd_url)?;
+        if self.credential_revision.is_empty()
+            || self.credential_revision.len() > 128
+            || !self
+                .credential_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(Error::ConfigInvalid("credential_revision"));
+        }
+        if self.unauthenticated == self.api_token.is_some() {
+            return Err(Error::ConfigInvalid("authentication mode"));
+        }
+        if self.api_token.as_ref().is_some_and(|token| {
+            token.is_empty()
+                || token.len() > 4096
+                || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        }) {
+            return Err(Error::ConfigInvalid("api_token"));
+        }
+        Ok(DeliveryConfig {
+            origin,
+            api_token: self.api_token,
+            credential_revision: self.credential_revision,
+            client,
+        })
+    }
+}
+
+impl RawClient {
+    fn validate(self) -> Result<ManagedClient> {
+        if self.contract != "managed-session-start-v1"
+            || self.async_hook
+            || !(90..=300).contains(&self.timeout_seconds)
+            || match self.adapter {
+                ClientAdapter::CodexV1 => self.additional_context_limit != Some(0),
+                ClientAdapter::ClaudeV1 => self.additional_context_limit.is_some(),
+            }
+        {
+            return Err(Error::ConfigInvalid("client contract"));
+        }
+        Ok(ManagedClient {
+            adapter: self.adapter,
+            timeout_seconds: self.timeout_seconds,
+        })
+    }
+}
+
+/// Validate the raw URL boundary before URL parsing can normalize a path.
+fn root_origin(raw: &str) -> Result<String> {
+    if raw.is_empty()
+        || raw
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || raw.contains('\\')
+    {
+        return Err(Error::ConfigInvalid("memoryd_url"));
+    }
+    let (_, after_scheme) = raw
+        .split_once("://")
+        .ok_or(Error::ConfigInvalid("memoryd_url"))?;
+    let boundary = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let (authority, suffix) = after_scheme.split_at(boundary);
+    if authority.is_empty()
+        || authority.contains('@')
+        || !matches!(suffix, "" | "/")
+        || raw.contains(['?', '#'])
+    {
+        return Err(Error::ConfigInvalid("memoryd_url"));
+    }
+    let mut url = Url::parse(raw).map_err(|_| Error::ConfigInvalid("memoryd_url"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return Err(Error::ConfigInvalid("memoryd_url"));
+    }
+    url.set_path("/");
+    Ok(url.to_string())
 }
 
 #[derive(Deserialize)]
@@ -233,6 +421,7 @@ fn fingerprint(
     state: &Path,
     git: &Path,
     bindings: &[Binding],
+    delivery: Option<&DeliveryConfig>,
 ) -> Result<String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -258,14 +447,37 @@ fn fingerprint(
     }
     entries.sort();
     let mut hasher = Sha256::new();
-    hasher.update(b"memory-hooks-config-v1\0");
+    if delivery.is_some() {
+        hasher.update(b"memory-hooks-config-v2\0");
+    } else {
+        hasher.update(b"memory-hooks-config-v1\0");
+    }
     hash_part(&mut hasher, path_bytes(config_path));
     hash_part(&mut hasher, path_bytes(state));
     hash_part(&mut hasher, path_bytes(git));
     for entry in entries {
         hash_part(&mut hasher, &entry);
     }
-    Ok(format!("v1:{:x}", hasher.finalize()))
+    if let Some(delivery) = delivery {
+        hash_part(&mut hasher, delivery.origin.as_bytes());
+        hash_part(
+            &mut hasher,
+            if delivery.api_token.is_some() {
+                b"bearer"
+            } else {
+                b"unauthenticated"
+            },
+        );
+        hash_part(&mut hasher, delivery.credential_revision.as_bytes());
+        hash_part(&mut hasher, delivery.client.adapter.as_str().as_bytes());
+        hash_part(&mut hasher, b"managed-session-start-v1");
+        hash_part(&mut hasher, &delivery.client.timeout_seconds.to_be_bytes());
+    }
+    Ok(format!(
+        "{}:{:x}",
+        if delivery.is_some() { "v2" } else { "v1" },
+        hasher.finalize()
+    ))
 }
 
 impl TrustedHooksConfig {
@@ -307,10 +519,22 @@ impl TrustedHooksConfig {
                 + 1;
             Error::ConfigSyntax { line, column }
         })?;
-        if raw.schema_version != 1
-            || raw.bindings.is_empty()
-            || raw.bindings.len() > limits::BINDINGS
-        {
+        let delivery = match raw.schema_version {
+            1 if raw.transport.is_none() && raw.client.is_none() => None,
+            2 => {
+                let client = raw
+                    .client
+                    .ok_or(Error::ConfigInvalid("client"))?
+                    .validate()?;
+                Some(
+                    raw.transport
+                        .ok_or(Error::ConfigInvalid("transport"))?
+                        .validate(client)?,
+                )
+            }
+            _ => return Err(Error::ConfigInvalid("schema_version")),
+        };
+        if raw.bindings.is_empty() || raw.bindings.len() > limits::BINDINGS {
             return Err(Error::ConfigInvalid("schema_version or bindings"));
         }
         valid_path(&raw.state_root)?;
@@ -451,7 +675,13 @@ impl TrustedHooksConfig {
                 }
             }
         }
-        let fingerprint = fingerprint(&config_path, &state_root, &git, &bindings)?;
+        let fingerprint = fingerprint(
+            &config_path,
+            &state_root,
+            &git,
+            &bindings,
+            delivery.as_ref(),
+        )?;
         Ok(Self {
             git,
             config_path,
@@ -459,6 +689,7 @@ impl TrustedHooksConfig {
             state_root,
             bindings,
             fingerprint,
+            delivery,
         })
     }
 
@@ -466,5 +697,11 @@ impl TrustedHooksConfig {
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    /// Delivery settings are present only in a validated v2 configuration.
+    #[must_use]
+    pub fn delivery(&self) -> Option<&DeliveryConfig> {
+        self.delivery.as_ref()
     }
 }
