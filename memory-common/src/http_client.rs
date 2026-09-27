@@ -131,10 +131,16 @@ impl HttpMemoryClient {
                 && (envelope.error.code.starts_with("policy_")
                     || envelope.error.code.starts_with("guardrails_"))
             {
+                let mut details = envelope.error.details;
+                if let serde_json::Value::Object(ref mut fields) = details {
+                    fields.insert("http_status".to_owned(), serde_json::json!(status.as_u16()));
+                } else {
+                    details = serde_json::json!({"http_status": status.as_u16()});
+                }
                 return Err(Error::Policy {
                     code: envelope.error.code,
                     message: envelope.error.message,
-                    details: envelope.error.details,
+                    details,
                     conflict: status == StatusCode::CONFLICT,
                 });
             }
@@ -143,10 +149,15 @@ impl HttpMemoryClient {
             } else {
                 "guardrails_transport"
             };
-            return Err(guardrails_error(
-                code,
-                &format!("guardrail endpoint returned HTTP {status}"),
-            ));
+            return Err(Error::Policy {
+                code: code.to_owned(),
+                message: format!("guardrail endpoint returned HTTP {status}"),
+                details: serde_json::json!({
+                    "action": "Check the memoryd guardrails endpoint and configured scope",
+                    "http_status": status.as_u16()
+                }),
+                conflict: status == StatusCode::CONFLICT,
+            });
         }
         let pack: GuardrailPack = serde_json::from_slice(&body).map_err(|error| {
             guardrails_error(

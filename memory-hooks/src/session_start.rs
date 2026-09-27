@@ -14,6 +14,7 @@ use crate::config::ClientAdapter;
 use crate::error::{Error, Result};
 use crate::installation::Installation;
 use crate::limits;
+use crate::snapshot::PendingGeneration;
 
 /// Maximum accepted client event bytes, including JSON framing.
 pub const EVENT_BYTES: usize = 64 * 1024;
@@ -196,6 +197,28 @@ fn map_fetch_error(error: &SharedError) -> Error {
     }
 }
 
+fn at_stage<T>(stage: &'static str, pending: &PendingGeneration, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        eprintln!(
+            "session_start: stage={stage} generation={} code={}",
+            pending.generation(),
+            error.code()
+        );
+    }
+    result
+}
+
+fn safe_http_status(error: &SharedError) -> Option<u16> {
+    match error {
+        SharedError::Policy { details, .. } => details
+            .get("http_status")
+            .and_then(Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok())
+            .filter(|status| (100..=599).contains(status)),
+        _ => None,
+    }
+}
+
 /// Consume one supported top-level event and emit its fresh exact publication.
 ///
 /// # Errors
@@ -208,38 +231,68 @@ pub fn run(installation: &Installation) -> Result<()> {
         return Err(Error::EventInvalid("session_id length"));
     }
     let pending = installation.begin_session(session)?;
-    let cwd = checked_event(&event, installation.client())?;
-    let binding = installation.attach_binding(&pending, &cwd)?;
-    let active = installation.active()?;
+    let cwd = at_stage(
+        "event",
+        &pending,
+        checked_event(&event, installation.client()),
+    )?;
+    let binding = at_stage(
+        "binding",
+        &pending,
+        installation.attach_binding(&pending, &cwd),
+    )?;
+    let active = at_stage("configuration", &pending, installation.active())?;
     if active.epoch != pending.epoch() || active.config.delivery().is_none() {
-        return Err(Error::SessionStale);
+        return at_stage("configuration", &pending, Err(Error::SessionStale));
     }
-    let delivery = active
-        .config
-        .delivery()
-        .ok_or(Error::InstallationInactive)?;
+    let delivery = at_stage(
+        "configuration",
+        &pending,
+        active.config.delivery().ok_or(Error::InstallationInactive),
+    )?;
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
-        .map_err(|_| Error::GuardrailsUnavailable("client setup"))?;
-    let client = HttpMemoryClient::with_http_client(
-        delivery.origin(),
-        delivery.api_token().map(str::to_owned),
-        http,
-    )
-    .map_err(|_| Error::GuardrailsUnavailable("client setup"))?
+        .map_err(|_| Error::GuardrailsUnavailable("client setup"));
+    let http = at_stage("transport", &pending, http)?;
+    let client = at_stage(
+        "transport",
+        &pending,
+        HttpMemoryClient::with_http_client(
+            delivery.origin(),
+            delivery.api_token().map(str::to_owned),
+            http,
+        )
+        .map_err(|_| Error::GuardrailsUnavailable("client setup")),
+    )?
     .with_context(binding.context().clone());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| Error::GuardrailsUnavailable("runtime"))?;
+        .map_err(|_| Error::GuardrailsUnavailable("runtime"));
+    let runtime = at_stage("runtime", &pending, runtime)?;
     let pack = runtime
         .block_on(client.guardrails(binding.project()))
-        .map_err(|error| map_fetch_error(&error))?;
-    let mut writer =
-        DeadlineWriter::new(deadline).map_err(|error| crate::error::io("output flags", &error))?;
-    installation.complete_session(&pending, &cwd, pack, &mut writer)
+        .map_err(|error| {
+            let mapped = map_fetch_error(&error);
+            let status =
+                safe_http_status(&error).map_or("unknown".to_owned(), |value| value.to_string());
+            eprintln!(
+                "session_start: stage=fetch generation={} code={} http_status={status}",
+                pending.generation(),
+                mapped.code()
+            );
+            mapped
+        })?;
+    let writer =
+        DeadlineWriter::new(deadline).map_err(|error| crate::error::io("output flags", &error));
+    let mut writer = at_stage("output", &pending, writer)?;
+    at_stage(
+        "completion",
+        &pending,
+        installation.complete_session(&pending, &cwd, pack, &mut writer),
+    )
 }
 
 #[cfg(test)]

@@ -1283,9 +1283,11 @@ mod tests {
                 hook_pack.publication().unwrap(),
                 pack.publication().unwrap()
             );
-            let stored_pack = hook_pack.clone();
-            let stored_profile = profile.to_owned();
-            tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "linux")]
+            {
+                let stored_pack = hook_pack.clone();
+                let stored_profile = profile.to_owned();
+                tokio::task::spawn_blocking(move || {
                 use std::io::Write;
                 use std::os::unix::fs::OpenOptionsExt;
 
@@ -1337,9 +1339,10 @@ mod tests {
                     installation.read_snapshot("real-daemon", &cwd).unwrap().pack,
                     stored_pack
                 );
-            })
-            .await
-            .unwrap();
+                })
+                .await
+                .unwrap();
+            }
         }
         for endpoint in ["rules", "bootstrap"] {
             let response = client

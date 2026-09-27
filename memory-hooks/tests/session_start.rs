@@ -182,6 +182,9 @@ fn invalid_but_identifiable_event_retires_head_without_http() {
     );
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("stage=event"));
+    assert!(diagnostic.contains("generation="));
     assert!(installation.read_snapshot("session", &cwd).is_err());
     listener
         .set_nonblocking(true)
@@ -279,7 +282,39 @@ fn failed_refresh_retires_previous_emission() {
     let output = invoke(id, &cwd, ClientAdapter::CodexV1, "resume");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("guardrails_unavailable"));
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("guardrails_unavailable"));
+    assert!(diagnostic.contains("stage=fetch"));
+    assert!(diagnostic.contains("generation="));
+    assert!(diagnostic.contains("http_status=404"));
+    assert!(!diagnostic.contains("fixture-token"));
     assert!(installation.read_snapshot("session", &cwd).is_err());
     handle.join().expect("second server");
+}
+
+#[test]
+fn upstream_status_is_reported_without_body_or_credential() {
+    for (status, code) in [
+        ("401 Unauthorized", "401"),
+        ("403 Forbidden", "403"),
+        ("500 Internal Server Error", "500"),
+    ] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), ClientAdapter::CodexV1, port);
+        let body = br#"{"error":{"code":"guardrails_transport","message":"SENTINEL_UPSTREAM_BODY","details":{"path":"SENTINEL_PATH"}}}"#.to_vec();
+        let handle = response(listener, body, status);
+        let output = invoke(id, &cwd, ClientAdapter::CodexV1, "startup");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(diagnostic.contains(&format!("http_status={code}")));
+        assert!(diagnostic.contains("stage=fetch"));
+        for secret in ["SENTINEL_UPSTREAM_BODY", "SENTINEL_PATH", "fixture-token"] {
+            assert!(!diagnostic.contains(secret));
+        }
+        assert!(installation.read_snapshot("session", &cwd).is_err());
+        handle.join().expect("server");
+    }
 }
