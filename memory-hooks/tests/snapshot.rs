@@ -300,6 +300,32 @@ fn partial_output_and_flush_failure_leave_prepared_unusable() {
 }
 
 #[test]
+fn zero_byte_writer_cannot_commit_emitted() {
+    struct ZeroWriter;
+    impl Write for ZeroWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let rig = Rig::new();
+    let pending = rig.installation.begin_session("S").expect("pending");
+    rig.installation
+        .attach_binding(&pending, &rig.cwd)
+        .expect("binding");
+    assert!(
+        rig.installation
+            .complete_session(&pending, &rig.cwd, rig.pack("exact"), &mut ZeroWriter)
+            .is_err()
+    );
+    assert!(rig.installation.read_snapshot("S", &rig.cwd).is_err());
+}
+
+#[test]
 fn migration_wins_over_a_delayed_old_completion() {
     let rig = Rig::new();
     let a = rig.installation.begin_session("S").expect("A");
@@ -342,4 +368,131 @@ fn migration_wins_over_a_delayed_old_completion() {
             .pack,
         b_pack
     );
+}
+
+struct PauseWriter {
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+    bytes: Vec<u8>,
+}
+
+impl Write for PauseWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.entered.send(()).expect("writer entered");
+        self.release.recv().expect("writer released");
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn emission_under_fixed_lock_is_retired_by_following_root_activation() {
+    let rig = Rig::new();
+    let pending = rig.installation.begin_session("S").expect("pending");
+    rig.installation
+        .attach_binding(&pending, &rig.cwd)
+        .expect("binding");
+    let pack = rig.pack("exact before migration");
+    let old_root = rig.root.path().join("r1");
+    let next_root = rig.root.path().join("r2");
+    let next_config = rig.root.path().join("next.toml");
+    let source = fs::read_to_string(&rig.config_path).expect("current config");
+    let old = format!("{:?}", old_root.display().to_string());
+    let next = format!("{:?}", next_root.display().to_string());
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&next_config)
+        .expect("new config");
+    file.write_all(source.replace(&old, &next).as_bytes())
+        .expect("new config bytes");
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let installation = Arc::clone(&rig.installation);
+    let cwd = rig.cwd.clone();
+    let writer = thread::spawn(move || {
+        let mut output = PauseWriter {
+            entered: entered_tx,
+            release: release_rx,
+            bytes: Vec::new(),
+        };
+        let result = installation.complete_session(&pending, &cwd, pack, &mut output);
+        (result, output.bytes)
+    });
+    entered_rx.recv().expect("writer held installation lock");
+    let installation = Arc::clone(&rig.installation);
+    let (activation_tx, activation_rx) = mpsc::channel();
+    let activation = thread::spawn(move || {
+        activation_tx.send(()).expect("activation started");
+        installation.activate(&next_config)
+    });
+    activation_rx.recv().expect("activation queued");
+    release_tx.send(()).expect("finish output");
+    let (result, output) = writer.join().expect("writer join");
+    result.expect("emission before activation barrier");
+    assert!(!output.is_empty());
+    assert_eq!(activation.join().expect("activation join").expect("R2"), 2);
+    assert!(old_root.is_dir(), "old payload root remains on disk");
+    assert!(rig.installation.read_snapshot("S", &rig.cwd).is_err());
+    let fresh = rig.installation.begin_session("S").expect("fresh R2 start");
+    rig.installation
+        .attach_binding(&fresh, &rig.cwd)
+        .expect("R2 binding");
+    let current = rig.pack("exact after migration");
+    rig.installation
+        .complete_session(&fresh, &rig.cwd, current.clone(), &mut Vec::new())
+        .expect("R2 emission");
+    assert_eq!(
+        rig.installation
+            .read_snapshot("S", &rig.cwd)
+            .expect("R2 reader")
+            .pack,
+        current
+    );
+}
+
+#[test]
+fn root_reversion_retires_sessions_that_never_refreshed() {
+    let rig = Rig::new();
+    let pack = rig.pack("same pack on every root");
+    for session in ["refreshed", "idle"] {
+        let pending = rig.installation.begin_session(session).expect("R1 pending");
+        rig.installation
+            .attach_binding(&pending, &rig.cwd)
+            .expect("R1 binding");
+        rig.installation
+            .complete_session(&pending, &rig.cwd, pack.clone(), &mut Vec::new())
+            .expect("R1 emission");
+        rig.installation
+            .read_snapshot(session, &rig.cwd)
+            .expect("R1 reader");
+    }
+    rig.write_config(&rig.root.path().join("r2"), "workstation");
+    rig.installation.activate(&rig.config_path).expect("R2");
+    let current = rig
+        .installation
+        .begin_session("refreshed")
+        .expect("R2 pending");
+    rig.installation
+        .attach_binding(&current, &rig.cwd)
+        .expect("R2 binding");
+    rig.installation
+        .complete_session(&current, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("R2 emission");
+    assert!(rig.installation.read_snapshot("idle", &rig.cwd).is_err());
+    rig.write_config(&rig.root.path().join("r1"), "workstation");
+    rig.installation
+        .activate(&rig.config_path)
+        .expect("R1 again");
+    for session in ["refreshed", "idle"] {
+        assert!(rig.installation.read_snapshot(session, &rig.cwd).is_err());
+    }
+    assert!(rig.root.path().join("r1").is_dir());
+    assert!(rig.root.path().join("r2").is_dir());
 }
