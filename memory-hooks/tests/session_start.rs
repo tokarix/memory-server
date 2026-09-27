@@ -88,6 +88,103 @@ fn pack(installation: &Installation, cwd: &Path) -> GuardrailPack {
     .expect("pack")
 }
 
+fn invalid_pack_responses(good: &GuardrailPack) -> Vec<(&'static str, &'static str, Vec<u8>)> {
+    let mut wrong_project = good.clone();
+    "other".clone_into(&mut wrong_project.project);
+    let mut wrong_context = good.clone();
+    wrong_context.context.profile = Some("container".to_owned());
+    let mut wrong_digest = good.clone();
+    wrong_digest.digest = format!("sha256:{}", "0".repeat(64));
+    let mut wrong_version = good.clone();
+    wrong_version.schema_version = 2;
+    let mut empty = good.clone();
+    empty.mandatory.clear();
+    let mut duplicate = good.clone();
+    duplicate.mandatory.push(good.mandatory[0].clone());
+    let mut unordered = good.clone();
+    let mut second_rule = good.mandatory[0].clone();
+    second_rule.id = Uuid::from_u128(2);
+    second_rule.policy_key = Some("zzz".to_owned());
+    unordered.mandatory.insert(0, second_rule);
+    let mut invalid_selector = serde_json::to_value(good).expect("pack value");
+    invalid_selector["mandatory"][0]["selectors"]["profile"] = serde_json::json!([""]);
+    let mut missing_selector = serde_json::to_value(good).expect("pack value");
+    missing_selector["mandatory"][0]
+        .as_object_mut()
+        .expect("rule object")
+        .remove("selectors");
+    let mut missing_key = good.clone();
+    missing_key.mandatory[0].policy_key = None;
+    let mut missing_revision = good.clone();
+    missing_revision.mandatory[0].revision = None;
+    let mut empty_content = good.clone();
+    empty_content.mandatory[0].content.clear();
+    vec![
+        (
+            "wrong_project",
+            "200 OK",
+            serde_json::to_vec(&wrong_project).expect("pack"),
+        ),
+        (
+            "wrong_context",
+            "200 OK",
+            serde_json::to_vec(&wrong_context).expect("pack"),
+        ),
+        (
+            "wrong_digest",
+            "200 OK",
+            serde_json::to_vec(&wrong_digest).expect("pack"),
+        ),
+        (
+            "wrong_version",
+            "200 OK",
+            serde_json::to_vec(&wrong_version).expect("pack"),
+        ),
+        ("empty", "200 OK", serde_json::to_vec(&empty).expect("pack")),
+        (
+            "duplicate",
+            "200 OK",
+            serde_json::to_vec(&duplicate).expect("pack"),
+        ),
+        (
+            "unordered",
+            "200 OK",
+            serde_json::to_vec(&unordered).expect("pack"),
+        ),
+        (
+            "invalid_selector",
+            "200 OK",
+            serde_json::to_vec(&invalid_selector).expect("pack"),
+        ),
+        (
+            "missing_selector",
+            "200 OK",
+            serde_json::to_vec(&missing_selector).expect("pack"),
+        ),
+        (
+            "missing_key",
+            "200 OK",
+            serde_json::to_vec(&missing_key).expect("pack"),
+        ),
+        (
+            "missing_revision",
+            "200 OK",
+            serde_json::to_vec(&missing_revision).expect("pack"),
+        ),
+        (
+            "empty_content",
+            "200 OK",
+            serde_json::to_vec(&empty_content).expect("pack"),
+        ),
+        ("malformed_json", "200 OK", b"{".to_vec()),
+        ("conflict", "409 Conflict", b"{}".to_vec()),
+        ("old_daemon", "404 Not Found", b"{}".to_vec()),
+        ("unauthorized", "401 Unauthorized", b"{}".to_vec()),
+        ("forbidden", "403 Forbidden", b"{}".to_vec()),
+        ("server_error", "500 Internal Server Error", b"{}".to_vec()),
+    ]
+}
+
 fn response(listener: TcpListener, body: Vec<u8>, status: &str) -> thread::JoinHandle<String> {
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -510,44 +607,7 @@ fn both_adapters_reject_fresh_transport_failures_without_old_snapshot_fallback()
         handle.join().expect("initial request");
         assert!(installation.read_snapshot("session", &cwd).is_ok());
 
-        let mut wrong_project = good.clone();
-        wrong_project.project = "other".to_owned();
-        let mut wrong_context = good.clone();
-        wrong_context.context.profile = Some("container".to_owned());
-        let mut wrong_digest = good.clone();
-        wrong_digest.digest = format!("sha256:{}", "0".repeat(64));
-        let mut wrong_version = good.clone();
-        wrong_version.schema_version = 2;
-        let mut empty = good.clone();
-        empty.mandatory.clear();
-        let cases = [
-            (
-                "wrong_project",
-                "200 OK",
-                serde_json::to_vec(&wrong_project).expect("pack"),
-            ),
-            (
-                "wrong_context",
-                "200 OK",
-                serde_json::to_vec(&wrong_context).expect("pack"),
-            ),
-            (
-                "wrong_digest",
-                "200 OK",
-                serde_json::to_vec(&wrong_digest).expect("pack"),
-            ),
-            (
-                "wrong_version",
-                "200 OK",
-                serde_json::to_vec(&wrong_version).expect("pack"),
-            ),
-            ("empty", "200 OK", serde_json::to_vec(&empty).expect("pack")),
-            ("old_daemon", "404 Not Found", b"{}".to_vec()),
-            ("unauthorized", "401 Unauthorized", b"{}".to_vec()),
-            ("forbidden", "403 Forbidden", b"{}".to_vec()),
-            ("server_error", "500 Internal Server Error", b"{}".to_vec()),
-        ];
-        for (name, status, body) in cases {
+        for (name, status, body) in invalid_pack_responses(&good) {
             let handle = response(listener.try_clone().expect("listener clone"), body, status);
             let output = invoke(id, &cwd, adapter, "resume");
             assert!(!output.status.success(), "{name}");
