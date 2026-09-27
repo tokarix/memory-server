@@ -128,6 +128,72 @@ fn exact_output_and_public_reader_require_a_complete_emitted_head() {
 }
 
 #[test]
+fn unresolved_head_requires_explicit_sequence_advancing_repair() {
+    let rig = Rig::new();
+    let pending = rig
+        .installation
+        .begin_session("repair-me")
+        .expect("pending");
+    rig.installation
+        .attach_binding(&pending, &rig.cwd)
+        .expect("binding");
+    let pack = rig.pack("old text must not return after repair");
+    rig.installation
+        .complete_session(&pending, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("first emission");
+    let control = rig.root.path().join("control");
+    let journal = fs::read_dir(control)
+        .expect("anchor entries")
+        .map(|entry| entry.expect("entry").path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("journal-"))
+        })
+        .expect("session journal");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journal).expect("journal read")).expect("journal JSON");
+    value["resolved"] = serde_json::Value::Bool(false);
+    fs::write(
+        &journal,
+        serde_json::to_vec(&value).expect("journal encoding"),
+    )
+    .expect("incomplete transition");
+    assert!(
+        rig.installation
+            .read_snapshot("repair-me", &rig.cwd)
+            .is_err()
+    );
+    assert!(rig.installation.begin_session("repair-me").is_err());
+    assert_eq!(
+        rig.installation
+            .repair_session("repair-me")
+            .expect("repair"),
+        2
+    );
+    assert!(
+        rig.installation
+            .read_snapshot("repair-me", &rig.cwd)
+            .is_err()
+    );
+    let fresh = rig.installation.begin_session("repair-me").expect("fresh");
+    rig.installation
+        .attach_binding(&fresh, &rig.cwd)
+        .expect("fresh binding");
+    rig.installation
+        .complete_session(&fresh, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("fresh emission");
+    assert_eq!(
+        rig.installation
+            .read_snapshot("repair-me", &rig.cwd)
+            .expect("current reader")
+            .pack,
+        pack
+    );
+    assert_ne!(pending.generation(), fresh.generation());
+}
+
+#[test]
 fn newer_failure_and_root_reversion_never_restore_an_old_head() {
     let rig = Rig::new();
     let a = rig.installation.begin_session("S").expect("A");

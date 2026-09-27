@@ -16,6 +16,7 @@ fn admin(
     installation: Option<&OsStr>,
     installation_id: Option<&OsStr>,
     client: Option<&OsStr>,
+    session_id: Option<&OsStr>,
 ) -> memory_hooks::Result<()> {
     let path = Path::new(installation.ok_or(memory_hooks::Error::ConfigInvalid("--installation"))?);
     let adapter = client
@@ -23,7 +24,7 @@ fn admin(
         .and_then(ClientAdapter::from_name)
         .ok_or(memory_hooks::Error::ConfigInvalid("--client"))?;
     if command == "init-installation" {
-        if config.is_some() || installation_id.is_some() {
+        if config.is_some() || installation_id.is_some() || session_id.is_some() {
             return Err(memory_hooks::Error::ConfigInvalid("arguments"));
         }
         let id = Installation::initialize(path, adapter)?;
@@ -38,8 +39,22 @@ fn admin(
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or(memory_hooks::Error::ConfigInvalid("--installation-id"))?;
     let anchor = Installation::open(path, id, adapter)?;
-    if command == "session-start" && config.is_none() {
+    if command == "session-start" && config.is_none() && session_id.is_none() {
         return memory_hooks::session_start::run(&anchor);
+    }
+    if command == "repair-session" && config.is_none() {
+        let session = session_id
+            .and_then(OsStr::to_str)
+            .ok_or(memory_hooks::Error::ConfigInvalid("--session-id"))?;
+        let sequence = anchor.repair_session(session)?;
+        println!(
+            "{}",
+            serde_json::json!({"version": 1, "sequence": sequence})
+        );
+        return Ok(());
+    }
+    if session_id.is_some() {
+        return Err(memory_hooks::Error::ConfigInvalid("--session-id"));
     }
     let epoch = if command == "activate-installation" {
         anchor.activate(Path::new(
@@ -84,6 +99,7 @@ fn run() -> memory_hooks::Result<()> {
     let mut installation = None;
     let mut installation_id = None;
     let mut client = None;
+    let mut session_id = None;
     while let Some(option) = args.next() {
         let value = args
             .next()
@@ -98,6 +114,8 @@ fn run() -> memory_hooks::Result<()> {
             installation_id = Some(value);
         } else if option == "--client" && client.is_none() {
             client = Some(value);
+        } else if option == "--session-id" && session_id.is_none() {
+            session_id = Some(value);
         } else {
             return Err(memory_hooks::Error::ConfigInvalid("option"));
         }
@@ -113,11 +131,16 @@ fn run() -> memory_hooks::Result<()> {
             installation.as_deref(),
             installation_id.as_deref(),
             client.as_deref(),
+            session_id.as_deref(),
         );
         #[cfg(not(target_os = "linux"))]
         return Err(memory_hooks::Error::UnsupportedPlatform);
     }
-    if installation.is_some() || installation_id.is_some() || client.is_some() {
+    if installation.is_some()
+        || installation_id.is_some()
+        || client.is_some()
+        || session_id.is_some()
+    {
         return Err(memory_hooks::Error::ConfigInvalid("arguments"));
     }
     let config = config.ok_or(memory_hooks::Error::ConfigInvalid("--config"))?;

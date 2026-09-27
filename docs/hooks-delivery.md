@@ -47,7 +47,10 @@ Changing and cannot be undone by reverting file bytes.
 
 For recovery, repair an unresolved installation transition with
 `repair-installation`, then activate a validated config and start fresh client
-sessions. A corrupt/missing anchor or unsafe storage requires managed
+sessions. An unresolved session-head transition can be advanced with
+`repair-session --session-id <exact-client-session-id>` on the pinned anchor;
+it commits a fresh Pending tombstone at a higher sequence, never an Emitted
+head. Run another `SessionStart` afterward. A corrupt/missing anchor or unsafe storage requires managed
 decommissioning; the helper cannot infer a prior head from snapshot roots.
 To replace a live anchor, stop managed hook use and sessions, durably call
 `retire-installation` on the old anchor, retain its Retired tombstone, create

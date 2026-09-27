@@ -325,6 +325,73 @@ fn validate_payload(
 }
 
 impl Installation {
+    /// Advance an unresolved session transition to a fresh pending tombstone.
+    ///
+    /// This is an explicit administrative repair. It uses the largest checked
+    /// sequence visible in the head or journal and never reinstates Emitted.
+    /// A missing or corrupt journal cannot be repaired by guessing lineage.
+    ///
+    /// # Errors
+    /// Refuses a clean, corrupt or inactive installation/session transition.
+    pub fn repair_session(&self, session: &str) -> Result<u64> {
+        let hash = session_hash(self, session)?;
+        let _installation_lock = self.lock()?;
+        let (epoch, nonce) = self.epoch_locked()?;
+        let _session_lock = self.directory().lock(&lock_name(&hash))?;
+        let journal_bytes = self
+            .directory()
+            .read(&journal_name(&hash))?
+            .ok_or(Error::SnapshotInvalid("repair journal missing"))?;
+        let journal: SessionJournal = serde_json::from_slice(&journal_bytes)
+            .map_err(|_| Error::SnapshotInvalid("repair journal JSON"))?;
+        if journal.version != 1
+            || journal.resolved
+            || journal.generation.is_nil()
+            || journal.sequence == 0
+        {
+            return Err(Error::SnapshotInvalid("repair journal state"));
+        }
+        let head = self
+            .directory()
+            .read(&head_name(&hash))?
+            .map(|bytes| {
+                let head: Head = serde_json::from_slice(&bytes)
+                    .map_err(|_| Error::SnapshotInvalid("repair head JSON"))?;
+                validate_head(&head, self, &hash)?;
+                Ok::<_, Error>(head)
+            })
+            .transpose()?;
+        if head.as_ref().is_some_and(|head| {
+            journal.sequence < head.sequence
+                || journal.sequence > head.sequence.saturating_add(1)
+                || (journal.sequence == head.sequence && journal.generation != head.generation)
+        }) {
+            return Err(Error::SnapshotInvalid("repair lineage"));
+        }
+        let sequence = journal
+            .sequence
+            .checked_add(1)
+            .ok_or(Error::SessionInvalid("sequence overflow"))?;
+        let repaired = Head {
+            version: 1,
+            installation_id: self.id(),
+            client: self.client(),
+            session_hash: hash.clone(),
+            epoch,
+            nonce,
+            generation: Uuid::new_v4(),
+            sequence,
+            state: DeliveryState::Pending,
+            binding: None,
+            payload_name: None,
+            payload_sha256: None,
+            output_sha256: None,
+            output_bytes: None,
+        };
+        replace_head(self, &hash, &repaired)?;
+        Ok(sequence)
+    }
+
     /// Claim a fresh generation before any configurable root or binding lookup.
     ///
     /// # Errors
