@@ -178,9 +178,13 @@ limit. They reject ambiguous pre-identity input without guessing a session;
 known-session event failures retire their old head before HTTP. The transport
 fixtures reject declared or streamed body overflow, truncated responses and
 redirects, and prove child-only proxy variables do not reroute the bearer
-request. Private unit fault fixtures target final journal rename/sync for
-Emitted and Active, reopen the installation, require explicit repair, and
-prove old evidence remains unusable. Run the workspace test suite with a
+request. Private unit fault fixtures inject failures at temporary creation,
+write, flush, file sync, rename and parent-directory sync for payloads,
+session heads/journals and installation manifests/journals, including final
+Emitted and Active journal resolution. They reopen the installation, test the
+public reader, require explicit repair where authority is unresolved, and
+prove old evidence remains unusable after a committed barrier. Run the
+workspace test suite with a
 disposable migrated PostgreSQL/pgvector database to exercise memoryd policy
 integration. These fixtures establish the local protocol contract. Optional
 real-client validation on deployed versions is an operator choice.

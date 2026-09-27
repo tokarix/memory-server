@@ -26,24 +26,36 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 thread_local! {
-    static AFTER_RENAME_FAULT: RefCell<Option<ReplaceFault>> = const { RefCell::new(None) };
+    static REPLACE_FAULT: RefCell<Option<ReplaceFault>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplaceStage {
+    Create,
+    Write,
+    Flush,
+    FileSync,
+    Rename,
+    ParentSync,
 }
 
 #[cfg(test)]
 struct ReplaceFault {
-    name: String,
+    prefix: String,
+    stage: ReplaceStage,
     occurrence: usize,
     seen: usize,
 }
 
 #[cfg(test)]
-fn fail_after_rename(name: &str) -> bool {
-    AFTER_RENAME_FAULT.with(|slot| {
+fn fail_at(name: &str, stage: ReplaceStage) -> bool {
+    REPLACE_FAULT.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(fault) = slot.as_mut() else {
             return false;
         };
-        if fault.name != name {
+        if !name.starts_with(&fault.prefix) || fault.stage != stage {
             return false;
         }
         fault.seen += 1;
@@ -52,16 +64,22 @@ fn fail_after_rename(name: &str) -> bool {
 }
 
 #[cfg(test)]
-fn with_after_rename_fault<T>(name: &str, occurrence: usize, run: impl FnOnce() -> T) -> T {
+fn with_replace_fault<T>(
+    prefix: &str,
+    stage: ReplaceStage,
+    occurrence: usize,
+    run: impl FnOnce() -> T,
+) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
-            AFTER_RENAME_FAULT.with(|slot| *slot.borrow_mut() = None);
+            REPLACE_FAULT.with(|slot| *slot.borrow_mut() = None);
         }
     }
-    AFTER_RENAME_FAULT.with(|slot| {
+    REPLACE_FAULT.with(|slot| {
         *slot.borrow_mut() = Some(ReplaceFault {
-            name: name.to_owned(),
+            prefix: prefix.to_owned(),
+            stage,
             occurrence,
             seen: 0,
         });
@@ -430,6 +448,10 @@ impl PrivateDirectory {
         }
         let _ = open_record(&self.directory, name, false)?;
         let temporary = temporary_name(name);
+        #[cfg(test)]
+        if fail_at(name, ReplaceStage::Create) {
+            return Err(Error::StateInsecure("temporary create"));
+        }
         let mut file = File::from(
             openat(
                 &self.directory,
@@ -443,15 +465,31 @@ impl PrivateDirectory {
             fchmod(&file, Mode::RUSR | Mode::WUSR)
                 .map_err(|_| Error::StateInsecure("new temporary mode"))?;
             check_object(&file, libc::S_IFREG, true, true)?;
+            #[cfg(test)]
+            if fail_at(name, ReplaceStage::Write) {
+                return Err(Error::Io("temporary write", None));
+            }
             file.write_all(bytes)
                 .map_err(|error| io("temporary write", &error))?;
+            #[cfg(test)]
+            if fail_at(name, ReplaceStage::Flush) {
+                return Err(Error::Io("temporary flush", None));
+            }
             file.flush()
                 .map_err(|error| io("temporary flush", &error))?;
+            #[cfg(test)]
+            if fail_at(name, ReplaceStage::FileSync) {
+                return Err(Error::Io("temporary sync", None));
+            }
             fsync(&file).map_err(|_| Error::Io("temporary sync", None))?;
+            #[cfg(test)]
+            if fail_at(name, ReplaceStage::Rename) {
+                return Err(Error::Io("record rename", None));
+            }
             renameat(&self.directory, temporary.as_str(), &self.directory, name)
                 .map_err(|_| Error::Io("record rename", None))?;
             #[cfg(test)]
-            if fail_after_rename(name) {
+            if fail_at(name, ReplaceStage::ParentSync) {
                 return Err(Error::DurabilityUncertain);
             }
             fsync(&self.directory).map_err(|_| Error::DurabilityUncertain)?;
@@ -556,10 +594,19 @@ mod journal_fault_tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use super::with_after_rename_fault;
+    use super::{ReplaceStage, with_replace_fault};
     use crate::config::ClientAdapter;
     use crate::error::Error;
     use crate::installation::Installation;
+
+    const STAGES: [ReplaceStage; 6] = [
+        ReplaceStage::Create,
+        ReplaceStage::Write,
+        ReplaceStage::Flush,
+        ReplaceStage::FileSync,
+        ReplaceStage::Rename,
+        ReplaceStage::ParentSync,
+    ];
 
     struct Rig {
         root: TempDir,
@@ -671,7 +718,7 @@ mod journal_fault_tests {
             .find(|name| name.starts_with("journal-"))
             .expect("session journal");
         let mut output = Vec::new();
-        let result = with_after_rename_fault(&journal, 4, || {
+        let result = with_replace_fault(&journal, ReplaceStage::ParentSync, 4, || {
             rig.installation
                 .complete_session(&pending, &rig.cwd, rig.pack(), &mut output)
         });
@@ -690,7 +737,7 @@ mod journal_fault_tests {
     fn final_active_journal_sync_error_retires_old_epoch_after_reopen() {
         let rig = Rig::new();
         rig.emit("session");
-        let result = with_after_rename_fault("activation-journal", 4, || {
+        let result = with_replace_fault("activation-journal", ReplaceStage::ParentSync, 4, || {
             rig.installation.activate(&rig.config)
         });
         assert_eq!(result, Err(Error::DurabilityUncertain));
@@ -735,5 +782,165 @@ mod journal_fault_tests {
             .expect("record append");
         record.write_all(b"x").expect("one byte over");
         assert_eq!(private.read("limit"), Err(Error::StateCorrupt));
+    }
+
+    #[test]
+    fn replacement_stage_faults_preserve_the_old_record_until_rename() {
+        for stage in STAGES {
+            let rig = Rig::new();
+            let directory = super::PrivateDirectory::open(
+                &rig.root.path().join("snapshots"),
+                super::RootMode::Existing,
+            )
+            .expect("payload root");
+            directory.replace("record", b"old").expect("old record");
+            let result = with_replace_fault("record", stage, 1, || {
+                directory.replace("record", b"successor")
+            });
+            assert!(result.is_err(), "{stage:?}");
+            assert_eq!(
+                directory.read("record").expect("record read"),
+                Some(if stage == ReplaceStage::ParentSync {
+                    b"successor".to_vec()
+                } else {
+                    b"old".to_vec()
+                }),
+                "{stage:?}"
+            );
+            directory
+                .replace("record", b"fresh")
+                .expect("recovery write");
+            assert_eq!(
+                directory.read("record").expect("read"),
+                Some(b"fresh".to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn payload_replacement_faults_never_emit_or_authorize_orphan_data() {
+        for stage in STAGES {
+            let rig = Rig::new();
+            let pending = rig.installation.begin_session("session").expect("pending");
+            rig.installation
+                .attach_binding(&pending, &rig.cwd)
+                .expect("binding");
+            let mut output = Vec::new();
+            let result = with_replace_fault("payload-", stage, 1, || {
+                rig.installation
+                    .complete_session(&pending, &rig.cwd, rig.pack(), &mut output)
+            });
+            assert!(result.is_err(), "{stage:?}");
+            assert!(output.is_empty(), "{stage:?}");
+            let reopened = rig.reopen();
+            assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+            rig.emit("session");
+            assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+        }
+    }
+
+    #[test]
+    fn prepared_head_and_journal_faults_require_a_fresh_generation() {
+        for prefix in ["journal-", "head-"] {
+            for stage in STAGES {
+                let rig = Rig::new();
+                let pending = rig.installation.begin_session("session").expect("pending");
+                rig.installation
+                    .attach_binding(&pending, &rig.cwd)
+                    .expect("binding");
+                let mut output = Vec::new();
+                let result = with_replace_fault(prefix, stage, 1, || {
+                    rig.installation
+                        .complete_session(&pending, &rig.cwd, rig.pack(), &mut output)
+                });
+                assert!(result.is_err(), "{prefix} {stage:?}");
+                assert!(output.is_empty(), "{prefix} {stage:?}");
+                let reopened = rig.reopen();
+                assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+                if reopened.begin_session("session").is_err() {
+                    reopened.repair_session("session").expect("repair");
+                }
+                rig.emit("session");
+                assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn final_emitted_head_and_journal_faults_reject_complete_output() {
+        for (prefix, occurrence) in [("journal-", 4), ("head-", 2)] {
+            for stage in STAGES {
+                let rig = Rig::new();
+                let pending = rig.installation.begin_session("session").expect("pending");
+                rig.installation
+                    .attach_binding(&pending, &rig.cwd)
+                    .expect("binding");
+                let mut output = Vec::new();
+                let result = with_replace_fault(prefix, stage, occurrence, || {
+                    rig.installation
+                        .complete_session(&pending, &rig.cwd, rig.pack(), &mut output)
+                });
+                assert!(result.is_err(), "{prefix} {stage:?}");
+                assert_eq!(output.last(), Some(&b'\n'), "{prefix} {stage:?}");
+                let reopened = rig.reopen();
+                assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+                reopened.repair_session("session").expect("repair");
+                rig.emit("session");
+                assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn installation_journal_and_manifest_faults_retire_only_after_a_durable_barrier() {
+        for prefix in ["activation-journal", "installation-manifest"] {
+            for stage in STAGES {
+                let rig = Rig::new();
+                rig.emit("session");
+                let result =
+                    with_replace_fault(prefix, stage, 1, || rig.installation.activate(&rig.config));
+                assert!(result.is_err(), "{prefix} {stage:?}");
+                let reopened = rig.reopen();
+                let prior_survives =
+                    prefix == "activation-journal" && stage != ReplaceStage::ParentSync;
+                assert_eq!(
+                    reopened.read_snapshot("session", &rig.cwd).is_ok(),
+                    prior_survives,
+                    "{prefix} {stage:?}"
+                );
+                if !prior_survives {
+                    reopened.repair_incomplete().expect("repair");
+                }
+                reopened.activate(&rig.config).expect("fresh activation");
+                assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+                rig.emit("session");
+                assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn later_activation_resolution_faults_never_promote_an_active_manifest() {
+        for (prefix, occurrence) in [
+            ("activation-journal", 2),
+            ("activation-journal", 4),
+            ("installation-manifest", 2),
+        ] {
+            for stage in STAGES {
+                let rig = Rig::new();
+                rig.emit("session");
+                let result = with_replace_fault(prefix, stage, occurrence, || {
+                    rig.installation.activate(&rig.config)
+                });
+                assert!(result.is_err(), "{prefix} {occurrence} {stage:?}");
+                let reopened = rig.reopen();
+                assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+                reopened.repair_incomplete().expect("repair");
+                assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+                reopened.activate(&rig.config).expect("fresh activation");
+                rig.emit("session");
+                assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+            }
+        }
     }
 }
