@@ -1,0 +1,35 @@
+# Protected managed SessionStart delivery configuration.
+# Install outside all workspaces; activate through the fixed installation.
+schema_version = 2
+state_root = "/var/lib/memory-hooks/snapshots"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "workstation-host"
+phase = "implementing"
+language = ["rust"]
+
+[transport]
+# Only a root origin is accepted; /memoryd or any other prefix is invalid.
+memoryd_url = "https://memoryd.example.internal/"
+# Choose exactly one of api_token or unauthenticated = true.
+api_token = "replace-with-protected-bearer-token"
+unauthenticated = false
+# Advance this nonsecret revision whenever credential authority changes.
+credential_revision = "initial"
+
+[client]
+adapter = "codex-v1"
+contract = "managed-session-start-v1"
+async_hook = false
+timeout_seconds = 90
+additional_context_limit = 0
+
+# For a separate Claude installation use adapter = "claude-v1" and omit
+# additional_context_limit. Give it its own fixed anchor and generated UUID.

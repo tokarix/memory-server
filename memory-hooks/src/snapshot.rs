@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use memory_common::guardrails::GuardrailPack;
+use memory_common::guardrails::{GuardrailPack, MAX_PUBLICATION_BYTES};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -16,6 +16,11 @@ use crate::state::{PrivateDirectory, RootMode};
 
 /// Maximum serialized hook output, including worst-case JSON string escaping.
 pub const OUTPUT_BYTES: usize = 192 * 1024;
+
+// A JSON string can expand each publication byte to at most six ASCII bytes
+// (a \u00XX escape). The fixed envelope, quotes and newline need <256 bytes.
+// This accepts every shared-valid 24-KiB publication without truncation.
+const _: () = assert!(6 * MAX_PUBLICATION_BYTES + 256 <= OUTPUT_BYTES);
 
 /// Local output lifecycle of a single never-reused generation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

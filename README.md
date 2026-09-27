@@ -415,6 +415,21 @@ The current schema is migration-driven. For the next planned shape, see
 
 ## Hooks
 
+For mandatory startup guardrails, use the managed `memory-hooks session-start`
+helper with a protected version-two configuration and a fixed installation
+anchor. It fetches a fresh classified mandatory pack for every supported
+`SessionStart`, publishes its exact text to Codex or Claude Code, and records
+the local output result for later validation. Provisioning, client registration,
+root migration, and recovery are described in
+[`docs/hooks-delivery.md`](docs/hooks-delivery.md). Startup delivery is not
+action gating; later actions must revalidate through the public snapshot
+reader.
+
+The shell scripts below are legacy optional recall and transcript-capture
+features. They do not establish mandatory delivery and should be configured
+separately from the managed helper. Their `/tmp` state and remote session writes
+are not imported by `memory-hooks`.
+
 A Claude Code `PreCompact` hook script is included at
 [`hooks/pre-compact.sh`](hooks/pre-compact.sh). It runs the `ingest`
 binary against the session transcript before compaction.
@@ -493,10 +508,9 @@ Notes:
   from `MEMORY_SERVER_CONFIG` if you want to point at another config file.
 - Hook state is cached under `/tmp/memory-server-hooks/<external-session-id>/`.
 
-The separate [`memory-hooks` trust foundation](docs/hooks-trust.md) provides
-validated configuration, canonical repository bindings, and private state for
-future adapters. It is not wired into the scripts above. Its configuration and
-state are separate from the legacy hook files.
+The managed helper's trust and private-state boundary is documented in
+[`docs/hooks-trust.md`](docs/hooks-trust.md). It is not wired into the scripts
+above. Its configuration and state are separate from the legacy hook files.
 
 For durable instruction enforcement, prefer the following flow over
 duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
@@ -504,9 +518,8 @@ duplicating guidance in `AGENTS.md` or `CLAUDE.md`:
 - Store durable instructions as `rule` memories. Put cross-project rules
   under project `general`; put repo-specific rules under that repo's
   project name.
-- Call `memory_bootstrap(project)` at session start or first prompt in a
-  hook so the agent receives the effective rule set plus supporting
-  non-rule recall memories.
+- Use managed `memory-hooks session-start` for the mandatory pack. Optional
+  `memory_bootstrap(project)` can still add supporting non-rule recall.
 - Call `memory_rules(project)` from pre-action hooks when only the
   enforceable rule set is needed.
 - Keep hooks focused on deterministic enforcement and verification that

@@ -1258,13 +1258,87 @@ mod tests {
             let pack: memory_common::guardrails::GuardrailPack = response.json().await.unwrap();
             assert_eq!(pack.mandatory.len(), 1);
             assert_eq!(pack.mandatory[0].id, Uuid::from_u128(expected_id));
-            pack.validate_for(
-                "app",
-                &memory_common::policy::ResolutionContext {
-                    profile: Some(profile.to_owned()),
-                    ..memory_common::policy::ResolutionContext::default()
-                },
+            let selected_context = memory_common::policy::ResolutionContext {
+                profile: Some(profile.to_owned()),
+                ..memory_common::policy::ResolutionContext::default()
+            };
+            pack.validate_for("app", &selected_context).unwrap();
+            let hook_http = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap();
+            let hook_pack = memory_common::http_client::HttpMemoryClient::with_http_client(
+                &format!("http://{addr}/"),
+                None,
+                hook_http,
             )
+            .unwrap()
+            .with_context(selected_context)
+            .guardrails("app")
+            .await
+            .unwrap();
+            assert_eq!(hook_pack, pack);
+            assert_eq!(
+                hook_pack.publication().unwrap(),
+                pack.publication().unwrap()
+            );
+            let stored_pack = hook_pack.clone();
+            let stored_profile = profile.to_owned();
+            tokio::task::spawn_blocking(move || {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+
+                let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+                    .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+                let root = tempfile::tempdir_in(base).unwrap();
+                let cwd = root.path().join("workspace");
+                std::fs::create_dir(&cwd).unwrap();
+                let config_path = root.path().join("hooks.toml");
+                let config = format!(
+                    "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"app\"\n[bindings.context]\nprofile = {stored_profile:?}\n[transport]\nmemoryd_url = \"http://{addr}/\"\nunauthenticated = true\ncredential_revision = \"fixture\"\n[client]\nadapter = \"codex-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\nadditional_context_limit = 0\n",
+                    root.path().join("snapshots").display().to_string(),
+                    cwd.display().to_string()
+                );
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&config_path)
+                    .unwrap();
+                file.write_all(config.as_bytes()).unwrap();
+                let control = root.path().join("control");
+                let id = memory_hooks::Installation::initialize(
+                    &control,
+                    memory_hooks::config::ClientAdapter::CodexV1,
+                )
+                .unwrap();
+                let installation = memory_hooks::Installation::open(
+                    &control,
+                    id,
+                    memory_hooks::config::ClientAdapter::CodexV1,
+                )
+                .unwrap();
+                installation.activate(&config_path).unwrap();
+                let pending = installation.begin_session("real-daemon").unwrap();
+                installation.attach_binding(&pending, &cwd).unwrap();
+                let mut output = Vec::new();
+                installation
+                    .complete_session(&pending, &cwd, stored_pack.clone(), &mut output)
+                    .unwrap();
+                let decoded: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(
+                    decoded["hookSpecificOutput"]["additionalContext"],
+                    stored_pack.publication().unwrap()
+                );
+                assert_eq!(
+                    installation.read_snapshot("real-daemon", &cwd).unwrap().pack,
+                    stored_pack
+                );
+            })
+            .await
             .unwrap();
         }
         for endpoint in ["rules", "bootstrap"] {

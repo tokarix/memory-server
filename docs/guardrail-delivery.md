@@ -71,3 +71,24 @@ startup. This delivery contract cannot erase text retained by a disconnected
 client or atomically lease policy across the daemon and a later mutation.
 Downstream client enforcement and Cockpit snapshot propagation are separate
 work.
+
+## Managed client SessionStart boundary
+
+For Codex and Claude Code, the protected `memory-hooks session-start` helper
+uses the same shared HTTP client and `GuardrailPack` validation but fetches a
+new pack for each supported top-level startup, resume, clear, compact and
+Claude fork event. Its trusted v2 config supplies the project, complete
+context, root-only endpoint and explicit authentication. The client event
+cannot change that authority. The helper serializes one hook-specific JSON
+response whose decoded `additionalContext` is the exact publication above.
+The client registration must be synchronous; Codex must set
+`additionalContextLimit = 0` to avoid replacing a large mandatory context
+with a spill preview. [Provisioning and recovery](hooks-delivery.md) cover the
+fixed installation anchor and activation epochs.
+
+The helper's public snapshot reader validates current local Emitted evidence
+from the anchor and active payload root. Neither MCP connection startup nor
+optional `memory_bootstrap`/capture scripts establish that evidence. Emission
+does not prove the client consumed or obeyed the text, and it does not grant
+later mutation authority. A later action must revalidate the current
+installation/session generation; action gating is a separate contract.

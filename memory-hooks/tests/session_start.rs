@@ -121,6 +121,10 @@ fn invoke(id: Uuid, cwd: &Path, adapter: ClientAdapter, source: &str) -> std::pr
         "source": source,
         "agent_type": "custom-top-level"
     });
+    invoke_raw(id, cwd, adapter, event.to_string().as_bytes())
+}
+
+fn invoke_raw(id: Uuid, cwd: &Path, adapter: ClientAdapter, event: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
         .arg("session-start")
         .arg("--installation")
@@ -139,9 +143,68 @@ fn invoke(id: Uuid, cwd: &Path, adapter: ClientAdapter, source: &str) -> std::pr
         .stdin
         .take()
         .expect("stdin")
-        .write_all(event.to_string().as_bytes())
+        .write_all(event)
         .expect("write event");
     child.wait_with_output().expect("helper output")
+}
+
+#[test]
+fn invalid_but_identifiable_event_retires_head_without_http() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::CodexV1, port);
+    let pack = pack(&installation, &cwd);
+    let handle = response(
+        listener.try_clone().expect("clone listener"),
+        serde_json::to_vec(&pack).expect("pack JSON"),
+        "200 OK",
+    );
+    assert!(
+        invoke(id, &cwd, ClientAdapter::CodexV1, "startup")
+            .status
+            .success()
+    );
+    handle.join().expect("server");
+    installation
+        .read_snapshot("session", &cwd)
+        .expect("emitted");
+
+    let event = serde_json::json!({
+        "hook_event_name": "SessionStart", "session_id": "session", "cwd": cwd,
+        "source": "fork"
+    });
+    let output = invoke_raw(
+        id,
+        &cwd,
+        ClientAdapter::CodexV1,
+        event.to_string().as_bytes(),
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(installation.read_snapshot("session", &cwd).is_err());
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    assert!(
+        listener.accept().is_err(),
+        "unsupported event made an HTTP request"
+    );
+
+    for bytes in [
+        br#"{"session_id":"session","session_id":"ambiguous"}"#.as_slice(),
+        br#"{"session_id":12}"#.as_slice(),
+        b"\xff".as_slice(),
+        b"{}{}".as_slice(),
+    ] {
+        let output = invoke_raw(id, &cwd, ClientAdapter::CodexV1, bytes);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+    assert!(
+        listener.accept().is_err(),
+        "malformed event made an HTTP request"
+    );
 }
 
 #[test]

@@ -1,0 +1,163 @@
+# Managed SessionStart guardrail delivery
+
+`memory-hooks session-start` consumes one top-level Codex or Claude Code
+`SessionStart` event, fetches a fresh authoritative mandatory pack, writes one
+JSON response with its exact `GuardrailPack::publication()` in
+`hookSpecificOutput.additionalContext`, and records local emission evidence.
+It does not gate later actions. Use `Installation::read_snapshot` and revalidate
+its epoch and generation for downstream checks; mutation gating belongs to
+issue #87. Optional bootstrap, recall, transcript capture and pre-compact
+scripts have separate state and failure budgets and cannot rescue an invalid
+mandatory snapshot.
+
+## Provisioning and activation
+
+Install the helper and a protected [v2 TOML configuration](../memory-hooks-v2.toml.example)
+outside every workspace. Use a fixed absolute control directory for each
+installation. The trusted launcher supplies its generated UUID and adapter;
+events, environment variables, repository content, and the active config
+cannot move this anchor. Its parent and the config/binary path need the
+ownership, mode and ACL controls in [the trust guide](hooks-trust.md).
+
+```sh
+/opt/memory-hooks/bin/memory-hooks check-config --config /etc/memory-hooks/codex.toml
+/opt/memory-hooks/bin/memory-hooks init-installation --installation /var/lib/memory-hooks/codex-control --client codex-v1
+# Copy the installation_id from the initialization JSON into protected launcher settings.
+/opt/memory-hooks/bin/memory-hooks activate-installation --installation /var/lib/memory-hooks/codex-control --installation-id 11111111-1111-4111-8111-111111111111 --client codex-v1 --config /etc/memory-hooks/codex.toml
+/opt/memory-hooks/bin/memory-hooks installation-status --installation /var/lib/memory-hooks/codex-control --installation-id 11111111-1111-4111-8111-111111111111 --client codex-v1
+```
+
+The UUID above is a placeholder; use the one generated once by
+`init-installation`. Initialization refuses an existing anchor and startup
+never initializes one. `check-config` only validates; it does not activate or
+emit. Use a separate protected config and anchor for a Claude installation,
+with `adapter = "claude-v1"` and no `additional_context_limit` key.
+
+All delivery-affecting changes, including config path, binding, project,
+context, profile, endpoint, credential revision, adapter contract and
+`state_root`, require `activate-installation` with a new protected config.
+Do not edit an active config in place. Activation first commits a Changing
+epoch and fresh nonce under the fixed installation lock. It then validates
+the config/root and commits Active for that epoch. Failure leaves old heads
+retired and the installation Changing. A root may be on a different supported
+filesystem. Restoring an old root/config is another activation; old payloads
+remain on disk but confer no authority. Every session needs another fresh
+successful `SessionStart`. A detected in-place mismatch likewise advances to
+Changing and cannot be undone by reverting file bytes.
+
+For recovery, repair an unresolved installation transition with
+`repair-installation`, then activate a validated config and start fresh client
+sessions. A corrupt/missing anchor or unsafe storage requires managed
+decommissioning; the helper cannot infer a prior head from snapshot roots.
+To replace a live anchor, stop managed hook use and sessions, durably call
+`retire-installation` on the old anchor, retain its Retired tombstone, create
+a different empty anchor/UUID, update trusted launchers and start new sessions.
+If the old anchor is unavailable, disable its launchers and perform explicit
+managed repair/decommissioning before replacement. Never copy Emitted heads
+or treat a backup restore as a live relocation.
+
+## Managed registrations
+
+The examples use fixed absolute paths and a placeholder UUID. Install them
+through protected client settings, not repository-owned hook configuration.
+The Codex fragment belongs in a managed `requirements.toml` hook layer;
+the Claude fragment belongs in managed `settings.json`. Replace the UUID with
+the appropriate installation's generated value. Keep the handlers synchronous
+and their timeout above the helper's 60-second deadline.
+
+Codex managed TOML fragment:
+
+```toml
+[features]
+hooks = true
+
+[[hooks.SessionStart]]
+matcher = "^(startup|resume|clear|compact)$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/opt/memory-hooks/bin/memory-hooks session-start --installation /var/lib/memory-hooks/codex-control --installation-id 11111111-1111-4111-8111-111111111111 --client codex-v1"
+timeout = 90
+async = false
+additionalContextLimit = 0
+```
+
+Claude managed JSON fragment:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "^(startup|resume|clear|compact|fork)$",
+      "hooks": [{
+        "type": "command",
+        "command": "/opt/memory-hooks/bin/memory-hooks session-start --installation /var/lib/memory-hooks/claude-control --installation-id 22222222-2222-4222-8222-222222222222 --client claude-v1",
+        "timeout": 90,
+        "async": false
+      }]
+    }]
+  }
+}
+```
+
+Codex [documents](https://learn.chatgpt.com/docs/hooks#sessionstart) the
+four sources and the JSON output shape. Its
+[large-output setting](https://learn.chatgpt.com/docs/hooks#large-hook-output)
+uses zero to deliver complete additional context instead of a spill preview.
+Claude [documents](https://code.claude.com/docs/en/hooks#sessionstart) `fork`
+and optional top-level `agent_type`; this helper ignores that metadata but
+rejects explicit delegated envelopes. Claude versions before 2.1.214 report
+fork as `resume`. The local fixture suite exercises both adapters and sources;
+managed-client runtime compatibility must also be smoke-tested on the exact
+deployed client versions before production activation.
+
+## Event and snapshot contract
+
+The helper accepts exactly one UTF-8 JSON object, at most 64 KiB. Required
+fields are `session_id` (1–1024 UTF-8 bytes), `cwd` (absolute, at most 4 KiB),
+`hook_event_name = "SessionStart"`, and a supported `source`. Duplicate
+required keys, wrong types, trailing JSON, malformed text, unsupported events
+or sources, explicit delegation, and an event cwd unequal to the canonical
+process cwd fail. Other bounded metadata cannot select project, profile,
+context, config, endpoint or root. An unambiguous session ID claims a new
+generation before source/cwd/config/root validation, retiring old success.
+
+The helper uses the shared five-second `HttpMemoryClient::guardrails` request
+with the trusted binding context. It rejects redirects and ambient proxies.
+The configured URL must be a root HTTP(S) origin, with no userinfo, query,
+fragment or path prefix; root spellings normalize equivalently. No bootstrap,
+capture or session-start remote write occurs on this mandatory path. The
+shared pack limits remain 32 policies, 16 KiB canonical digest input, 24 KiB
+serialized pack/publication and 32 KiB HTTP response. The hook event limit is
+64 KiB, each private record is at most 128 KiB, and complete escaped JSON
+output is bounded at 192 KiB; none is truncated.
+
+The anchor holds the versioned installation manifest, activation journal,
+session head/journal and fixed locks. The active snapshot root holds an exact
+payload containing installation UUID, epoch/nonce, session hash, generation,
+sequence, binding, complete pack and output hash/count. Pending retires the
+previous head; Prepared means a payload is durable but output completion is
+unproven; Emitted is committed only after all bytes are written and flushed;
+Invalid remains unusable. The public reader starts at the fixed anchor and
+requires current Active config, epoch/nonce, Emitted head, exact current-root
+payload, binding, scope, pack/digest and output evidence. Timestamps and
+matching digests alone are never authority.
+
+Errors use bounded safe codes on stderr and a nonzero exit. They do not print
+the bearer token, raw config/event, arbitrary path, Git stderr or upstream
+body. A failed or partial write can leave Prepared; a crash after complete
+output but before Emitted is a false negative requiring fresh delivery.
+Complete local output plus durable evidence is not client acknowledgement or
+proof of obedience. Client switches may discard hook context, and #87 must
+still revalidate actions. Filesystem durability is limited to the supported
+local filesystem's ownership, `flock`, rename and `fsync` guarantees; hashes
+and locks do not authenticate hostile same-UID writes or arbitrary rollback.
+
+To exercise the repository fixtures, run `cargo test -p memory-hooks
+--all-features --test session_start` with `XDG_RUNTIME_DIR` pointing to a
+private supported filesystem. The integration tests start a local HTTP peer,
+spawn the real helper, decode exactly one output JSON document, compare its
+additional context byte for byte with the publication, and read the snapshot
+through the public validator. They also check that a failed refresh cannot
+reuse prior delivery. Run the workspace test suite with a disposable migrated
+PostgreSQL/pgvector database to exercise memoryd policy integration.

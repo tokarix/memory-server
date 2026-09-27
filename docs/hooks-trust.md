@@ -1,20 +1,23 @@
 # Trusted hooks foundation
 
-`memory-hooks` is a Rust library and administrative binary for later hook
-adapters. It validates one operator-selected configuration, resolves an actual
-location to a canonical local repository binding, and offers private typed
-state transactions. It is not wired into the existing `hooks/*.sh` scripts and
-does not fetch guardrails, handle client events, run pending commands, emit a
-client hook response, or enforce a decision. The old scripts retain their own
+`memory-hooks` validates protected configuration and canonical repository
+bindings. Its managed `session-start` command fetches and emits exact mandatory
+guardrails for Codex and Claude Code. The public `Installation::read_snapshot`
+reader validates current local delivery evidence for later consumers; it does
+not authorize an action. The helper is not wired into the existing `hooks/*.sh`
+scripts. Those scripts retain their own
 `config.toml`/`MEMORY_SERVER_CONFIG` behavior and legacy `/tmp` state; neither
 is imported or migrated by this crate.
 
 ## Managed installation
 
-Install the helper executable and [example configuration](../memory-hooks.toml.example)
+Install the helper executable and [v1 example](../memory-hooks.toml.example) or
+[v2 delivery example](../memory-hooks-v2.toml.example)
 outside every configured workspace. A managed launcher must supply a fixed
-absolute `--config` argument that repository text, model output, and tool
-arguments cannot change. The process cannot prove who authored its argv. Pin
+absolute `--config` argument for v1 inspection, or the immutable
+`--installation`, `--installation-id`, and `--client` arguments for v2 delivery.
+Repository text, model output, and tool arguments cannot change them. The
+process cannot prove who authored its argv. Pin
 the helper binary, configuration and their parent directories with OS access
 controls. Restrict configuration to the effective user or trusted root owner,
 mode `0600` or owner-read-only equivalent, with no symlink component or
@@ -61,6 +64,17 @@ absolute `common_dir`, exactly one of `primary_worktree` or
 `allow_subdirectories` defaults to `false` and must be explicitly true for
 descendants. A project literally named `general` is accepted when explicitly
 bound.
+
+For v2, `transport.memoryd_url` must be a pathless HTTP(S) origin; even a
+configured `/memoryd` prefix is rejected before any request. Explicit
+`api_token` or `unauthenticated = true` selects authentication, and the
+nonsecret `credential_revision` must advance when credential authority changes.
+The managed client contract names `codex-v1` or `claude-v1`, disables async
+delivery, and requires a handler timeout of at least 90 seconds. Codex also
+requires `additional_context_limit = 0`. The v2 fingerprint includes these
+normalized values and all existing trust inputs, but never bearer-token bytes.
+All delivery-affecting changes require explicit activation. Do not edit an
+active config in place; a detected mismatch advances the epoch to Changing.
 
 `ResolutionContext` is the shared `memory-common` schema. Its `profile` and
 optional `phase` use canonical identifiers, and optional `language` and
@@ -122,7 +136,40 @@ error means durability is uncertain. Failed pre-rename writes leave the old
 complete record. Only the transaction's own temporary name is cleaned up;
 orphan temporary files are never read as committed records. Lock files remain
 in place across transactions. The API supplies storage primitives, not a
-guardrail snapshot or emitted/prepared lifecycle.
+guardrail snapshot or emitted/prepared lifecycle in v1.
+
+Version-two delivery uses two private stores. A stable installation control
+anchor is provisioned once, outside every workspace and snapshot root. Its
+UUID, epoch, nonce, lifecycle, current session heads, transition journals, and
+fixed installation/session locks remain there across root and config changes.
+Snapshot roots contain replaceable exact payloads and have no authority by
+themselves. All stores use the same checked descriptor-relative ownership,
+mode, ACL, symlink, hardlink, filesystem, atomic-replace and `fsync` rules.
+The lock order is installation, session, then snapshot; HTTP fetch releases
+control locks. Payloads are persisted before anchor heads so separate
+filesystems need no cross-root rename. An unresolved journal, uncertain
+post-rename sync, absent anchor or missing current payload yields no usable
+snapshot.
+
+Activation durably commits Changing at a new checked epoch and nonce before
+validating a proposed config/root, then commits Active for that same epoch.
+Failure leaves Changing; restoring an old root or identical digest takes
+another activation and every session needs a new successful delivery. A
+retired anchor is a permanent tombstone. Live anchor relocation, copying,
+backup restore and import of emitted heads are unsupported. To replace an
+anchor, stop managed sessions, retire the old anchor durably, retain its
+tombstone, then provision a new UUID and update trusted launchers. If the old
+anchor cannot be retired, managed repair/decommissioning must disable old
+launchers before replacement.
+
+For one session, Pending retires the previous head before root/binding/HTTP
+work. Prepared records the exact durable payload but is unusable to readers.
+Only a complete local JSON write and flush can precede Emitted. A crash after
+output but before Emitted is a conservative false negative that needs fresh
+delivery. The reader starts at the fixed anchor and checks epoch, generation,
+current config, binding, scope, pack, payload hash, and output evidence. The
+result is local protocol evidence, not client acknowledgement or a guarantee
+that text was obeyed. See [delivery operations](hooks-delivery.md).
 
 Version-one fixed limits are 256 KiB config, 1,024 bindings, 4 KiB per path,
 256 bytes per project, 1 KiB per external client/session ID, 128 KiB per
@@ -143,11 +190,14 @@ fixtures run under the user's private runtime directory; Cargo targets and
 compiler temporary files remain on persistent disk. Other platforms currently
 return `unsupported_platform`.
 
-Stable error codes are `config_untrusted`, `config_invalid`,
+Stable error codes include `config_untrusted`, `config_invalid`,
 `config_too_large`, `identity_unmapped`, `identity_ambiguous`,
 `identity_invalid`, `identity_changed`, `git_timeout`, `state_insecure`,
 `state_corrupt`, `state_scope_mismatch`, `lock_timeout`, `io`, and
-`unsupported_platform`. Diagnostics contain only bounded operation/field
+`unsupported_platform`, plus `installation_invalid`, `installation_inactive`,
+`installation_mismatch`, `session_invalid`, `session_stale`, `event_invalid`,
+`event_too_large`, `guardrails_unavailable`, `snapshot_invalid`, and
+`output_too_large`. Diagnostics contain only bounded operation/field
 names and OS error codes, with a rebind hint for identity failures. They do
 not include TOML source, raw Git stderr, raw paths, environment values, tool
 payloads, credentials, or credential-bearing URLs.

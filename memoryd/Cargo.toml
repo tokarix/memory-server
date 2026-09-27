@@ -37,3 +37,8 @@ tokenizers = "0.22.2"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 
 [build-dependencies]
+
+[dev-dependencies]
+memory-common = { path = "../memory-common", features = ["http-client"] }
+memory-hooks = { path = "../memory-hooks" }
+tempfile = "3.27.0"
