@@ -6,8 +6,10 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use memory_common::guardrails::GuardrailPack;
 use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
@@ -128,6 +130,170 @@ fn exact_output_and_public_reader_require_a_complete_emitted_head() {
     assert_eq!(read.pack, pack);
     assert_eq!(read.epoch, pending.epoch());
     assert_eq!(read.generation, pending.generation());
+}
+
+struct CrashWriter {
+    stage: String,
+    barrier: PathBuf,
+    accepted_first_byte: bool,
+}
+
+impl CrashWriter {
+    fn pause(&self) -> ! {
+        fs::write(&self.barrier, b"reached").expect("crash barrier");
+        loop {
+            thread::park();
+        }
+    }
+}
+
+impl Write for CrashWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.stage == "prepared" || (self.stage == "partial" && self.accepted_first_byte) {
+            self.pause();
+        }
+        if self.stage == "partial" {
+            self.accepted_first_byte = true;
+            return Ok(bytes.len().min(1));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.stage == "complete_output" {
+            self.pause();
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn crash_stage_worker() {
+    let Ok(stage) = std::env::var("MEMORY_HOOKS_CRASH_STAGE") else {
+        return;
+    };
+    let control = PathBuf::from(std::env::var_os("MEMORY_HOOKS_CRASH_CONTROL").expect("control"));
+    let cwd = PathBuf::from(std::env::var_os("MEMORY_HOOKS_CRASH_CWD").expect("cwd"));
+    let barrier = PathBuf::from(std::env::var_os("MEMORY_HOOKS_CRASH_BARRIER").expect("barrier"));
+    let id = std::env::var("MEMORY_HOOKS_CRASH_ID")
+        .expect("installation id")
+        .parse()
+        .expect("UUID");
+    let installation = Installation::open(&control, id, ClientAdapter::CodexV1).expect("open");
+    let pending = installation.begin_session("crash").expect("claim");
+    if stage == "pending" {
+        fs::write(&barrier, b"reached").expect("barrier");
+        loop {
+            thread::park();
+        }
+    }
+    installation
+        .attach_binding(&pending, &cwd)
+        .expect("attach binding");
+    if stage == "binding" {
+        fs::write(&barrier, b"reached").expect("barrier");
+        loop {
+            thread::park();
+        }
+    }
+    let binding = installation
+        .active()
+        .expect("active")
+        .config
+        .resolve(&cwd)
+        .expect("binding");
+    let pack = GuardrailPack::new(
+        binding.project().to_owned(),
+        binding.context().clone(),
+        1,
+        vec![CanonicalRule {
+            project: "general".to_owned(),
+            id: Uuid::from_u128(1),
+            policy_key: Some("exact".to_owned()),
+            revision: Some(1),
+            delivery_class: Some(DeliveryClass::Mandatory),
+            selectors: PolicySelectors::default(),
+            values: BTreeMap::new(),
+            content: "crash barrier exact output".to_owned(),
+            overrides: None,
+        }],
+    )
+    .expect("pack");
+    let mut writer = CrashWriter {
+        stage,
+        barrier,
+        accepted_first_byte: false,
+    };
+    installation
+        .complete_session(&pending, &cwd, pack, &mut writer)
+        .expect("worker must pause before completion");
+    panic!("worker completed without reaching crash barrier");
+}
+
+#[test]
+fn terminated_uncommitted_attempts_require_fresh_delivery_after_reopen() {
+    for stage in [
+        "pending",
+        "binding",
+        "prepared",
+        "partial",
+        "complete_output",
+    ] {
+        let rig = Rig::new();
+        let barrier = rig.root.path().join("crash-barrier");
+        let mut child = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "crash_stage_worker"])
+            .env("MEMORY_HOOKS_CRASH_STAGE", stage)
+            .env(
+                "MEMORY_HOOKS_CRASH_CONTROL",
+                rig.root.path().join("control"),
+            )
+            .env("MEMORY_HOOKS_CRASH_CWD", &rig.cwd)
+            .env("MEMORY_HOOKS_CRASH_BARRIER", &barrier)
+            .env("MEMORY_HOOKS_CRASH_ID", rig.id.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("worker process");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !barrier.exists() && Instant::now() < deadline {
+            assert!(
+                child.try_wait().expect("worker status").is_none(),
+                "{stage}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(barrier.exists(), "worker did not reach {stage}");
+        child.kill().expect("terminate worker");
+        child.wait().expect("reap worker");
+        let reopened = Installation::open(
+            &rig.root.path().join("control"),
+            rig.id,
+            ClientAdapter::CodexV1,
+        )
+        .expect("reopen installation");
+        assert!(
+            reopened.read_snapshot("crash", &rig.cwd).is_err(),
+            "{stage}"
+        );
+        let fresh = reopened.begin_session("crash").expect("fresh generation");
+        reopened
+            .attach_binding(&fresh, &rig.cwd)
+            .expect("fresh binding");
+        let pack = rig.pack("fresh output after crash");
+        let mut output = Vec::new();
+        reopened
+            .complete_session(&fresh, &rig.cwd, pack.clone(), &mut output)
+            .expect("fresh emission");
+        assert_eq!(output.last(), Some(&b'\n'));
+        assert_eq!(
+            reopened
+                .read_snapshot("crash", &rig.cwd)
+                .expect("current reader")
+                .pack,
+            pack
+        );
+    }
 }
 
 #[test]

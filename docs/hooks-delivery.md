@@ -196,6 +196,12 @@ workspace test suite with a disposable migrated PostgreSQL/pgvector database
 to exercise memoryd policy integration. Output fixtures include interrupted
 short writes, failure at the final byte/newline, a real broken stdout pipe,
 a real blocked pipe until deadline, and unfinished input until deadline.
+`cargo test -p memory-hooks --all-features --test snapshot` also kills a
+separate test worker at Pending, binding attachment, Prepared before output,
+partial output and complete output before Emitted. After each kill it reopens
+the installation, rejects the interrupted attempt through the public reader,
+and requires a fresh generation to recover. The worker barriers are confined
+to the test binary; the production helper exposes no crash-stage switch.
 These fixtures establish the local protocol contract. Optional
 real-client validation on deployed versions is an operator choice.
 
