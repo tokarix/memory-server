@@ -217,6 +217,10 @@ partial output and complete output before Emitted. After each kill it reopens
 the installation, rejects the interrupted attempt through the public reader,
 and requires a fresh generation to recover. The worker barriers are confined
 to the test binary; the production helper exposes no crash-stage switch.
+The private replacement test binary also kills workers before and after
+payload persistence, after the Emitted head sync while its journal is still
+unresolved, and before final journal resolution. A separate kill after the
+final journal sync preserves the fully committed exact snapshot.
 These fixtures establish the local protocol contract. Optional
 real-client validation on deployed versions is an operator choice.
 

@@ -5,6 +5,8 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +40,7 @@ enum ReplaceStage {
     FileSync,
     Rename,
     ParentSync,
+    AfterParentSync,
 }
 
 #[cfg(test)]
@@ -46,6 +49,7 @@ struct ReplaceFault {
     stage: ReplaceStage,
     occurrence: usize,
     seen: usize,
+    barrier: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -59,7 +63,16 @@ fn fail_at(name: &str, stage: ReplaceStage) -> bool {
             return false;
         }
         fault.seen += 1;
-        fault.seen == fault.occurrence
+        if fault.seen != fault.occurrence {
+            return false;
+        }
+        if let Some(barrier) = &fault.barrier {
+            std::fs::write(barrier, b"reached").expect("replacement crash barrier");
+            loop {
+                std::thread::park();
+            }
+        }
+        true
     })
 }
 
@@ -82,6 +95,34 @@ fn with_replace_fault<T>(
             stage,
             occurrence,
             seen: 0,
+            barrier: None,
+        });
+    });
+    let _reset = Reset;
+    run()
+}
+
+#[cfg(test)]
+fn with_replace_pause<T>(
+    prefix: &str,
+    stage: ReplaceStage,
+    occurrence: usize,
+    barrier: PathBuf,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REPLACE_FAULT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    REPLACE_FAULT.with(|slot| {
+        *slot.borrow_mut() = Some(ReplaceFault {
+            prefix: prefix.to_owned(),
+            stage,
+            occurrence,
+            seen: 0,
+            barrier: Some(barrier),
         });
     });
     let _reset = Reset;
@@ -493,6 +534,10 @@ impl PrivateDirectory {
                 return Err(Error::DurabilityUncertain);
             }
             fsync(&self.directory).map_err(|_| Error::DurabilityUncertain)?;
+            #[cfg(test)]
+            if fail_at(name, ReplaceStage::AfterParentSync) {
+                return Err(Error::DurabilityUncertain);
+            }
             Ok(())
         })();
         if write_result.is_err() {
@@ -587,14 +632,17 @@ mod journal_fault_tests {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use memory_common::guardrails::GuardrailPack;
     use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use super::{ReplaceStage, with_replace_fault};
+    use super::{ReplaceStage, with_replace_fault, with_replace_pause};
     use crate::config::ClientAdapter;
     use crate::error::Error;
     use crate::installation::Installation;
@@ -667,30 +715,7 @@ mod journal_fault_tests {
         }
 
         fn pack(&self) -> GuardrailPack {
-            let binding = self
-                .installation
-                .active()
-                .expect("active")
-                .config
-                .resolve(&self.cwd)
-                .expect("binding");
-            GuardrailPack::new(
-                binding.project().to_owned(),
-                binding.context().clone(),
-                1,
-                vec![CanonicalRule {
-                    project: "general".to_owned(),
-                    id: Uuid::from_u128(1),
-                    policy_key: Some("exact".to_owned()),
-                    revision: Some(1),
-                    delivery_class: Some(DeliveryClass::Mandatory),
-                    selectors: PolicySelectors::default(),
-                    values: BTreeMap::new(),
-                    content: "fault test marker".to_owned(),
-                    overrides: None,
-                }],
-            )
-            .expect("pack")
+            pack_for(&self.installation, &self.cwd)
         }
 
         fn emit(&self, session: &str) {
@@ -701,6 +726,138 @@ mod journal_fault_tests {
             self.installation
                 .complete_session(&pending, &self.cwd, self.pack(), &mut Vec::new())
                 .expect("emitted");
+        }
+    }
+
+    fn pack_for(installation: &Installation, cwd: &Path) -> GuardrailPack {
+        let binding = installation
+            .active()
+            .expect("active")
+            .config
+            .resolve(cwd)
+            .expect("binding");
+        GuardrailPack::new(
+            binding.project().to_owned(),
+            binding.context().clone(),
+            1,
+            vec![CanonicalRule {
+                project: "general".to_owned(),
+                id: Uuid::from_u128(1),
+                policy_key: Some("exact".to_owned()),
+                revision: Some(1),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors::default(),
+                values: BTreeMap::new(),
+                content: "fault test marker".to_owned(),
+                overrides: None,
+            }],
+        )
+        .expect("pack")
+    }
+
+    #[test]
+    fn replacement_crash_worker() {
+        let Ok(case) = std::env::var("MEMORY_HOOKS_REPLACE_CRASH_CASE") else {
+            return;
+        };
+        let control =
+            PathBuf::from(std::env::var_os("MEMORY_HOOKS_REPLACE_CRASH_CONTROL").expect("control"));
+        let cwd = PathBuf::from(std::env::var_os("MEMORY_HOOKS_REPLACE_CRASH_CWD").expect("cwd"));
+        let barrier =
+            PathBuf::from(std::env::var_os("MEMORY_HOOKS_REPLACE_CRASH_BARRIER").expect("barrier"));
+        let id = std::env::var("MEMORY_HOOKS_REPLACE_CRASH_ID")
+            .expect("installation id")
+            .parse()
+            .expect("UUID");
+        let installation =
+            Installation::open(&control, id, ClientAdapter::CodexV1).expect("open installation");
+        let pending = installation.begin_session("crash").expect("claim");
+        installation
+            .attach_binding(&pending, &cwd)
+            .expect("binding");
+        let pack = pack_for(&installation, &cwd);
+        let (prefix, stage, occurrence) = match case.as_str() {
+            "payload_before_rename" => ("payload-", ReplaceStage::Rename, 1),
+            "payload_after_sync" => ("payload-", ReplaceStage::AfterParentSync, 1),
+            "emitted_head_after_sync" => ("head-", ReplaceStage::AfterParentSync, 2),
+            "resolution_before_rename" => ("journal-", ReplaceStage::Rename, 4),
+            "resolution_after_sync" => ("journal-", ReplaceStage::AfterParentSync, 4),
+            _ => panic!("unknown crash case"),
+        };
+        with_replace_pause(prefix, stage, occurrence, barrier, || {
+            installation.complete_session(&pending, &cwd, pack, &mut Vec::new())
+        })
+        .expect("worker must pause at replacement stage");
+        panic!("worker completed without reaching crash barrier");
+    }
+
+    #[test]
+    fn killed_replacement_workers_reopen_at_the_last_durable_commit_boundary() {
+        for case in [
+            "payload_before_rename",
+            "payload_after_sync",
+            "emitted_head_after_sync",
+            "resolution_before_rename",
+            "resolution_after_sync",
+        ] {
+            let rig = Rig::new();
+            let barrier = rig.root.path().join("replacement-crash-barrier");
+            let mut child = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "state::journal_fault_tests::replacement_crash_worker",
+                ])
+                .env("MEMORY_HOOKS_REPLACE_CRASH_CASE", case)
+                .env(
+                    "MEMORY_HOOKS_REPLACE_CRASH_CONTROL",
+                    rig.root.path().join("control"),
+                )
+                .env("MEMORY_HOOKS_REPLACE_CRASH_CWD", &rig.cwd)
+                .env("MEMORY_HOOKS_REPLACE_CRASH_BARRIER", &barrier)
+                .env("MEMORY_HOOKS_REPLACE_CRASH_ID", rig.id.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("crash worker");
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !barrier.exists() && Instant::now() < deadline {
+                assert!(child.try_wait().expect("worker status").is_none(), "{case}");
+                thread::sleep(Duration::from_millis(5));
+            }
+            if !barrier.exists() {
+                child.kill().expect("terminate missing barrier worker");
+                child.wait().expect("reap missing barrier worker");
+                panic!("worker did not reach {case}");
+            }
+            child.kill().expect("terminate worker");
+            child.wait().expect("reap worker");
+            let reopened = rig.reopen();
+            if case == "resolution_after_sync" {
+                assert_eq!(
+                    reopened
+                        .read_snapshot("crash", &rig.cwd)
+                        .expect("fully committed reader")
+                        .pack,
+                    rig.pack(),
+                    "{case}"
+                );
+            } else {
+                assert!(reopened.read_snapshot("crash", &rig.cwd).is_err(), "{case}");
+            }
+            if reopened.begin_session("crash").is_err() {
+                reopened
+                    .repair_session("crash")
+                    .expect("repair unresolved head");
+            }
+            rig.emit("crash");
+            assert_eq!(
+                rig.reopen()
+                    .read_snapshot("crash", &rig.cwd)
+                    .expect("fresh reader")
+                    .pack,
+                rig.pack(),
+                "{case}"
+            );
         }
     }
 
