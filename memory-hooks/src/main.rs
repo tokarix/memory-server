@@ -38,6 +38,9 @@ fn admin(
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or(memory_hooks::Error::ConfigInvalid("--installation-id"))?;
     let anchor = Installation::open(path, id, adapter)?;
+    if command == "session-start" && config.is_none() {
+        return memory_hooks::session_start::run(&anchor);
+    }
     let epoch = if command == "activate-installation" {
         anchor.activate(Path::new(
             config.ok_or(memory_hooks::Error::ConfigInvalid("--config"))?,

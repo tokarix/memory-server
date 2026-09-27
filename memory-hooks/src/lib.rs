@@ -9,6 +9,8 @@ pub mod identity;
 pub mod installation;
 pub mod limits;
 #[cfg(target_os = "linux")]
+pub mod session_start;
+#[cfg(target_os = "linux")]
 pub mod snapshot;
 #[cfg(target_os = "linux")]
 pub mod state;

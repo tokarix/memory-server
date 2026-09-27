@@ -39,6 +39,12 @@ pub enum Error {
     InstallationMismatch,
     /// A client session identifier or current generation is invalid.
     SessionInvalid(&'static str),
+    /// The bounded client event is malformed or outside the supported contract.
+    EventInvalid(&'static str),
+    /// Client event exceeds its fixed input bound.
+    EventTooLarge,
+    /// The fresh guardrail fetch failed; the reason is allowlisted.
+    GuardrailsUnavailable(&'static str),
     /// A newer generation or installation activation superseded this work.
     SessionStale,
     /// The current head or exact snapshot payload is unavailable or corrupt.
@@ -77,6 +83,9 @@ impl Error {
             Self::InstallationInactive => "installation_inactive",
             Self::InstallationMismatch => "installation_mismatch",
             Self::SessionInvalid(_) => "session_invalid",
+            Self::EventInvalid(_) => "event_invalid",
+            Self::EventTooLarge => "event_too_large",
+            Self::GuardrailsUnavailable(_) => "guardrails_unavailable",
             Self::SessionStale => "session_stale",
             Self::SnapshotInvalid(_) => "snapshot_invalid",
             Self::OutputTooLarge => "output_too_large",
@@ -110,7 +119,10 @@ impl fmt::Display for Error {
             | Self::IdentityInvalid(field)
             | Self::StateInsecure(field) => write!(formatter, "{}: {field}{hint}", self.code()),
             Self::InstallationInvalid(field) => write!(formatter, "{}: {field}", self.code()),
-            Self::SessionInvalid(field) | Self::SnapshotInvalid(field) => {
+            Self::SessionInvalid(field)
+            | Self::EventInvalid(field)
+            | Self::GuardrailsUnavailable(field)
+            | Self::SnapshotInvalid(field) => {
                 write!(formatter, "{}: {field}", self.code())
             }
             _ => write!(formatter, "{}{hint}", self.code()),
