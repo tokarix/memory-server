@@ -236,6 +236,93 @@ fn response_wire(listener: TcpListener, wire: Vec<u8>) -> thread::JoinHandle<Str
     })
 }
 
+fn stalled_response(
+    listener: TcpListener,
+    prefix: Vec<u8>,
+    release: mpsc::Receiver<()>,
+) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "expected stalled HTTP request");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("HTTP accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let count = stream.read(&mut chunk).expect("request read");
+            assert!(count > 0, "complete request");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        stream.write_all(&prefix).expect("partial response");
+        release
+            .recv_timeout(Duration::from_secs(8))
+            .expect("release stalled peer");
+        String::from_utf8(request).expect("request UTF-8")
+    })
+}
+
+fn reset_response(listener: TcpListener) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "expected reset request");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("HTTP accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let count = stream.read(&mut chunk).expect("request read");
+            assert!(count > 0, "complete request");
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: the descriptor and linger object remain valid for this call.
+        let result = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                libc::socklen_t::try_from(std::mem::size_of::<libc::linger>())
+                    .expect("linger size"),
+            )
+        };
+        assert_eq!(result, 0, "configure TCP reset");
+        drop(stream);
+        String::from_utf8(request).expect("request UTF-8")
+    })
+}
+
 fn invoke(id: Uuid, cwd: &Path, adapter: ClientAdapter, source: &str) -> std::process::Output {
     invoke_session(id, cwd, adapter, source, "session")
 }
@@ -899,10 +986,13 @@ fn both_adapters_reject_partial_oversized_and_redirected_http_bodies() {
         )
         .into_bytes();
         truncated.extend_from_slice(&bytes);
+        let mut no_length = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        no_length.extend_from_slice(&bytes[..bytes.len() - 1]);
         for (name, wire) in [
             ("declared_over", declared),
             ("streamed_over", streamed),
             ("truncated", truncated),
+            ("no_length_partial", no_length),
             ("redirect", redirect),
         ] {
             let control = response(
@@ -949,6 +1039,200 @@ fn both_adapters_reject_partial_oversized_and_redirected_http_bodies() {
                 .pack,
             good
         );
+    }
+}
+
+#[test]
+fn stalled_headers_and_body_expire_the_fixed_transport_timeout_for_both_adapters() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let good = pack(&installation, &cwd);
+        let body = serde_json::to_vec(&good).expect("pack JSON");
+        for (name, prefix) in [
+            ("headers", b"HTTP/1.1 200 OK\r\nContent-".to_vec()),
+            (
+                "body",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes(),
+            ),
+        ] {
+            let control = response(
+                listener.try_clone().expect("listener clone"),
+                body.clone(),
+                "200 OK",
+            );
+            let success = invoke(id, &cwd, adapter, "startup");
+            assert!(success.status.success(), "control for {name}");
+            control.join().expect("control request");
+            assert!(installation.read_snapshot("session", &cwd).is_ok());
+
+            let (release_tx, release_rx) = mpsc::channel();
+            let stalled = stalled_response(
+                listener.try_clone().expect("listener clone"),
+                prefix,
+                release_rx,
+            );
+            let started = Instant::now();
+            let failure = invoke(id, &cwd, adapter, "resume");
+            let elapsed = started.elapsed();
+            release_tx.send(()).expect("release stalled response");
+            let request = stalled.join().expect("stalled request");
+            assert_eq!(request.matches("GET ").count(), 1, "{name}");
+            assert!(!failure.status.success(), "{name}");
+            assert!(failure.stdout.is_empty(), "{name}");
+            assert!(
+                String::from_utf8_lossy(&failure.stderr).contains("stage=fetch"),
+                "{name}"
+            );
+            assert!(elapsed >= Duration::from_secs(4), "{name}: {elapsed:?}");
+            assert!(elapsed < Duration::from_secs(8), "{name}: {elapsed:?}");
+            assert!(installation.read_snapshot("session", &cwd).is_err(), "{name}");
+        }
+    }
+}
+
+#[test]
+fn chunked_body_success_keeps_exact_publication_and_reader_evidence() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let good = pack(&installation, &cwd);
+        let body = serde_json::to_vec(&good).expect("pack JSON");
+        let midpoint = body.len() / 2;
+        let mut wire = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        for chunk in [&body[..midpoint], &body[midpoint..]] {
+            wire.extend_from_slice(format!("{:X}\r\n", chunk.len()).as_bytes());
+            wire.extend_from_slice(chunk);
+            wire.extend_from_slice(b"\r\n");
+        }
+        wire.extend_from_slice(b"0\r\n\r\n");
+        let handle = response_wire(listener, wire);
+        let output = invoke(id, &cwd, adapter, "startup");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.last(), Some(&b'\n'));
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("one output object");
+        assert_eq!(
+            decoded["hookSpecificOutput"]["additionalContext"],
+            good.publication().expect("canonical publication")
+        );
+        assert_eq!(
+            installation
+                .read_snapshot("session", &cwd)
+                .expect("public reader")
+                .pack,
+            good
+        );
+        assert_eq!(
+            handle.join().expect("HTTP request").matches("GET ").count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn connection_refusal_reset_and_disconnect_retire_prior_delivery() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        for failure in ["refused", "reset", "disconnect"] {
+            let root = private_fixture();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("address").port();
+            let (installation, id, cwd) = configured(root.path(), adapter, port);
+            let good = pack(&installation, &cwd);
+            let control = response(
+                listener.try_clone().expect("listener clone"),
+                serde_json::to_vec(&good).expect("pack JSON"),
+                "200 OK",
+            );
+            assert!(invoke(id, &cwd, adapter, "startup").status.success());
+            assert_eq!(
+                control
+                    .join()
+                    .expect("control request")
+                    .matches("GET ")
+                    .count(),
+                1
+            );
+            assert!(installation.read_snapshot("session", &cwd).is_ok());
+
+            let failed_peer = match failure {
+                "refused" => {
+                    drop(listener);
+                    None
+                }
+                "reset" => Some(reset_response(listener)),
+                "disconnect" => Some(response_wire(listener, Vec::new())),
+                _ => unreachable!(),
+            };
+            let output = invoke(id, &cwd, adapter, "resume");
+            assert!(!output.status.success(), "{failure}");
+            assert!(output.stdout.is_empty(), "{failure}");
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostic.contains("stage=fetch"),
+                "{failure}: {diagnostic}"
+            );
+            assert!(!diagnostic.contains("fixture-token"), "{failure}");
+            assert!(
+                installation.read_snapshot("session", &cwd).is_err(),
+                "{failure}"
+            );
+            if let Some(peer) = failed_peer {
+                assert_eq!(peer.join().expect("failed peer").matches("GET ").count(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_protected_origins_make_zero_requests_for_both_adapters() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        for suffix in [
+            "/memoryd",
+            "/memoryd/",
+            "//",
+            "/%2f",
+            "/.",
+            "/..",
+            "/./",
+            "\\memoryd",
+            "/?query=1",
+            "/#fragment",
+            "/ ",
+            "/\n",
+        ] {
+            let root = private_fixture();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("address").port();
+            let (installation, id, cwd) = configured(root.path(), adapter, port);
+            let config = root.path().join("config.toml");
+            let original = fs::read_to_string(&config).expect("protected config");
+            let valid = format!("memoryd_url = \"http://127.0.0.1:{port}/\"");
+            let invalid = format!(
+                "memoryd_url = {:?}",
+                format!("http://127.0.0.1:{port}{suffix}")
+            );
+            assert!(original.contains(&valid));
+            fs::write(&config, original.replace(&valid, &invalid)).expect("config replacement");
+            let output = invoke(id, &cwd, adapter, "startup");
+            assert!(!output.status.success(), "{suffix:?}");
+            assert!(output.stdout.is_empty(), "{suffix:?}");
+            assert!(output.stderr.len() < 1024, "{suffix:?}");
+            assert!(installation.read_snapshot("session", &cwd).is_err());
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            assert!(listener.accept().is_err(), "{suffix:?} reached HTTP");
+        }
     }
 }
 
