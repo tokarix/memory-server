@@ -171,7 +171,14 @@ through the public validator. They also check that a failed refresh cannot
 reuse prior delivery. The fixtures cover all supported sources for both
 adapters, repeated same-session starts with fresh generations and successor
 revisions, and representative response failures after earlier Emitted
-delivery. Private unit fault fixtures target final journal rename/sync for
+delivery. Both subprocess adapters also exercise a valid 64-KiB event, a
+1-KiB UTF-8 session ID, all 32 policies at a reachable shared byte ceiling,
+maximum legal trusted context dimensions, and the exact 32-KiB HTTP body
+limit. They reject ambiguous pre-identity input without guessing a session;
+known-session event failures retire their old head before HTTP. The transport
+fixtures reject declared or streamed body overflow, truncated responses and
+redirects, and prove child-only proxy variables do not reroute the bearer
+request. Private unit fault fixtures target final journal rename/sync for
 Emitted and Active, reopen the installation, require explicit repair, and
 prove old evidence remains unusable. Run the workspace test suite with a
 disposable migrated PostgreSQL/pgvector database to exercise memoryd policy
