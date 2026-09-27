@@ -164,3 +164,24 @@ additional context byte for byte with the publication, and read the snapshot
 through the public validator. They also check that a failed refresh cannot
 reuse prior delivery. Run the workspace test suite with a disposable migrated
 PostgreSQL/pgvector database to exercise memoryd policy integration.
+
+## Client compatibility evidence (2026-09-27)
+
+An isolated Codex CLI 0.157.0 run loaded a protected `SessionStart` hook from
+a disposable config home, invoked this helper against a local pack server,
+and produced an Emitted anchor head. The model returned a marker present only
+at the end of a shared-valid pack with roughly 14.4 KiB of rule text while
+`additionalContextLimit = 0` was configured. A smaller exact-pack run also
+returned its marker. This demonstrates complete context delivery on that
+tested CLI path; it is not a general client acknowledgement protocol.
+An isolated comparison without the override also returned the marker for this
+repetitive fixture, so it did not establish the default spill boundary. The
+documented default threshold and zero-limit behavior still require the
+managed zero-limit setting above.
+
+An isolated Claude Code 2.1.92 run invoked the helper and produced Emitted
+local evidence. Its provider requests returned HTTP 401, so model consumption
+could not be verified. The installed version also predates Claude's distinct
+`fork` source (2.1.214); the fork adapter has subprocess fixture coverage but
+needs a newer authenticated client smoke before production use. The smoke
+used disposable roots and did not change live client settings or policies.
