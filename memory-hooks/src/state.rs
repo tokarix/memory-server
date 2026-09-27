@@ -24,7 +24,6 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a private root may be created while walking its trusted parent.
 #[derive(Clone, Copy)]
-#[expect(dead_code, reason = "installation control consumes the new root modes")]
 pub(crate) enum RootMode {
     CreateOrOpen,
     CreateNew,
@@ -325,6 +324,12 @@ impl PrivateDirectory {
         Ok(Self {
             directory: open_root(path, mode)?,
         })
+    }
+
+    /// Device and inode of the held private root descriptor.
+    pub(crate) fn identity(&self) -> Result<(u64, u64)> {
+        let stat = fstat(&self.directory).map_err(|_| Error::StateInsecure("root stat"))?;
+        Ok((stat.st_dev, stat.st_ino))
     }
 
     /// Hold a stable lock file until the returned descriptor is dropped.

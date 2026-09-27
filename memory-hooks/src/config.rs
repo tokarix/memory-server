@@ -10,7 +10,7 @@ use memory_common::policy::ResolutionContext;
 use reqwest::Url;
 use rustix::fs::{Mode, OFlags, fgetxattr, fstat, openat};
 use rustix::io::Errno;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result, io};
@@ -58,7 +58,7 @@ pub struct DeliveryConfig {
 }
 
 /// The installed helper's supported client adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum ClientAdapter {
     /// Codex `SessionStart` hook protocol.
     #[serde(rename = "codex-v1")]
@@ -69,6 +69,22 @@ pub enum ClientAdapter {
 }
 
 impl ClientAdapter {
+    /// Select a supported adapter from a protected launcher argument.
+    #[must_use]
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "codex-v1" => Some(Self::CodexV1),
+            "claude-v1" => Some(Self::ClaudeV1),
+            _ => None,
+        }
+    }
+
+    /// Stable adapter identifier used by launcher examples.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        self.as_str()
+    }
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::CodexV1 => "codex-v1",

@@ -31,6 +31,12 @@ pub enum Error {
     StateScopeMismatch,
     /// A state lock exceeded its deadline.
     StateLockTimeout,
+    /// Installation manifest, journal, or pinned identity is invalid.
+    InstallationInvalid(&'static str),
+    /// Installation is changing, retired, or awaiting explicit repair.
+    InstallationInactive,
+    /// Active configuration differs from the committed installation authority.
+    InstallationMismatch,
     /// An operation failed; the OS code is safe to disclose.
     Io(&'static str, Option<i32>),
     /// A write may have been renamed but not durably synced.
@@ -59,6 +65,9 @@ impl Error {
             Self::StateCorrupt => "state_corrupt",
             Self::StateScopeMismatch => "state_scope_mismatch",
             Self::StateLockTimeout => "lock_timeout",
+            Self::InstallationInvalid(_) => "installation_invalid",
+            Self::InstallationInactive => "installation_inactive",
+            Self::InstallationMismatch => "installation_mismatch",
             Self::Io(_, _) | Self::DurabilityUncertain => "io",
             Self::UnsupportedPlatform => "unsupported_platform",
         }
@@ -88,6 +97,7 @@ impl fmt::Display for Error {
             | Self::ConfigInvalid(field)
             | Self::IdentityInvalid(field)
             | Self::StateInsecure(field) => write!(formatter, "{}: {field}{hint}", self.code()),
+            Self::InstallationInvalid(field) => write!(formatter, "{}: {field}", self.code()),
             _ => write!(formatter, "{}{hint}", self.code()),
         }
     }

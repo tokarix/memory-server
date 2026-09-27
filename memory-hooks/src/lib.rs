@@ -5,6 +5,8 @@ pub mod config;
 pub mod error;
 #[cfg(target_os = "linux")]
 pub mod identity;
+#[cfg(target_os = "linux")]
+pub mod installation;
 pub mod limits;
 #[cfg(target_os = "linux")]
 pub mod state;
@@ -30,4 +32,6 @@ pub mod state {
 pub use config::TrustedHooksConfig;
 pub use error::{Error, Result};
 pub use identity::{RepositoryIdentity, ResolvedBinding};
+#[cfg(target_os = "linux")]
+pub use installation::{ActiveInstallation, Installation, Lifecycle};
 pub use state::{PrivateStateStore, StateKey};
