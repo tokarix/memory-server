@@ -326,6 +326,96 @@ fn zero_byte_writer_cannot_commit_emitted() {
 }
 
 #[test]
+fn interrupted_short_writes_commit_exactly_and_last_byte_failures_do_not() {
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        calls: usize,
+        flushed: bool,
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls % 3 == 1 {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let count = bytes.len().min(3);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushed = true;
+            Ok(())
+        }
+    }
+
+    let rig = Rig::new();
+    let pack = rig.pack("exact output to final newline END-MARKER");
+    let pending = rig.installation.begin_session("S").expect("pending");
+    rig.installation
+        .attach_binding(&pending, &rig.cwd)
+        .expect("binding");
+    let mut short = ShortWriter {
+        bytes: Vec::new(),
+        calls: 0,
+        flushed: false,
+    };
+    rig.installation
+        .complete_session(&pending, &rig.cwd, pack.clone(), &mut short)
+        .expect("short writes complete");
+    assert!(short.calls > 3);
+    assert!(short.flushed);
+    assert_eq!(short.bytes.last(), Some(&b'\n'));
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&short.bytes).expect("one complete JSON object");
+    assert_eq!(
+        decoded["hookSpecificOutput"]["additionalContext"],
+        pack.publication().expect("publication")
+    );
+    assert_eq!(
+        rig.installation
+            .read_snapshot("S", &rig.cwd)
+            .expect("public reader")
+            .pack,
+        pack
+    );
+
+    for cutoff in [short.bytes.len() - 2, short.bytes.len() - 1] {
+        let pending = rig.installation.begin_session("S").expect("fresh pending");
+        rig.installation
+            .attach_binding(&pending, &rig.cwd)
+            .expect("binding");
+        let mut writer = FailAfter {
+            limit: cutoff,
+            written: Vec::new(),
+            flush_error: false,
+        };
+        assert!(
+            rig.installation
+                .complete_session(&pending, &rig.cwd, pack.clone(), &mut writer)
+                .is_err()
+        );
+        assert_eq!(writer.written, short.bytes[..cutoff]);
+        assert!(rig.installation.read_snapshot("S", &rig.cwd).is_err());
+    }
+    let recovered = rig.installation.begin_session("S").expect("recovery");
+    rig.installation
+        .attach_binding(&recovered, &rig.cwd)
+        .expect("binding");
+    rig.installation
+        .complete_session(&recovered, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("fresh complete delivery");
+    assert_eq!(
+        rig.installation
+            .read_snapshot("S", &rig.cwd)
+            .expect("recovered reader")
+            .pack,
+        pack
+    );
+}
+
+#[test]
 fn migration_wins_over_a_delayed_old_completion() {
     let rig = Rig::new();
     let a = rig.installation.begin_session("S").expect("A");

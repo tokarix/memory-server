@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -1056,6 +1057,225 @@ fn both_adapters_deliver_maximum_trusted_context_dimensions() {
             serde_json::from_str(&context_query).expect("context JSON");
         assert_eq!(decoded_context, expected.context);
     }
+}
+
+#[test]
+fn broken_real_stdout_pipe_never_commits_emitted_evidence() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let good = pack(&installation, &cwd);
+        let handle = response(
+            listener.try_clone().expect("listener clone"),
+            serde_json::to_vec(&good).expect("pack"),
+            "200 OK",
+        );
+        let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+            .arg("session-start")
+            .arg("--installation")
+            .arg(root.path().join("control"))
+            .arg("--installation-id")
+            .arg(id.to_string())
+            .arg("--client")
+            .arg(adapter.name())
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("helper");
+        drop(child.stdout.take());
+        let event = serde_json::json!({"session_id":"session", "cwd":cwd,
+            "hook_event_name":"SessionStart", "source":"startup"});
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(event.to_string().as_bytes())
+            .expect("event");
+        let output = child.wait_with_output().expect("helper exit");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stage=completion"));
+        handle.join().expect("HTTP request");
+        assert!(installation.read_snapshot("session", &cwd).is_err());
+
+        let recovery = response(listener, serde_json::to_vec(&good).expect("pack"), "200 OK");
+        let output = invoke(id, &cwd, adapter, "resume");
+        assert!(output.status.success());
+        recovery.join().expect("recovery request");
+        assert_eq!(
+            installation
+                .read_snapshot("session", &cwd)
+                .expect("fresh Emitted")
+                .pack,
+            good
+        );
+    }
+}
+
+#[test]
+fn blocked_real_stdout_pipe_hits_fixed_deadline_without_late_emission() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::CodexV1, port);
+    let mut large = pack(&installation, &cwd);
+    large.mandatory[0].content = format!("{} END-MARKER", "x".repeat(10_000));
+    let large = GuardrailPack::new(
+        large.project,
+        large.context,
+        large.resolver_schema_version,
+        large.mandatory,
+    )
+    .expect("shared-valid large pack");
+    let handle = response(
+        listener.try_clone().expect("listener clone"),
+        serde_json::to_vec(&large).expect("pack"),
+        "200 OK",
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("session-start")
+        .arg("--installation")
+        .arg(root.path().join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::CodexV1.name())
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("helper");
+    let mut stdout = child.stdout.take().expect("stdout pipe");
+    // SAFETY: fcntl only changes the size of this owned pipe descriptor.
+    let capacity = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
+    assert!((0..=4096).contains(&capacity), "pipe capacity: {capacity}");
+    let event = serde_json::json!({"session_id":"session", "cwd":cwd,
+        "hook_event_name":"SessionStart", "source":"startup"});
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event.to_string().as_bytes())
+        .expect("event");
+    let began = Instant::now();
+    let deadline = began + Duration::from_secs(75);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("cancel stalled helper");
+            child.wait().expect("reap helper");
+            panic!("helper exceeded its fixed output deadline");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    assert!(began.elapsed() >= Duration::from_secs(55));
+    let mut observed = Vec::new();
+    stdout.read_to_end(&mut observed).expect("partial stdout");
+    assert!(!observed.is_empty());
+    assert!(observed.len() <= 4096);
+    handle.join().expect("HTTP request");
+    assert!(installation.read_snapshot("session", &cwd).is_err());
+
+    let recovery = response(
+        listener,
+        serde_json::to_vec(&large).expect("pack"),
+        "200 OK",
+    );
+    let output = invoke(id, &cwd, ClientAdapter::CodexV1, "resume");
+    assert!(output.status.success());
+    recovery.join().expect("recovery request");
+    assert_eq!(
+        installation
+            .read_snapshot("session", &cwd)
+            .expect("fresh emission")
+            .pack,
+        large
+    );
+}
+
+#[test]
+fn unfinished_real_input_times_out_without_guessing_a_session() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::CodexV1, port);
+    let good = pack(&installation, &cwd);
+    let handle = response(
+        listener.try_clone().expect("listener clone"),
+        serde_json::to_vec(&good).expect("pack"),
+        "200 OK",
+    );
+    assert!(
+        invoke(id, &cwd, ClientAdapter::CodexV1, "startup")
+            .status
+            .success()
+    );
+    handle.join().expect("initial request");
+    let prior = installation
+        .read_snapshot("session", &cwd)
+        .expect("prior snapshot")
+        .generation;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("session-start")
+        .arg("--installation")
+        .arg(root.path().join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::CodexV1.name())
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("helper");
+    let mut held_stdin = child.stdin.take().expect("held stdin");
+    held_stdin
+        .write_all(br#"{"session_id":"session""#)
+        .expect("partial event");
+    let began = Instant::now();
+    let deadline = began + Duration::from_secs(75);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("cancel stalled helper");
+            child.wait().expect("reap helper");
+            panic!("helper exceeded its fixed input deadline");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    drop(held_stdin);
+    assert!(!status.success());
+    assert!(began.elapsed() >= Duration::from_secs(55));
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_end(&mut stdout)
+        .expect("stdout read");
+    assert!(stdout.is_empty());
+    assert_eq!(
+        installation
+            .read_snapshot("session", &cwd)
+            .expect("pre-identity failure retains prior generation")
+            .generation,
+        prior
+    );
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    assert!(listener.accept().is_err(), "partial input reached HTTP");
 }
 
 #[test]

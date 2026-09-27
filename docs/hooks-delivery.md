@@ -149,6 +149,14 @@ Errors use bounded safe codes on stderr and a nonzero exit. They do not print
 the bearer token, raw config/event, arbitrary path, Git stderr or upstream
 body. A failed or partial write can leave Prepared; a crash after complete
 output but before Emitted is a false negative requiring fresh delivery.
+The fixed 60-second helper deadline bounds nonblocking input and output waits;
+the shared guardrail HTTP request has its own five-second timeout. A broken
+stdout pipe fails without Emitted evidence. If stdout stays blocked until the
+helper deadline, partial bytes still leave the public reader unusable and the
+next event must fetch afresh. Unfinished stdin fails before a session identity
+can be trusted; it does not guess which old head to retire. Synchronous kernel
+calls such as filesystem sync cannot be forcibly cancelled by the helper, so
+an operating-system stall in one of those calls may exceed the deadline.
 If the final directory sync for an Emitted or Active journal fails after its
 rename, the helper rewrites that journal as unresolved while it still holds
 the control locks. The caller receives an error; a newly opened public reader
@@ -184,9 +192,11 @@ session heads/journals and installation manifests/journals, including final
 Emitted and Active journal resolution. They reopen the installation, test the
 public reader, require explicit repair where authority is unresolved, and
 prove old evidence remains unusable after a committed barrier. Run the
-workspace test suite with a
-disposable migrated PostgreSQL/pgvector database to exercise memoryd policy
-integration. These fixtures establish the local protocol contract. Optional
+workspace test suite with a disposable migrated PostgreSQL/pgvector database
+to exercise memoryd policy integration. Output fixtures include interrupted
+short writes, failure at the final byte/newline, a real broken stdout pipe,
+a real blocked pipe until deadline, and unfinished input until deadline.
+These fixtures establish the local protocol contract. Optional
 real-client validation on deployed versions is an operator choice.
 
 ## Client compatibility evidence (2026-09-27)
