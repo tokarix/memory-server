@@ -1295,12 +1295,22 @@ mod tests {
                     .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
                     .or_else(|| std::env::var_os("HOME"))
                     .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-                let root = tempfile::tempdir_in(base).unwrap();
+                for adapter in [
+                    memory_hooks::config::ClientAdapter::CodexV1,
+                    memory_hooks::config::ClientAdapter::ClaudeV1,
+                ] {
+                let root = tempfile::tempdir_in(&base).unwrap();
                 let cwd = root.path().join("workspace");
                 std::fs::create_dir(&cwd).unwrap();
                 let config_path = root.path().join("hooks.toml");
+                let additional = if adapter == memory_hooks::config::ClientAdapter::CodexV1 {
+                    "additional_context_limit = 0\n"
+                } else {
+                    ""
+                };
+                let adapter_name = adapter.name();
                 let config = format!(
-                    "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"app\"\n[bindings.context]\nprofile = {stored_profile:?}\n[transport]\nmemoryd_url = \"http://{addr}/\"\nunauthenticated = true\ncredential_revision = \"fixture\"\n[client]\nadapter = \"codex-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\nadditional_context_limit = 0\n",
+                    "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"app\"\n[bindings.context]\nprofile = {stored_profile:?}\n[transport]\nmemoryd_url = \"http://{addr}/\"\nunauthenticated = true\ncredential_revision = \"fixture\"\n[client]\nadapter = {adapter_name:?}\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\n{additional}",
                     root.path().join("snapshots").display().to_string(),
                     cwd.display().to_string()
                 );
@@ -1314,18 +1324,18 @@ mod tests {
                 let control = root.path().join("control");
                 let id = memory_hooks::Installation::initialize(
                     &control,
-                    memory_hooks::config::ClientAdapter::CodexV1,
+                    adapter,
                 )
                 .unwrap();
                 let installation = memory_hooks::Installation::open(
                     &control,
                     id,
-                    memory_hooks::config::ClientAdapter::CodexV1,
+                    adapter,
                 )
                 .unwrap();
                 installation.activate(&config_path).unwrap();
                 let pending = installation.begin_session("real-daemon").unwrap();
-                installation.attach_binding(&pending, &cwd).unwrap();
+                let binding = installation.attach_binding(&pending, &cwd).unwrap();
                 let mut output = Vec::new();
                 installation
                     .complete_session(&pending, &cwd, stored_pack.clone(), &mut output)
@@ -1335,15 +1345,62 @@ mod tests {
                     decoded["hookSpecificOutput"]["additionalContext"],
                     stored_pack.publication().unwrap()
                 );
-                assert_eq!(
-                    installation.read_snapshot("real-daemon", &cwd).unwrap().pack,
-                    stored_pack
-                );
+                let snapshot = installation.read_snapshot("real-daemon", &cwd).unwrap();
+                assert_eq!(snapshot.pack, stored_pack);
+                assert_eq!(snapshot.epoch, pending.epoch());
+                assert_eq!(snapshot.generation, pending.generation());
+                assert_eq!(snapshot.binding, binding.public_json().unwrap());
+                }
                 })
                 .await
                 .unwrap();
             }
         }
+        let mut successor = policy_request(None, 1).policy.unwrap();
+        successor.policy_key = "storage.host".to_owned();
+        successor.revision = 2;
+        successor.supersedes = Some(Uuid::from_u128(1));
+        successor.delivery_class = DeliveryClass::Mandatory;
+        successor.selectors.profile = Some(BTreeSet::from(["workstation-host".to_owned()]));
+        successor
+            .values
+            .insert("build.target".to_owned(), "persistent-disk".to_owned());
+        crate::policy::publish_new(&pool, &scoped_memory("general", 6), &successor)
+            .await
+            .unwrap();
+        let context = memory_common::policy::ResolutionContext {
+            profile: Some("workstation-host".to_owned()),
+            ..memory_common::policy::ResolutionContext::default()
+        };
+        let response = client
+            .get(url(
+                "guardrails",
+                &[("context", r#"{"profile":"workstation-host"}"#)],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let endpoint_pack: memory_common::guardrails::GuardrailPack =
+            response.json().await.unwrap();
+        let shared_pack = memory_common::http_client::HttpMemoryClient::with_http_client(
+            &format!("http://{addr}/"),
+            None,
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap(),
+        )
+        .unwrap()
+        .with_context(context)
+        .guardrails("app")
+        .await
+        .unwrap();
+        assert_eq!(shared_pack, endpoint_pack);
+        assert_eq!(shared_pack.mandatory.len(), 1);
+        assert_eq!(shared_pack.mandatory[0].id, Uuid::from_u128(6));
+        assert_eq!(shared_pack.mandatory[0].revision, Some(2));
         for endpoint in ["rules", "bootstrap"] {
             let response = client
                 .get(url(endpoint, &[("include_recall", "false")]))
