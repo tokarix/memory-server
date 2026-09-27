@@ -22,6 +22,20 @@ use crate::limits;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Whether a private root may be created while walking its trusted parent.
+#[derive(Clone, Copy)]
+#[expect(dead_code, reason = "installation control consumes the new root modes")]
+pub(crate) enum RootMode {
+    CreateOrOpen,
+    CreateNew,
+    Existing,
+}
+
+/// Descriptor-relative private directory used by the snapshot and control stores.
+pub(crate) struct PrivateDirectory {
+    directory: File,
+}
+
 /// Opaque, domain-separated key for one binding/client/session tuple.
 pub struct StateKey {
     name: String,
@@ -113,7 +127,7 @@ impl Write for BoundedVec {
 
 /// Rooted store whose callers can only address validated state keys.
 pub struct PrivateStateStore {
-    directory: File,
+    directory: PrivateDirectory,
     fingerprint: String,
 }
 
@@ -160,7 +174,7 @@ fn check_local_filesystem(file: &File) -> Result<()> {
     }
 }
 
-fn open_root(path: &Path) -> Result<File> {
+fn open_root(path: &Path, mode: RootMode) -> Result<File> {
     valid_path(path).map_err(|_| Error::StateInsecure("state_root path"))?;
     let mut current = File::from(
         openat(
@@ -184,10 +198,11 @@ fn open_root(path: &Path) -> Result<File> {
         if private {
             check_local_filesystem(&current)?;
         }
-        let created = if private {
+        let created = if private && !matches!(mode, RootMode::Existing) {
             match mkdirat(&current, part, Mode::RWXU) {
                 Ok(()) => true,
-                Err(Errno::EXIST) => false,
+                Err(Errno::EXIST) if matches!(mode, RootMode::CreateOrOpen) => false,
+                Err(Errno::EXIST) => return Err(Error::StateInsecure("private root exists")),
                 Err(_) => return Err(Error::StateInsecure("create state_root")),
             }
         } else {
@@ -278,18 +293,118 @@ fn open_record(dir: &File, name: &str, create: bool) -> Result<Option<File>> {
     }
 }
 
-fn temporary_name(key: &StateKey) -> String {
+fn temporary_name(name: &str) -> String {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |value| value.as_nanos());
     let mut hash = Sha256::new();
     hash.update(b"memory-hooks-temp-v1\0");
-    hash_part(&mut hash, key.name.as_bytes());
+    hash_part(&mut hash, name.as_bytes());
     hash_part(&mut hash, &u64::from(std::process::id()).to_be_bytes());
     hash_part(&mut hash, &sequence.to_be_bytes());
     hash_part(&mut hash, &time.to_be_bytes());
     format!("temp-{:x}", hash.finalize())
+}
+
+fn valid_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(Error::StateInsecure("record name"));
+    }
+    Ok(())
+}
+
+impl PrivateDirectory {
+    /// Open a checked private root with an explicit creation policy.
+    pub(crate) fn open(path: &Path, mode: RootMode) -> Result<Self> {
+        Ok(Self {
+            directory: open_root(path, mode)?,
+        })
+    }
+
+    /// Hold a stable lock file until the returned descriptor is dropped.
+    pub(crate) fn lock(&self, name: &str) -> Result<File> {
+        valid_name(name)?;
+        let lock =
+            open_record(&self.directory, name, true)?.ok_or(Error::StateInsecure("lock open"))?;
+        let deadline = Instant::now() + limits::SHORT_DEADLINE;
+        loop {
+            match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(lock),
+                Err(Errno::WOULDBLOCK) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(Errno::WOULDBLOCK) => return Err(Error::StateLockTimeout),
+                Err(_) => return Err(Error::StateInsecure("advisory lock")),
+            }
+        }
+    }
+
+    /// Read a bounded private record without treating malformed data as absent.
+    pub(crate) fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        valid_name(name)?;
+        let Some(file) = open_record(&self.directory, name, false)? else {
+            return Ok(None);
+        };
+        let size = file
+            .metadata()
+            .map_err(|error| io("record metadata", &error))?
+            .len();
+        if size > limits::RECORD_BYTES as u64 {
+            return Err(Error::StateCorrupt);
+        }
+        let capacity = usize::try_from(size).map_err(|_| Error::StateCorrupt)?;
+        let mut bytes = Vec::with_capacity(capacity);
+        file.take((limits::RECORD_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| io("record read", &error))?;
+        if bytes.len() > limits::RECORD_BYTES {
+            return Err(Error::StateCorrupt);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically replace one bounded record and sync its parent directory.
+    pub(crate) fn replace(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        valid_name(name)?;
+        if bytes.len() > limits::RECORD_BYTES {
+            return Err(Error::StateCorrupt);
+        }
+        let _ = open_record(&self.directory, name, false)?;
+        let temporary = temporary_name(name);
+        let mut file = File::from(
+            openat(
+                &self.directory,
+                temporary.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map_err(|_| Error::StateInsecure("temporary create"))?,
+        );
+        let write_result = (|| {
+            fchmod(&file, Mode::RUSR | Mode::WUSR)
+                .map_err(|_| Error::StateInsecure("new temporary mode"))?;
+            check_object(&file, libc::S_IFREG, true, true)?;
+            file.write_all(bytes)
+                .map_err(|error| io("temporary write", &error))?;
+            file.flush()
+                .map_err(|error| io("temporary flush", &error))?;
+            fsync(&file).map_err(|_| Error::Io("temporary sync", None))?;
+            renameat(&self.directory, temporary.as_str(), &self.directory, name)
+                .map_err(|_| Error::Io("record rename", None))?;
+            fsync(&self.directory).map_err(|_| Error::DurabilityUncertain)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = unlinkat(&self.directory, temporary.as_str(), AtFlags::empty());
+        }
+        write_result
+    }
 }
 
 impl PrivateStateStore {
@@ -301,7 +416,7 @@ impl PrivateStateStore {
         #[cfg(not(target_os = "linux"))]
         return Err(Error::UnsupportedPlatform);
         Ok(Self {
-            directory: open_root(&config.state_root)?,
+            directory: PrivateDirectory::open(&config.state_root, RootMode::CreateOrOpen)?,
             fingerprint: config.fingerprint().to_owned(),
         })
     }
@@ -319,38 +434,10 @@ impl PrivateStateStore {
         if key.fingerprint != self.fingerprint {
             return Err(Error::StateScopeMismatch);
         }
-        let lock_name = format!("lock-{}", key.name);
-        let lock = open_record(&self.directory, &lock_name, true)?
-            .ok_or(Error::StateInsecure("lock open"))?;
-        let deadline = Instant::now() + limits::SHORT_DEADLINE;
-        loop {
-            match flock(&lock, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => break,
-                Err(Errno::WOULDBLOCK) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(Errno::WOULDBLOCK) => return Err(Error::StateLockTimeout),
-                Err(_) => return Err(Error::StateInsecure("advisory lock")),
-            }
-        }
+        let _lock = self.directory.lock(&format!("lock-{}", key.name))?;
         let record_name = format!("record-{}", key.name);
-        let existing = match open_record(&self.directory, &record_name, false)? {
-            Some(file) => {
-                let size = file
-                    .metadata()
-                    .map_err(|error| io("record metadata", &error))?
-                    .len();
-                if size > limits::RECORD_BYTES as u64 {
-                    return Err(Error::StateCorrupt);
-                }
-                let capacity = usize::try_from(size).map_err(|_| Error::StateCorrupt)?;
-                let mut bytes = Vec::with_capacity(capacity);
-                file.take((limits::RECORD_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|error| io("record read", &error))?;
-                if bytes.len() > limits::RECORD_BYTES {
-                    return Err(Error::StateCorrupt);
-                }
+        let existing = match self.directory.read(&record_name)? {
+            Some(bytes) => {
                 let envelope: Envelope<serde_json::Value> =
                     serde_json::from_slice(&bytes).map_err(|_| Error::StateCorrupt)?;
                 if envelope.version != 1 || envelope.scope != key.scope {
@@ -372,46 +459,7 @@ impl PrivateStateStore {
                 },
             )
             .map_err(|_| Error::StateCorrupt)?;
-            let bytes = writer.bytes;
-            // Reject an existing insecure destination before replacement.
-            let _ = open_record(&self.directory, &record_name, false)?;
-            let name = temporary_name(key);
-            let mut file = File::from(
-                openat(
-                    &self.directory,
-                    name.as_str(),
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::RUSR | Mode::WUSR,
-                )
-                .map_err(|_| Error::StateInsecure("temporary create"))?,
-            );
-            let write_result = (|| {
-                fchmod(&file, Mode::RUSR | Mode::WUSR)
-                    .map_err(|_| Error::StateInsecure("new temporary mode"))?;
-                check_object(&file, libc::S_IFREG, true, true)?;
-                file.write_all(&bytes)
-                    .map_err(|error| io("temporary write", &error))?;
-                file.flush()
-                    .map_err(|error| io("temporary flush", &error))?;
-                fsync(&file).map_err(|_| Error::Io("temporary sync", None))?;
-                renameat(
-                    &self.directory,
-                    name.as_str(),
-                    &self.directory,
-                    record_name.as_str(),
-                )
-                .map_err(|_| Error::Io("record rename", None))?;
-                fsync(&self.directory).map_err(|_| Error::DurabilityUncertain)?;
-                Ok(())
-            })();
-            if write_result.is_err() {
-                let _ = unlinkat(&self.directory, name.as_str(), AtFlags::empty());
-            }
-            write_result?;
+            self.directory.replace(&record_name, &writer.bytes)?;
         }
         Ok(result)
     }
