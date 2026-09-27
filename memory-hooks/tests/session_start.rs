@@ -237,14 +237,94 @@ fn response_wire(listener: TcpListener, wire: Vec<u8>) -> thread::JoinHandle<Str
 }
 
 fn invoke(id: Uuid, cwd: &Path, adapter: ClientAdapter, source: &str) -> std::process::Output {
+    invoke_session(id, cwd, adapter, source, "session")
+}
+
+fn invoke_session(
+    id: Uuid,
+    cwd: &Path,
+    adapter: ClientAdapter,
+    source: &str,
+    session: &str,
+) -> std::process::Output {
     let event = serde_json::json!({
         "hook_event_name": "SessionStart",
-        "session_id": "session",
+        "session_id": session,
         "cwd": cwd,
         "source": source,
         "agent_type": "custom-top-level"
     });
     invoke_raw(id, cwd, adapter, event.to_string().as_bytes())
+}
+
+#[test]
+fn concurrent_different_sessions_keep_independent_public_authority() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        for second_succeeds in [false, true] {
+            let root = private_fixture();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("address").port();
+            let (installation, id, cwd) = configured(root.path(), adapter, port);
+            let expected = pack(&installation, &cwd);
+            let body = serde_json::to_vec(&expected).expect("pack JSON");
+            let (arrived_tx, arrived_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let delayed = delayed_response(
+                listener.try_clone().expect("listener clone"),
+                body.clone(),
+                arrived_tx,
+                release_rx,
+            );
+            let first_cwd = cwd.clone();
+            let first = thread::spawn(move || {
+                invoke_session(id, &first_cwd, adapter, "startup", "session-a")
+            });
+            arrived_rx
+                .recv_timeout(Duration::from_secs(8))
+                .expect("A reached HTTP");
+            assert!(installation.read_snapshot("session-a", &cwd).is_err());
+            let second = response(
+                listener.try_clone().expect("listener clone"),
+                if second_succeeds {
+                    body
+                } else {
+                    b"unavailable".to_vec()
+                },
+                if second_succeeds {
+                    "200 OK"
+                } else {
+                    "500 Internal Server Error"
+                },
+            );
+            let b = invoke_session(id, &cwd, adapter, "startup", "session-b");
+            assert_eq!(b.status.success(), second_succeeds);
+            assert_eq!(b.stdout.is_empty(), !second_succeeds);
+            assert_eq!(second.join().expect("B request").matches("GET ").count(), 1);
+            assert_eq!(
+                installation.read_snapshot("session-b", &cwd).is_ok(),
+                second_succeeds
+            );
+            release_tx.send(()).expect("release A");
+            assert_eq!(
+                delayed.join().expect("A request").matches("GET ").count(),
+                1
+            );
+            let a = first.join().expect("A helper");
+            assert!(a.status.success(), "{}", String::from_utf8_lossy(&a.stderr));
+            assert!(a.stderr.is_empty());
+            assert_eq!(
+                installation
+                    .read_snapshot("session-a", &cwd)
+                    .expect("A remains valid")
+                    .pack,
+                expected
+            );
+            assert_eq!(
+                installation.read_snapshot("session-b", &cwd).is_ok(),
+                second_succeeds
+            );
+        }
+    }
 }
 
 fn invoke_raw(id: Uuid, cwd: &Path, adapter: ClientAdapter, event: &[u8]) -> std::process::Output {

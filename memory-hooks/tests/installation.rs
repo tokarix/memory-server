@@ -197,3 +197,51 @@ fn copied_or_corrupt_anchor_cannot_be_opened_as_the_installation() {
         "installation_invalid"
     );
 }
+
+#[test]
+fn activation_and_repair_reject_epoch_overflow_without_wrapping_authority() {
+    for unresolved in [false, true] {
+        let root = fixture();
+        fs::create_dir(root.path().join("workspace")).expect("workspace");
+        let anchor = root.path().join("control");
+        let config = write_config(root.path(), &root.path().join("state"), "workstation");
+        let id = Installation::initialize(&anchor, ClientAdapter::CodexV1).expect("initialize");
+        let installation = Installation::open(&anchor, id, ClientAdapter::CodexV1).expect("open");
+        installation.activate(&config).expect("activate");
+        let manifest_path = anchor.join("installation-manifest");
+        let journal_path = anchor.join("activation-journal");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest bytes"))
+                .expect("manifest JSON");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal_path).expect("journal bytes"))
+                .expect("journal JSON");
+        manifest["epoch"] = serde_json::json!(u64::MAX);
+        journal["epoch"] = serde_json::json!(u64::MAX);
+        journal["resolved"] = serde_json::json!(!unresolved);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("manifest encoding"),
+        )
+        .expect("manifest replacement");
+        fs::write(
+            &journal_path,
+            serde_json::to_vec(&journal).expect("journal encoding"),
+        )
+        .expect("journal replacement");
+        let reopened = Installation::open(&anchor, id, ClientAdapter::CodexV1).expect("reopen");
+        let result = if unresolved {
+            reopened.repair_incomplete()
+        } else {
+            reopened.activate(&config)
+        };
+        assert_eq!(
+            result.expect_err("epoch must not wrap").code(),
+            "installation_invalid"
+        );
+        let again =
+            Installation::open(&anchor, id, ClientAdapter::CodexV1).expect("reopen after refusal");
+        assert_eq!(again.status().is_ok(), !unresolved);
+        assert!(again.repair_incomplete().is_err());
+    }
+}
