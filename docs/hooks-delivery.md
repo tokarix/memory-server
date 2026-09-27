@@ -170,9 +170,13 @@ still revalidate actions. Filesystem durability is limited to the supported
 local filesystem's ownership, `flock`, rename and `fsync` guarantees; hashes
 and locks do not authenticate hostile same-UID writes or arbitrary rollback.
 
-To exercise the repository fixtures, run `cargo test -p memory-hooks
---all-features --test session_start` with `XDG_RUNTIME_DIR` pointing to a
-private supported filesystem. The integration tests start a local HTTP peer,
+To exercise the repository fixtures, set `MEMORY_HOOKS_TEST_ROOT` to a private
+supported filesystem (for example `/run/user/$(id -u)` on Linux). Set
+`CARGO_TARGET_DIR` and `TMPDIR` to task-specific persistent paths under the
+repository target directory, creating `TMPDIR` first. Run `cargo test -p
+memory-hooks --all-features --test session_start`, `cargo test -p memory-hooks
+--all-features --test snapshot`, and `cargo test -p memory-hooks --all-features
+--test installation`. The integration tests start a local HTTP peer,
 spawn the real helper, decode exactly one output JSON document, compare its
 additional context byte for byte with the publication, and read the snapshot
 through the public validator. They also check that a failed refresh cannot
@@ -184,16 +188,27 @@ delivery. Both subprocess adapters also exercise a valid 64-KiB event, a
 maximum legal trusted context dimensions, and the exact 32-KiB HTTP body
 limit. They reject ambiguous pre-identity input without guessing a session;
 known-session event failures retire their old head before HTTP. The transport
-fixtures reject declared or streamed body overflow, truncated responses and
-redirects, and prove child-only proxy variables do not reroute the bearer
-request. Private unit fault fixtures inject failures at temporary creation,
+fixtures reject declared or streamed body overflow, truncated responses with
+and without a declared length, redirects, connection refusal, TCP reset and
+disconnect. Both adapters expire stalled headers and bodies at the shared
+five-second timeout, accept complete chunked responses, and reject unsafe
+protected origins before HTTP. Child-only proxy variables cannot reroute the
+bearer request. Private unit fault fixtures inject failures at temporary creation,
 write, flush, file sync, rename and parent-directory sync for payloads,
 session heads/journals and installation manifests/journals, including final
 Emitted and Active journal resolution. They reopen the installation, test the
 public reader, require explicit repair where authority is unresolved, and
 prove old evidence remains unusable after a committed barrier. Run the
-workspace test suite with a disposable migrated PostgreSQL/pgvector database
-to exercise memoryd policy integration. Output fixtures include interrupted
+workspace test suite with `DATABASE_URL` pointing to a disposable migrated
+PostgreSQL/pgvector database to exercise memoryd policy integration, including
+no-policy and conflicting classified-policy responses through the daemon
+endpoint and shared HTTP client. Reopened-reader fixtures independently alter
+payload scope, pack and output fields with a recomputed outer hash, and
+head/journal fields; they also exercise checked epoch and sequence overflow.
+Cross-process duplicate and separate-session starts show that a late fetch
+cannot replace a newer claim or damage another session. Failed output on an
+intermediate root cannot restore old R1 evidence after R1 → R2 → R1 migration.
+Output fixtures include interrupted
 short writes, failure at the final byte/newline, a real broken stdout pipe,
 a real blocked pipe until deadline, and unfinished input until deadline.
 `cargo test -p memory-hooks --all-features --test snapshot` also kills a

@@ -1356,6 +1356,31 @@ mod tests {
                 .unwrap();
             }
         }
+        let unmatched = memory_common::policy::ResolutionContext {
+            profile: Some("unmatched".to_owned()),
+            ..memory_common::policy::ResolutionContext::default()
+        };
+        let empty_response = client
+            .get(url(
+                "guardrails",
+                &[("context", r#"{"profile":"unmatched"}"#)],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(empty_response.status(), StatusCode::BAD_REQUEST);
+        let empty_body: serde_json::Value = empty_response.json().await.unwrap();
+        assert_eq!(empty_body["error"]["code"], "guardrails_empty");
+        let empty_shared =
+            memory_common::http_client::HttpMemoryClient::new(&format!("http://{addr}/"), None)
+                .unwrap()
+                .with_context(unmatched)
+                .guardrails("app")
+                .await;
+        assert!(matches!(
+            empty_shared,
+            Err(memory_common::error::Error::Policy { code, .. }) if code == "guardrails_empty"
+        ));
         let mut successor = policy_request(None, 1).policy.unwrap();
         successor.policy_key = "storage.host".to_owned();
         successor.revision = 2;
@@ -1451,6 +1476,30 @@ mod tests {
             body["error"]["details"]["detail"]["setting_key"],
             "build.target"
         );
+        let conflict_response = client
+            .get(url(
+                "guardrails",
+                &[("context", r#"{"profile":"workstation-host"}"#)],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(conflict_response.status(), StatusCode::CONFLICT);
+        let conflict_body: serde_json::Value = conflict_response.json().await.unwrap();
+        assert_eq!(conflict_body["error"]["code"], "policy_value_conflict");
+        let conflict_shared =
+            memory_common::http_client::HttpMemoryClient::new(&format!("http://{addr}/"), None)
+                .unwrap()
+                .with_context(memory_common::policy::ResolutionContext {
+                    profile: Some("workstation-host".to_owned()),
+                    ..memory_common::policy::ResolutionContext::default()
+                })
+                .guardrails("app")
+                .await;
+        assert!(matches!(
+            conflict_shared,
+            Err(memory_common::error::Error::Policy { code, .. }) if code == "policy_value_conflict"
+        ));
 
         incompatible.revision = 2;
         incompatible.supersedes = Some(Uuid::from_u128(4));
@@ -1482,6 +1531,17 @@ mod tests {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["error"]["code"], "policy_mandatory_override");
         assert!(body.get("recall_memories").is_none());
+        let override_response = client
+            .get(url(
+                "guardrails",
+                &[("context", r#"{"profile":"workstation-host"}"#)],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(override_response.status(), StatusCode::CONFLICT);
+        let override_body: serde_json::Value = override_response.json().await.unwrap();
+        assert_eq!(override_body["error"]["code"], "policy_mandatory_override");
     }
 
     #[sqlx::test(migrator = "crate::MIGRATOR")]
