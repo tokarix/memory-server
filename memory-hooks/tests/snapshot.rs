@@ -12,11 +12,13 @@ use std::thread;
 use memory_common::guardrails::GuardrailPack;
 use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
 use memory_hooks::{Installation, config::ClientAdapter};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 struct Rig {
     root: TempDir,
+    id: Uuid,
     installation: Arc<Installation>,
     config_path: PathBuf,
     cwd: PathBuf,
@@ -39,6 +41,7 @@ impl Rig {
                 .expect("open");
         let rig = Self {
             root,
+            id,
             installation: Arc::new(installation),
             config_path,
             cwd,
@@ -191,6 +194,156 @@ fn unresolved_head_requires_explicit_sequence_advancing_repair() {
         pack
     );
     assert_ne!(pending.generation(), fresh.generation());
+}
+
+#[test]
+fn missing_corrupt_and_oversized_payloads_never_reuse_emitted_evidence() {
+    for damage in ["missing", "corrupt", "oversized", "inner_version"] {
+        let rig = Rig::new();
+        let first = rig.installation.begin_session("payload").expect("first");
+        rig.installation
+            .attach_binding(&first, &rig.cwd)
+            .expect("first binding");
+        let pack = rig.pack("exact before and after damage");
+        rig.installation
+            .complete_session(&first, &rig.cwd, pack.clone(), &mut Vec::new())
+            .expect("first emission");
+        let payload = fs::read_dir(rig.root.path().join("r1"))
+            .expect("payload root")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("payload-"))
+            })
+            .expect("payload record");
+        match damage {
+            "missing" => fs::remove_file(&payload).expect("remove payload"),
+            "corrupt" => fs::write(&payload, b"not JSON").expect("corrupt payload"),
+            "oversized" => fs::write(&payload, vec![b'x'; memory_hooks::limits::RECORD_BYTES + 1])
+                .expect("oversize payload"),
+            "inner_version" => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&payload).expect("payload bytes"))
+                        .expect("payload JSON");
+                value["publication_version"] = serde_json::Value::from(2);
+                let bytes = serde_json::to_vec(&value).expect("payload encoding");
+                fs::write(&payload, &bytes).expect("replace payload");
+                let head = fs::read_dir(rig.root.path().join("control"))
+                    .expect("control root")
+                    .map(|entry| entry.expect("entry").path())
+                    .find(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("head-"))
+                    })
+                    .expect("head record");
+                let mut head_value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&head).expect("head bytes"))
+                        .expect("head JSON");
+                head_value["payload_sha256"] =
+                    serde_json::Value::from(format!("{:x}", Sha256::digest(&bytes)));
+                fs::write(
+                    &head,
+                    serde_json::to_vec(&head_value).expect("head encoding"),
+                )
+                .expect("replace head");
+            }
+            _ => unreachable!(),
+        }
+        let reopened = Installation::open(
+            &rig.root.path().join("control"),
+            rig.id,
+            ClientAdapter::CodexV1,
+        )
+        .expect("reopen installation");
+        assert!(
+            reopened.read_snapshot("payload", &rig.cwd).is_err(),
+            "{damage}"
+        );
+        let fresh = reopened.begin_session("payload").expect("fresh claim");
+        assert_ne!(fresh.generation(), first.generation());
+        reopened
+            .attach_binding(&fresh, &rig.cwd)
+            .expect("fresh binding");
+        let mut output = Vec::new();
+        reopened
+            .complete_session(&fresh, &rig.cwd, pack.clone(), &mut output)
+            .expect("fresh emission");
+        assert_eq!(
+            reopened
+                .read_snapshot("payload", &rig.cwd)
+                .expect("fresh reader")
+                .pack,
+            pack
+        );
+        assert_eq!(output.last(), Some(&b'\n'));
+    }
+}
+
+#[test]
+fn absent_corrupt_and_oversized_heads_cannot_fall_back_to_old_payloads() {
+    for damage in ["missing", "corrupt", "oversized", "unknown_version"] {
+        let rig = Rig::new();
+        let first = rig.installation.begin_session("head").expect("first");
+        rig.installation
+            .attach_binding(&first, &rig.cwd)
+            .expect("binding");
+        rig.installation
+            .complete_session(&first, &rig.cwd, rig.pack("old"), &mut Vec::new())
+            .expect("emission");
+        let head = fs::read_dir(rig.root.path().join("control"))
+            .expect("control root")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("head-"))
+            })
+            .expect("head record");
+        match damage {
+            "missing" => fs::remove_file(&head).expect("remove head"),
+            "corrupt" => fs::write(&head, b"not JSON").expect("corrupt head"),
+            "oversized" => fs::write(&head, vec![b'x'; memory_hooks::limits::RECORD_BYTES + 1])
+                .expect("oversize head"),
+            "unknown_version" => {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&head).expect("head bytes"))
+                        .expect("head JSON");
+                value["version"] = serde_json::Value::from(2);
+                fs::write(&head, serde_json::to_vec(&value).expect("head encoding"))
+                    .expect("replace head");
+            }
+            _ => unreachable!(),
+        }
+        let reopened = Installation::open(
+            &rig.root.path().join("control"),
+            rig.id,
+            ClientAdapter::CodexV1,
+        )
+        .expect("reopen installation");
+        assert!(
+            reopened.read_snapshot("head", &rig.cwd).is_err(),
+            "{damage}"
+        );
+        assert!(reopened.begin_session("head").is_err(), "{damage}");
+        let separate = reopened.begin_session("separate").expect("separate claim");
+        reopened
+            .attach_binding(&separate, &rig.cwd)
+            .expect("separate binding");
+        let pack = rig.pack("separate session");
+        reopened
+            .complete_session(&separate, &rig.cwd, pack.clone(), &mut Vec::new())
+            .expect("separate emission");
+        assert_eq!(
+            reopened
+                .read_snapshot("separate", &rig.cwd)
+                .expect("separate reader")
+                .pack,
+            pack
+        );
+        assert!(reopened.read_snapshot("head", &rig.cwd).is_err());
+    }
 }
 
 #[test]
