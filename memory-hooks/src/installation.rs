@@ -236,7 +236,9 @@ impl Installation {
             ..journal
         })
         .map_err(|_| Error::InstallationInvalid("journal serialization"))?;
-        self.directory.replace(JOURNAL, &bytes)
+        let unresolved = serde_json::to_vec(&journal)
+            .map_err(|_| Error::InstallationInvalid("journal serialization"))?;
+        self.directory.resolve_journal(JOURNAL, &bytes, &unresolved)
     }
 
     fn next(&self, previous: &Manifest, lifecycle: Lifecycle) -> Result<Manifest> {

@@ -237,7 +237,9 @@ fn replace_head(installation: &Installation, hash: &str, head: &Head) -> Result<
         ..journal
     })
     .map_err(|_| Error::SnapshotInvalid("journal JSON"))?;
-    directory.replace(&journal_name(hash), &bytes)
+    let unresolved =
+        serde_json::to_vec(&journal).map_err(|_| Error::SnapshotInvalid("journal JSON"))?;
+    directory.resolve_journal(&journal_name(hash), &bytes, &unresolved)
 }
 
 fn current_pending(installation: &Installation, pending: &PendingGeneration) -> Result<Head> {

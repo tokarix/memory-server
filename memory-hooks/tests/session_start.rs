@@ -258,6 +258,169 @@ fn both_clients_emit_exact_fresh_publications_for_each_source() {
 }
 
 #[test]
+fn repeated_supported_starts_fetch_and_commit_distinct_generations() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let mut first = pack(&installation, &cwd);
+        first.mandatory[0].content.push_str("\nEND-MARKER-1");
+        let first = GuardrailPack::new(
+            first.project,
+            first.context,
+            first.resolver_schema_version,
+            first.mandatory,
+        )
+        .expect("first pack");
+        let mut next = first.clone();
+        next.mandatory[0].revision = Some(2);
+        next.mandatory[0].content.push_str("\nEND-MARKER-2");
+        let next = GuardrailPack::new(
+            next.project,
+            next.context,
+            next.resolver_schema_version,
+            next.mandatory,
+        )
+        .expect("successor pack");
+        assert_ne!(first.digest, next.digest);
+        let sources: &[&str] = if adapter == ClientAdapter::CodexV1 {
+            &["startup", "resume", "clear", "compact", "startup"]
+        } else {
+            &["startup", "resume", "clear", "compact", "fork", "startup"]
+        };
+        let mut previous = None;
+        for (index, source) in sources.iter().enumerate() {
+            let current = if index + 1 == sources.len() {
+                &next
+            } else {
+                &first
+            };
+            let handle = response(
+                listener.try_clone().expect("listener clone"),
+                serde_json::to_vec(current).expect("pack JSON"),
+                "200 OK",
+            );
+            let output = invoke(id, &cwd, adapter, source);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            assert_eq!(output.stdout.last(), Some(&b'\n'));
+            assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
+            let decoded: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("single output object");
+            assert_eq!(
+                decoded["hookSpecificOutput"]["additionalContext"],
+                current.publication().expect("publication")
+            );
+            assert_eq!(
+                decoded["hookSpecificOutput"]["hookEventName"],
+                "SessionStart"
+            );
+            let snapshot = installation
+                .read_snapshot("session", &cwd)
+                .expect("current public snapshot");
+            assert_eq!(snapshot.pack, *current);
+            assert_ne!(Some(snapshot.generation), previous);
+            previous = Some(snapshot.generation);
+            let request = handle.join().expect("one HTTP request");
+            assert_eq!(request.matches("GET ").count(), 1);
+            assert!(request.starts_with("GET /api/v1/projects/general/guardrails?context="));
+            assert!(!request.contains("/recall"));
+            assert!(!request.contains("/bootstrap"));
+            assert!(!request.contains("/sessions"));
+        }
+    }
+}
+
+#[test]
+fn both_adapters_reject_fresh_transport_failures_without_old_snapshot_fallback() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let good = pack(&installation, &cwd);
+        let handle = response(
+            listener.try_clone().expect("listener clone"),
+            serde_json::to_vec(&good).expect("pack JSON"),
+            "200 OK",
+        );
+        let success = invoke(id, &cwd, adapter, "startup");
+        assert!(success.status.success());
+        handle.join().expect("initial request");
+        assert!(installation.read_snapshot("session", &cwd).is_ok());
+
+        let mut wrong_project = good.clone();
+        wrong_project.project = "other".to_owned();
+        let mut wrong_context = good.clone();
+        wrong_context.context.profile = Some("container".to_owned());
+        let mut wrong_digest = good.clone();
+        wrong_digest.digest = format!("sha256:{}", "0".repeat(64));
+        let mut wrong_version = good.clone();
+        wrong_version.schema_version = 2;
+        let mut empty = good.clone();
+        empty.mandatory.clear();
+        let cases = [
+            (
+                "wrong_project",
+                "200 OK",
+                serde_json::to_vec(&wrong_project).expect("pack"),
+            ),
+            (
+                "wrong_context",
+                "200 OK",
+                serde_json::to_vec(&wrong_context).expect("pack"),
+            ),
+            (
+                "wrong_digest",
+                "200 OK",
+                serde_json::to_vec(&wrong_digest).expect("pack"),
+            ),
+            (
+                "wrong_version",
+                "200 OK",
+                serde_json::to_vec(&wrong_version).expect("pack"),
+            ),
+            ("empty", "200 OK", serde_json::to_vec(&empty).expect("pack")),
+            ("old_daemon", "404 Not Found", b"{}".to_vec()),
+            ("unauthorized", "401 Unauthorized", b"{}".to_vec()),
+            ("forbidden", "403 Forbidden", b"{}".to_vec()),
+            ("server_error", "500 Internal Server Error", b"{}".to_vec()),
+        ];
+        for (name, status, body) in cases {
+            let handle = response(listener.try_clone().expect("listener clone"), body, status);
+            let output = invoke(id, &cwd, adapter, "resume");
+            assert!(!output.status.success(), "{name}");
+            assert!(output.stdout.is_empty(), "{name}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("stage=fetch"), "{name}: {stderr}");
+            assert!(!stderr.contains("fixture-token"), "{name}");
+            assert!(
+                installation.read_snapshot("session", &cwd).is_err(),
+                "{name}"
+            );
+            let request = handle.join().expect("fresh HTTP request");
+            assert_eq!(request.matches("GET ").count(), 1, "{name}");
+        }
+        let handle = response(listener, serde_json::to_vec(&good).expect("pack"), "200 OK");
+        let recovered = invoke(id, &cwd, adapter, "clear");
+        assert!(recovered.status.success());
+        handle.join().expect("recovery request");
+        assert_eq!(
+            installation
+                .read_snapshot("session", &cwd)
+                .expect("recovered")
+                .pack,
+            good
+        );
+    }
+}
+
+#[test]
 fn failed_refresh_retires_previous_emission() {
     let root = private_fixture();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");

@@ -1,5 +1,7 @@
 //! Private, descriptor-relative records for later hook consumers.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -21,6 +23,52 @@ use crate::identity::{RepositoryIdentity, ResolvedBinding};
 use crate::limits;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_RENAME_FAULT: RefCell<Option<ReplaceFault>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct ReplaceFault {
+    name: String,
+    occurrence: usize,
+    seen: usize,
+}
+
+#[cfg(test)]
+fn fail_after_rename(name: &str) -> bool {
+    AFTER_RENAME_FAULT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(fault) = slot.as_mut() else {
+            return false;
+        };
+        if fault.name != name {
+            return false;
+        }
+        fault.seen += 1;
+        fault.seen == fault.occurrence
+    })
+}
+
+#[cfg(test)]
+fn with_after_rename_fault<T>(name: &str, occurrence: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AFTER_RENAME_FAULT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    AFTER_RENAME_FAULT.with(|slot| {
+        *slot.borrow_mut() = Some(ReplaceFault {
+            name: name.to_owned(),
+            occurrence,
+            seen: 0,
+        });
+    });
+    let _reset = Reset;
+    run()
+}
 
 /// Whether a private root may be created while walking its trusted parent.
 #[derive(Clone, Copy)]
@@ -402,6 +450,10 @@ impl PrivateDirectory {
             fsync(&file).map_err(|_| Error::Io("temporary sync", None))?;
             renameat(&self.directory, temporary.as_str(), &self.directory, name)
                 .map_err(|_| Error::Io("record rename", None))?;
+            #[cfg(test)]
+            if fail_after_rename(name) {
+                return Err(Error::DurabilityUncertain);
+            }
             fsync(&self.directory).map_err(|_| Error::DurabilityUncertain)?;
             Ok(())
         })();
@@ -409,6 +461,27 @@ impl PrivateDirectory {
             let _ = unlinkat(&self.directory, temporary.as_str(), AtFlags::empty());
         }
         write_result
+    }
+
+    /// Resolve a journal only after its replacement has been synced. If the
+    /// final directory sync is uncertain, restore an unresolved journal while
+    /// the caller still holds its control locks. Persistent storage failure
+    /// can also prevent that recovery, which needs managed repair.
+    pub(crate) fn resolve_journal(
+        &self,
+        name: &str,
+        resolved: &[u8],
+        unresolved: &[u8],
+    ) -> Result<()> {
+        match self.replace(name, resolved) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if matches!(error, Error::DurabilityUncertain) {
+                    let _ = self.replace(name, unresolved);
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -467,5 +540,200 @@ impl PrivateStateStore {
             self.directory.replace(&record_name, &writer.bytes)?;
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod journal_fault_tests {
+    use std::collections::BTreeMap;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::PathBuf;
+
+    use memory_common::guardrails::GuardrailPack;
+    use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use super::with_after_rename_fault;
+    use crate::config::ClientAdapter;
+    use crate::error::Error;
+    use crate::installation::Installation;
+
+    struct Rig {
+        root: TempDir,
+        cwd: PathBuf,
+        config: PathBuf,
+        id: Uuid,
+        installation: Installation,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+                .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+                .map_or_else(std::env::temp_dir, PathBuf::from);
+            let root = tempfile::tempdir_in(base).expect("private fixture");
+            let cwd = root.path().join("workspace");
+            fs::create_dir(&cwd).expect("workspace");
+            let config = root.path().join("config.toml");
+            let anchor = root.path().join("control");
+            let id = Installation::initialize(&anchor, ClientAdapter::CodexV1).expect("initialize");
+            let installation =
+                Installation::open(&anchor, id, ClientAdapter::CodexV1).expect("open");
+            let rig = Self {
+                root,
+                cwd,
+                config,
+                id,
+                installation,
+            };
+            rig.write_config();
+            rig.installation.activate(&rig.config).expect("activate");
+            rig
+        }
+
+        fn write_config(&self) {
+            let source = format!(
+                "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"general\"\n[bindings.context]\nprofile = \"workstation\"\n[transport]\nmemoryd_url = \"http://127.0.0.1:55486/\"\nunauthenticated = true\ncredential_revision = \"initial\"\n[client]\nadapter = \"codex-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\nadditional_context_limit = 0\n",
+                self.root.path().join("snapshots").display().to_string(),
+                self.cwd.display().to_string()
+            );
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(&self.config)
+                .expect("config");
+            file.write_all(source.as_bytes()).expect("config bytes");
+        }
+
+        fn reopen(&self) -> Installation {
+            Installation::open(
+                &self.root.path().join("control"),
+                self.id,
+                ClientAdapter::CodexV1,
+            )
+            .expect("reopen")
+        }
+
+        fn pack(&self) -> GuardrailPack {
+            let binding = self
+                .installation
+                .active()
+                .expect("active")
+                .config
+                .resolve(&self.cwd)
+                .expect("binding");
+            GuardrailPack::new(
+                binding.project().to_owned(),
+                binding.context().clone(),
+                1,
+                vec![CanonicalRule {
+                    project: "general".to_owned(),
+                    id: Uuid::from_u128(1),
+                    policy_key: Some("exact".to_owned()),
+                    revision: Some(1),
+                    delivery_class: Some(DeliveryClass::Mandatory),
+                    selectors: PolicySelectors::default(),
+                    values: BTreeMap::new(),
+                    content: "fault test marker".to_owned(),
+                    overrides: None,
+                }],
+            )
+            .expect("pack")
+        }
+
+        fn emit(&self, session: &str) {
+            let pending = self.installation.begin_session(session).expect("pending");
+            self.installation
+                .attach_binding(&pending, &self.cwd)
+                .expect("binding");
+            self.installation
+                .complete_session(&pending, &self.cwd, self.pack(), &mut Vec::new())
+                .expect("emitted");
+        }
+    }
+
+    #[test]
+    fn final_emitted_journal_sync_error_remains_unusable_after_reopen() {
+        let rig = Rig::new();
+        let pending = rig.installation.begin_session("session").expect("pending");
+        rig.installation
+            .attach_binding(&pending, &rig.cwd)
+            .expect("binding");
+        let journal = fs::read_dir(rig.root.path().join("control"))
+            .expect("control entries")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("journal-"))
+            .expect("session journal");
+        let mut output = Vec::new();
+        let result = with_after_rename_fault(&journal, 4, || {
+            rig.installation
+                .complete_session(&pending, &rig.cwd, rig.pack(), &mut output)
+        });
+        assert_eq!(result, Err(Error::DurabilityUncertain));
+        assert_eq!(output.last(), Some(&b'\n'));
+        let reopened = rig.reopen();
+        assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+        assert!(reopened.begin_session("session").is_err());
+        reopened.repair_session("session").expect("repair");
+        assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+        rig.emit("session");
+        assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+    }
+
+    #[test]
+    fn final_active_journal_sync_error_retires_old_epoch_after_reopen() {
+        let rig = Rig::new();
+        rig.emit("session");
+        let result = with_after_rename_fault("activation-journal", 4, || {
+            rig.installation.activate(&rig.config)
+        });
+        assert_eq!(result, Err(Error::DurabilityUncertain));
+        let reopened = rig.reopen();
+        assert!(reopened.active().is_err());
+        assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+        reopened.repair_incomplete().expect("repair");
+        assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+        reopened.activate(&rig.config).expect("reactivate");
+        assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
+        rig.emit("session");
+        assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+    }
+
+    #[test]
+    fn private_replace_does_not_accept_oversized_record() {
+        let rig = Rig::new();
+        let private = super::PrivateDirectory::open(
+            &rig.root.path().join("snapshots"),
+            super::RootMode::Existing,
+        )
+        .expect("private root");
+        assert_eq!(
+            private.replace("limit", &vec![0; crate::limits::RECORD_BYTES + 1]),
+            Err(Error::StateCorrupt)
+        );
+        assert!(private.read("limit").expect("read").is_none());
+        private
+            .replace("limit", &vec![b'x'; crate::limits::RECORD_BYTES])
+            .expect("exact record limit");
+        assert_eq!(
+            private
+                .read("limit")
+                .expect("bounded read")
+                .expect("record")
+                .len(),
+            crate::limits::RECORD_BYTES
+        );
+        let mut record = OpenOptions::new()
+            .append(true)
+            .open(rig.root.path().join("snapshots/limit"))
+            .expect("record append");
+        record.write_all(b"x").expect("one byte over");
+        assert_eq!(private.read("limit"), Err(Error::StateCorrupt));
     }
 }

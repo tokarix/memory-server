@@ -111,8 +111,7 @@ Claude [documents](https://code.claude.com/docs/en/hooks#sessionstart) `fork`
 and optional top-level `agent_type`; this helper ignores that metadata but
 rejects explicit delegated envelopes. Claude versions before 2.1.214 report
 fork as `resume`. The local fixture suite exercises both adapters and sources;
-managed-client runtime compatibility must also be smoke-tested on the exact
-deployed client versions before production activation.
+deployment operators may separately smoke-test exact deployed client versions.
 
 ## Event and snapshot contract
 
@@ -150,6 +149,13 @@ Errors use bounded safe codes on stderr and a nonzero exit. They do not print
 the bearer token, raw config/event, arbitrary path, Git stderr or upstream
 body. A failed or partial write can leave Prepared; a crash after complete
 output but before Emitted is a false negative requiring fresh delivery.
+If the final directory sync for an Emitted or Active journal fails after its
+rename, the helper rewrites that journal as unresolved while it still holds
+the control locks. The caller receives an error; a newly opened public reader
+rejects the transition until explicit repair and fresh delivery. If storage
+also refuses the unresolved rewrite, the helper cannot establish durable
+invalidation; stop use of the installation and perform managed repair or
+decommissioning.
 Complete local output plus durable evidence is not client acknowledgement or
 proof of obedience. Client switches may discard hook context, and #87 must
 still revalidate actions. Filesystem durability is limited to the supported
@@ -162,8 +168,15 @@ private supported filesystem. The integration tests start a local HTTP peer,
 spawn the real helper, decode exactly one output JSON document, compare its
 additional context byte for byte with the publication, and read the snapshot
 through the public validator. They also check that a failed refresh cannot
-reuse prior delivery. Run the workspace test suite with a disposable migrated
-PostgreSQL/pgvector database to exercise memoryd policy integration.
+reuse prior delivery. The fixtures cover all supported sources for both
+adapters, repeated same-session starts with fresh generations and successor
+revisions, and representative response failures after earlier Emitted
+delivery. Private unit fault fixtures target final journal rename/sync for
+Emitted and Active, reopen the installation, require explicit repair, and
+prove old evidence remains unusable. Run the workspace test suite with a
+disposable migrated PostgreSQL/pgvector database to exercise memoryd policy
+integration. These fixtures establish the local protocol contract. Optional
+real-client validation on deployed versions is an operator choice.
 
 ## Client compatibility evidence (2026-09-27)
 
@@ -183,5 +196,8 @@ An isolated Claude Code 2.1.92 run invoked the helper and produced Emitted
 local evidence. Its provider requests returned HTTP 401, so model consumption
 could not be verified. The installed version also predates Claude's distinct
 `fork` source (2.1.214); the fork adapter has subprocess fixture coverage but
-needs a newer authenticated client smoke before production use. The smoke
-used disposable roots and did not change live client settings or policies.
+has no verified distinct-source runtime consumption from that historical run.
+The smoke used disposable roots and did not change live client settings or
+policies. Authenticated external-provider smoke is optional operator
+validation and does not gate deterministic fixture acceptance or implementer
+ReadyForReview.
