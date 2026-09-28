@@ -164,6 +164,13 @@ rejects the transition until explicit repair and fresh delivery. If storage
 also refuses the unresolved rewrite, the helper cannot establish durable
 invalidation; stop use of the installation and perform managed repair or
 decommissioning.
+For a local process crash, the final atomic rename of the resolved session
+journal is the commit point after complete output, payload persistence and
+the Emitted head. A process killed after that rename but before the parent
+directory sync leaves a coherent current Emitted snapshot readable by a newly
+opened installation. Normal writer success still requires that directory sync.
+A system crash or power loss in the same interval has weaker durability; the
+process-kill result does not establish recovery after power loss.
 Complete local output plus durable evidence is not client acknowledgement or
 proof of obedience. Client switches may discard hook context, and #87 must
 still revalidate actions. Filesystem durability is limited to the supported
@@ -219,8 +226,10 @@ and requires a fresh generation to recover. The worker barriers are confined
 to the test binary; the production helper exposes no crash-stage switch.
 The private replacement test binary also kills workers before and after
 payload persistence, after the Emitted head sync while its journal is still
-unresolved, and before final journal resolution. A separate kill after the
-final journal sync preserves the fully committed exact snapshot.
+unresolved, and before final journal resolution. Kills immediately after the
+final resolved-journal rename and after its directory sync preserve the exact
+current snapshot. A returned final directory-sync error instead restores an
+unresolved journal and requires repair and fresh delivery.
 These fixtures establish the local protocol contract. Optional
 real-client validation on deployed versions is an operator choice.
 

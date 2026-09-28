@@ -147,9 +147,18 @@ themselves. All stores use the same checked descriptor-relative ownership,
 mode, ACL, symlink, hardlink, filesystem, atomic-replace and `fsync` rules.
 The lock order is installation, session, then snapshot; HTTP fetch releases
 control locks. Payloads are persisted before anchor heads so separate
-filesystems need no cross-root rename. An unresolved journal, uncertain
-post-rename sync, absent anchor or missing current payload yields no usable
-snapshot.
+filesystems need no cross-root rename. An unresolved journal, a reported
+post-rename sync failure followed by successful invalidation, an absent anchor
+or missing current payload yields no usable snapshot.
+For local process termination, the final resolved session-journal rename
+commits the current Emitted snapshot after complete output and durable payload
+and head writes. The parent-directory sync is still required before normal
+writer success and establishes the stronger power-loss durability boundary.
+If that sync reports failure, the writer restores unresolved authority under
+the control locks and the reader rejects it until repair and fresh delivery.
+If storage also refuses invalidation, managed repair or decommissioning is
+required. No power-loss recovery guarantee is inferred from a process kill
+between rename and directory sync.
 
 Activation durably commits Changing at a new checked epoch and nonce before
 validating a proposed config/root, then commits Active for that same epoch.

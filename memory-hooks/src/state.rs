@@ -639,6 +639,7 @@ mod journal_fault_tests {
 
     use memory_common::guardrails::GuardrailPack;
     use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
+    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -781,14 +782,91 @@ mod journal_fault_tests {
             "payload_after_sync" => ("payload-", ReplaceStage::AfterParentSync, 1),
             "emitted_head_after_sync" => ("head-", ReplaceStage::AfterParentSync, 2),
             "resolution_before_rename" => ("journal-", ReplaceStage::Rename, 4),
+            "resolution_after_rename" => ("journal-", ReplaceStage::ParentSync, 4),
             "resolution_after_sync" => ("journal-", ReplaceStage::AfterParentSync, 4),
             _ => panic!("unknown crash case"),
         };
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(barrier.with_extension("output"))
+            .expect("captured output");
         with_replace_pause(prefix, stage, occurrence, barrier, || {
-            installation.complete_session(&pending, &cwd, pack, &mut Vec::new())
+            installation.complete_session(&pending, &cwd, pack, &mut output)
         })
         .expect("worker must pause at replacement stage");
         panic!("worker completed without reaching crash barrier");
+    }
+
+    fn assert_committed_crash_snapshot(rig: &Rig, barrier: &Path, case: &str) {
+        let reopened = rig.reopen();
+        let snapshot = reopened
+            .read_snapshot("crash", &rig.cwd)
+            .expect("fully committed reader");
+        let expected_pack = rig.pack();
+        let actual_output =
+            fs::read(barrier.with_extension("output")).expect("captured complete output");
+        assert_eq!(actual_output.last(), Some(&b'\n'), "{case}");
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&actual_output[..actual_output.len() - 1])
+                .expect("single output JSON");
+        assert_eq!(
+            decoded["hookSpecificOutput"]["additionalContext"],
+            expected_pack.publication().expect("canonical publication"),
+            "{case}"
+        );
+        assert_eq!(
+            decoded["hookSpecificOutput"]["hookEventName"], "SessionStart",
+            "{case}"
+        );
+        assert_eq!(snapshot.pack, expected_pack, "{case}");
+        let active = reopened.active().expect("current installation");
+        assert_eq!(snapshot.epoch, active.epoch, "{case}");
+        assert_eq!(
+            snapshot.binding,
+            active
+                .config
+                .resolve(&rig.cwd)
+                .expect("binding")
+                .public_json()
+                .expect("public binding"),
+            "{case}"
+        );
+        let control = rig.root.path().join("control");
+        let head_name = fs::read_dir(&control)
+            .expect("control entries")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("head-"))
+            .expect("session head");
+        let head: serde_json::Value =
+            serde_json::from_slice(&fs::read(control.join(head_name)).expect("head bytes"))
+                .expect("head JSON");
+        assert_eq!(
+            head["generation"],
+            snapshot.generation.to_string(),
+            "{case}"
+        );
+        assert_eq!(head["state"], "emitted", "{case}");
+        assert_eq!(head["output_bytes"], actual_output.len(), "{case}");
+        assert_eq!(
+            head["output_sha256"],
+            format!("sha256:{:x}", Sha256::digest(&actual_output)),
+            "{case}"
+        );
+        let journal_name = fs::read_dir(&control)
+            .expect("control entries")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with("journal-"))
+            .expect("session journal");
+        let journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(control.join(journal_name)).expect("journal bytes"))
+                .expect("journal JSON");
+        assert_eq!(journal["resolved"], true, "{case}");
+        assert_eq!(journal["generation"], head["generation"], "{case}");
+        assert_eq!(journal["sequence"], head["sequence"], "{case}");
     }
 
     #[test]
@@ -798,6 +876,7 @@ mod journal_fault_tests {
             "payload_after_sync",
             "emitted_head_after_sync",
             "resolution_before_rename",
+            "resolution_after_rename",
             "resolution_after_sync",
         ] {
             let rig = Rig::new();
@@ -832,15 +911,8 @@ mod journal_fault_tests {
             child.kill().expect("terminate worker");
             child.wait().expect("reap worker");
             let reopened = rig.reopen();
-            if case == "resolution_after_sync" {
-                assert_eq!(
-                    reopened
-                        .read_snapshot("crash", &rig.cwd)
-                        .expect("fully committed reader")
-                        .pack,
-                    rig.pack(),
-                    "{case}"
-                );
+            if matches!(case, "resolution_after_rename" | "resolution_after_sync") {
+                assert_committed_crash_snapshot(&rig, &barrier, case);
             } else {
                 assert!(reopened.read_snapshot("crash", &rig.cwd).is_err(), "{case}");
             }
