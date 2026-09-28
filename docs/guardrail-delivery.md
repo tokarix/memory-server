@@ -92,3 +92,8 @@ optional `memory_bootstrap`/capture scripts establish that evidence. Emission
 does not prove the client consumed or obeyed the text, and it does not grant
 later mutation authority. A later action must revalidate the current
 installation/session generation; action gating is a separate contract.
+For process termination, the final resolved session-journal rename commits
+the Emitted snapshot after complete output and durable payload/head writes.
+Normal success still requires parent-directory sync; a reported sync failure
+restores unresolved authority. Power-loss recovery between rename and sync
+has weaker durability. See [recovery details](hooks-delivery.md).

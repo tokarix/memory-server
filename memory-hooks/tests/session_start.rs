@@ -1,7 +1,7 @@
 //! Subprocess contract for fresh client-consumed mandatory startup output.
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -553,6 +553,93 @@ fn both_clients_emit_exact_fresh_publications_for_each_source() {
                     .contains("authorization: bearer fixture-token")
             );
         }
+    }
+}
+
+#[test]
+fn both_adapters_preserve_general_and_project_policy_fields_exactly() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), adapter, port);
+        let config_path = root.path().join("config.toml");
+        let source = fs::read_to_string(&config_path).expect("config");
+        fs::write(
+            &config_path,
+            source.replace(
+                "guardrails_project = \"general\"",
+                "guardrails_project = \"app\"",
+            ),
+        )
+        .expect("project config");
+        installation
+            .activate(&config_path)
+            .expect("project activation");
+        let binding = installation
+            .active()
+            .expect("active")
+            .config
+            .resolve(&cwd)
+            .expect("binding");
+        let rules = vec![
+            CanonicalRule {
+                project: "general".to_owned(),
+                id: Uuid::from_u128(41),
+                policy_key: Some("build.storage".to_owned()),
+                revision: Some(7),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors::default(),
+                values: BTreeMap::from([("build.target".to_owned(), "persistent-disk".to_owned())]),
+                content: "General: \"quoted\" \\ path\r\n🦀 e\u{301}".to_owned(),
+                overrides: None,
+            },
+            CanonicalRule {
+                project: "app".to_owned(),
+                id: Uuid::from_u128(42),
+                policy_key: Some("review.mode".to_owned()),
+                revision: Some(9),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors {
+                    profile: Some(BTreeSet::from(["workstation".to_owned()])),
+                    ..PolicySelectors::default()
+                },
+                values: BTreeMap::from([("review.mode".to_owned(), "strict".to_owned())]),
+                content: "Project: first\nsecond\t\u{0001}終".to_owned(),
+                overrides: None,
+            },
+        ];
+        let pack = GuardrailPack::new("app".to_owned(), binding.context().clone(), 1, rules)
+            .expect("rich pack");
+        let expected = pack.publication().expect("canonical publication");
+        let handle = response(listener, serde_json::to_vec(&pack).expect("pack"), "200 OK");
+        let output = invoke(id, &cwd, adapter, "startup");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        assert_eq!(output.stdout.last(), Some(&b'\n'));
+        assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
+        let decoded: serde_json::Value = serde_json::from_slice(&output.stdout).expect("one JSON");
+        assert_eq!(
+            decoded["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert_eq!(decoded["hookSpecificOutput"]["additionalContext"], expected);
+        let snapshot = installation.read_snapshot("session", &cwd).expect("reader");
+        assert_eq!(snapshot.pack, pack);
+        assert_eq!(
+            snapshot.binding,
+            binding.public_json().expect("public binding")
+        );
+        assert!(
+            handle
+                .join()
+                .expect("request")
+                .starts_with("GET /api/v1/projects/app/guardrails?context=")
+        );
     }
 }
 
@@ -1403,6 +1490,85 @@ fn both_adapters_send_exact_encoded_project_and_complete_trusted_context() {
     }
 }
 
+fn exact_reachable_pack(binding: &memory_hooks::ResolvedBinding) -> GuardrailPack {
+    let make = |fill: usize| {
+        let rules = (0..u32::try_from(MAX_POLICIES).expect("rule count"))
+            .map(|index| CanonicalRule {
+                project: "general".to_owned(),
+                id: Uuid::from_u128(u128::from(index) + 1),
+                policy_key: Some(format!("boundary-{index:02}")),
+                revision: Some(i64::from(index) + 1),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors::default(),
+                values: BTreeMap::new(),
+                content: format!(
+                    "Rüle {index}: \"\\\r\n\t🦀e\u{301}{} END-MARKER-{index}",
+                    "\u{0001}".repeat(fill)
+                ),
+                overrides: None,
+            })
+            .collect();
+        GuardrailPack::new(
+            binding.project().to_owned(),
+            binding.context().clone(),
+            1,
+            rules,
+        )
+    };
+    assert!(make(0).is_ok(), "{:?}", make(0));
+    let mut low: usize = 0;
+    let mut high: usize = 512;
+    while low + 1 < high {
+        let middle = low.midpoint(high);
+        if make(middle).is_ok() {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let near = make(low).expect("largest reachable pack");
+    assert!(make(low + 1).is_err());
+    let mut pack = near.clone();
+    for suffix_bytes in 1..=64 {
+        let mut rules = near.mandatory.clone();
+        rules[0].content.push_str(&"x".repeat(suffix_bytes));
+        let Ok(candidate) = GuardrailPack::new(
+            near.project.clone(),
+            near.context.clone(),
+            near.resolver_schema_version,
+            rules,
+        ) else {
+            break;
+        };
+        pack = candidate;
+    }
+    let mut over = pack.mandatory.clone();
+    over[0].content.push('x');
+    assert!(
+        GuardrailPack::new(
+            pack.project.clone(),
+            pack.context.clone(),
+            pack.resolver_schema_version,
+            over,
+        )
+        .is_err()
+    );
+    assert_eq!(pack.mandatory.len(), MAX_POLICIES);
+    let canonical = pack.canonical_bytes().expect("canonical bytes");
+    let serialized = serde_json::to_vec(&pack).expect("serialized pack");
+    let publication = pack.publication().expect("publication");
+    let slack = [
+        MAX_CANONICAL_BYTES - canonical.len(),
+        MAX_PUBLICATION_BYTES - serialized.len(),
+        MAX_PUBLICATION_BYTES - publication.len(),
+    ];
+    assert!(
+        slack.contains(&0),
+        "reachable byte limit must be exact: {slack:?}"
+    );
+    pack
+}
+
 #[test]
 fn both_adapters_deliver_all_rules_at_the_reachable_shared_byte_boundary() {
     for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
@@ -1416,53 +1582,9 @@ fn both_adapters_deliver_all_rules_at_the_reachable_shared_byte_boundary() {
             .config
             .resolve(&cwd)
             .expect("binding");
-        let make = |fill: usize| {
-            let rules = (0..u32::try_from(MAX_POLICIES).expect("rule count"))
-                .map(|index| CanonicalRule {
-                    project: "general".to_owned(),
-                    id: Uuid::from_u128(u128::from(index) + 1),
-                    policy_key: Some(format!("boundary-{index:02}")),
-                    revision: Some(i64::from(index) + 1),
-                    delivery_class: Some(DeliveryClass::Mandatory),
-                    selectors: PolicySelectors::default(),
-                    values: BTreeMap::new(),
-                    content: format!(
-                        "Rüle {index}: \"\\\r\n\t🦀e\u{301}{} END-MARKER-{index}",
-                        "\u{0001}".repeat(fill)
-                    ),
-                    overrides: None,
-                })
-                .collect();
-            GuardrailPack::new(
-                binding.project().to_owned(),
-                binding.context().clone(),
-                1,
-                rules,
-            )
-        };
-        assert!(make(0).is_ok(), "{:?}", make(0));
-        let mut low: usize = 0;
-        let mut high: usize = 512;
-        while low + 1 < high {
-            let middle = low.midpoint(high);
-            if make(middle).is_ok() {
-                low = middle;
-            } else {
-                high = middle;
-            }
-        }
-        let pack = make(low).expect("largest reachable pack");
-        assert!(make(low + 1).is_err());
-        assert_eq!(pack.mandatory.len(), MAX_POLICIES);
-        let canonical = pack.canonical_bytes().expect("canonical bytes");
+        let pack = exact_reachable_pack(&binding);
         let serialized = serde_json::to_vec(&pack).expect("serialized pack");
         let publication = pack.publication().expect("publication");
-        let slack = [
-            MAX_CANONICAL_BYTES - canonical.len(),
-            MAX_PUBLICATION_BYTES - serialized.len(),
-            MAX_PUBLICATION_BYTES - publication.len(),
-        ];
-        assert!(slack.iter().any(|remaining| *remaining < 64), "{slack:?}");
         assert!(publication.contains("END-MARKER-31"));
         let handle = response(listener, serialized, "200 OK");
         let output = invoke(id, &cwd, adapter, "startup");

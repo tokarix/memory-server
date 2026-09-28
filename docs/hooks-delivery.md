@@ -189,7 +189,8 @@ additional context byte for byte with the publication, and read the snapshot
 through the public validator. They also check that a failed refresh cannot
 reuse prior delivery. The fixtures cover all supported sources for both
 adapters, repeated same-session starts with fresh generations and successor
-revisions, and representative response failures after earlier Emitted
+revisions, general/project policy identities, selectors, values and exact
+Unicode/escaped text, and representative response failures after earlier Emitted
 delivery. Both subprocess adapters also exercise a valid 64-KiB event, a
 1-KiB UTF-8 session ID, all 32 policies at a reachable shared byte ceiling,
 maximum legal trusted context dimensions, and the exact 32-KiB HTTP body
@@ -209,12 +210,20 @@ prove old evidence remains unusable after a committed barrier. Run the
 workspace test suite with `DATABASE_URL` pointing to a disposable migrated
 PostgreSQL/pgvector database to exercise memoryd policy integration, including
 no-policy and conflicting classified-policy responses through the daemon
-endpoint and shared HTTP client. Reopened-reader fixtures independently alter
+endpoint, shared HTTP client, both adapter SessionStart workers and the public
+reader. The daemon fixture covers scoped workstation/container contexts,
+general and project override resolution, successor revisions and empty or
+conflicting mandatory responses. Reopened-reader fixtures independently alter
 payload scope, pack and output fields with a recomputed outer hash, and
 head/journal fields; they also exercise checked epoch and sequence overflow.
 Cross-process duplicate and separate-session starts show that a late fetch
 cannot replace a newer claim or damage another session. Failed output on an
 intermediate root cannot restore old R1 evidence after R1 → R2 → R1 migration.
+The logical root-reversion fixture runs on one supported filesystem. An
+additional fixture can exercise two distinct supported filesystems by setting
+`MEMORY_HOOKS_TEST_ROOT_SECONDARY` to a second private fixture location; it
+checks device identity before running. If no second location is configured,
+the test reports that supplementary coverage as unavailable.
 Output fixtures include interrupted
 short writes, failure at the final byte/newline, a real broken stdout pipe,
 a real blocked pipe until deadline, and unfinished input until deadline.

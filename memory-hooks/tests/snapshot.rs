@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, mpsc};
@@ -1243,6 +1243,92 @@ fn root_reversion_retires_sessions_that_never_refreshed() {
     }
     assert!(rig.root.path().join("r1").is_dir());
     assert!(rig.root.path().join("r2").is_dir());
+}
+
+#[test]
+fn distinct_supported_filesystems_preserve_epoch_retirement_across_root_reversion() {
+    let Some(secondary_base) = std::env::var_os("MEMORY_HOOKS_TEST_ROOT_SECONDARY") else {
+        eprintln!(
+            "distinct-filesystem fixture unavailable: MEMORY_HOOKS_TEST_ROOT_SECONDARY unset"
+        );
+        return;
+    };
+    let rig = Rig::new();
+    let secondary = tempfile::tempdir_in(secondary_base).expect("second private fixture");
+    assert_ne!(
+        fs::metadata(rig.root.path())
+            .expect("primary metadata")
+            .dev(),
+        fs::metadata(secondary.path())
+            .expect("secondary metadata")
+            .dev(),
+        "fixture roots must be on distinct filesystems"
+    );
+    let pack = rig.pack("exact pack across independent filesystems");
+    for session in ["refreshed", "idle"] {
+        let pending = rig.installation.begin_session(session).expect("R1 claim");
+        rig.installation
+            .attach_binding(&pending, &rig.cwd)
+            .expect("R1 binding");
+        rig.installation
+            .complete_session(&pending, &rig.cwd, pack.clone(), &mut Vec::new())
+            .expect("R1 delivery");
+    }
+    let first = rig
+        .installation
+        .read_snapshot("refreshed", &rig.cwd)
+        .expect("R1 reader");
+    let primary_root = rig.root.path().join("r1");
+    rig.write_config(&secondary.path().join("r2"), "workstation");
+    rig.installation
+        .activate(&rig.config_path)
+        .expect("R2 activation");
+    for session in ["refreshed", "idle"] {
+        assert!(rig.installation.read_snapshot(session, &rig.cwd).is_err());
+    }
+    let second = rig
+        .installation
+        .begin_session("refreshed")
+        .expect("R2 claim");
+    rig.installation
+        .attach_binding(&second, &rig.cwd)
+        .expect("R2 binding");
+    rig.installation
+        .complete_session(&second, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("R2 delivery");
+    assert_eq!(
+        rig.installation
+            .read_snapshot("refreshed", &rig.cwd)
+            .expect("R2 reader")
+            .pack,
+        pack
+    );
+    rig.write_config(&primary_root, "workstation");
+    rig.installation
+        .activate(&rig.config_path)
+        .expect("R1 reactivation");
+    for session in ["refreshed", "idle"] {
+        assert!(rig.installation.read_snapshot(session, &rig.cwd).is_err());
+    }
+    let fresh = rig
+        .installation
+        .begin_session("refreshed")
+        .expect("fresh claim");
+    assert_ne!(fresh.epoch(), first.epoch);
+    assert_ne!(fresh.generation(), first.generation);
+    rig.installation
+        .attach_binding(&fresh, &rig.cwd)
+        .expect("fresh binding");
+    rig.installation
+        .complete_session(&fresh, &rig.cwd, pack.clone(), &mut Vec::new())
+        .expect("fresh delivery");
+    assert_eq!(
+        rig.installation
+            .read_snapshot("refreshed", &rig.cwd)
+            .expect("fresh reader")
+            .pack,
+        pack
+    );
 }
 
 #[test]

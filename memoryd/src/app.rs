@@ -1103,6 +1103,176 @@ mod tests {
         )
     }
 
+    fn real_daemon_context(profile: &str) -> memory_common::policy::ResolutionContext {
+        use std::collections::BTreeSet;
+
+        memory_common::policy::ResolutionContext {
+            profile: Some(profile.to_owned()),
+            phase: Some("reworking".to_owned()),
+            language: Some(BTreeSet::from(["rust".to_owned()])),
+            tool: Some(BTreeSet::from(["cargo".to_owned()])),
+        }
+    }
+
+    fn real_daemon_context_json(profile: &str) -> String {
+        serde_json::to_string(&real_daemon_context(profile)).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_daemon_hook_worker() {
+        let Ok(id) = std::env::var("MEMORYD_HOOK_WORKER_ID") else {
+            return;
+        };
+        let control = std::env::var_os("MEMORYD_HOOK_WORKER_CONTROL").unwrap();
+        let adapter = memory_hooks::config::ClientAdapter::from_name(
+            &std::env::var("MEMORYD_HOOK_WORKER_ADAPTER").unwrap(),
+        )
+        .unwrap();
+        let installation = memory_hooks::Installation::open(
+            std::path::Path::new(&control),
+            id.parse().unwrap(),
+            adapter,
+        )
+        .unwrap();
+        let status = memory_hooks::session_start::run(&installation);
+        std::process::exit(i32::from(status.is_err()));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn invoke_real_daemon_hook(
+        control: &std::path::Path,
+        id: Uuid,
+        adapter: memory_hooks::config::ClientAdapter,
+        cwd: &std::path::Path,
+        source: &str,
+    ) -> std::process::Output {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::real_daemon_hook_worker",
+                "--nocapture",
+            ])
+            .env("MEMORYD_HOOK_WORKER_ID", id.to_string())
+            .env("MEMORYD_HOOK_WORKER_CONTROL", control)
+            .env("MEMORYD_HOOK_WORKER_ADAPTER", adapter.name())
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let event = serde_json::json!({
+            "session_id": "real-daemon", "cwd": cwd,
+            "hook_event_name": "SessionStart", "source": source,
+        });
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_real_daemon_adapters(
+        addr: std::net::SocketAddr,
+        profile: &str,
+        pack: Option<&memory_common::guardrails::GuardrailPack>,
+    ) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        for adapter in [
+            memory_hooks::config::ClientAdapter::CodexV1,
+            memory_hooks::config::ClientAdapter::ClaudeV1,
+        ] {
+            let root = tempfile::tempdir_in(&base).unwrap();
+            let cwd = root.path().join("workspace");
+            std::fs::create_dir(&cwd).unwrap();
+            let config_path = root.path().join("hooks.toml");
+            let additional = if adapter == memory_hooks::config::ClientAdapter::CodexV1 {
+                "additional_context_limit = 0\n"
+            } else {
+                ""
+            };
+            let config = format!(
+                "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"app\"\n[bindings.context]\nprofile = {profile:?}\nphase = \"reworking\"\nlanguage = [\"rust\"]\ntool = [\"cargo\"]\n[transport]\nmemoryd_url = \"http://{addr}/\"\nunauthenticated = true\ncredential_revision = \"fixture\"\n[client]\nadapter = {:?}\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\n{additional}",
+                root.path().join("snapshots").display().to_string(),
+                cwd.display().to_string(),
+                adapter.name()
+            );
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&config_path)
+                .unwrap();
+            file.write_all(config.as_bytes()).unwrap();
+            let control = root.path().join("control");
+            let id = memory_hooks::Installation::initialize(&control, adapter).unwrap();
+            let installation = memory_hooks::Installation::open(&control, id, adapter).unwrap();
+            installation.activate(&config_path).unwrap();
+            let binding = installation
+                .active()
+                .unwrap()
+                .config
+                .resolve(&cwd)
+                .unwrap()
+                .public_json()
+                .unwrap();
+            let mut previous = None;
+            let sources: &[&str] = if pack.is_none() {
+                &["startup"]
+            } else if adapter == memory_hooks::config::ClientAdapter::CodexV1 {
+                &["startup", "resume"]
+            } else {
+                &["startup", "fork"]
+            };
+            for source in sources {
+                let output = invoke_real_daemon_hook(&control, id, adapter, &cwd, source);
+                if let Some(pack) = pack {
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(output.stderr.is_empty());
+                    let start = output.stdout.iter().position(|byte| *byte == b'{').unwrap();
+                    let bytes = &output.stdout[start..];
+                    assert_eq!(bytes.last(), Some(&b'\n'));
+                    assert!(!bytes[..bytes.len() - 1].contains(&b'\n'));
+                    let decoded: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                    assert_eq!(
+                        decoded["hookSpecificOutput"]["hookEventName"],
+                        "SessionStart"
+                    );
+                    assert_eq!(
+                        decoded["hookSpecificOutput"]["additionalContext"],
+                        pack.publication().unwrap()
+                    );
+                    let snapshot = installation.read_snapshot("real-daemon", &cwd).unwrap();
+                    assert_eq!(snapshot.pack, *pack);
+                    assert_eq!(snapshot.binding, binding);
+                    assert_ne!(Some(snapshot.generation), previous);
+                    previous = Some(snapshot.generation);
+                } else {
+                    assert!(!output.status.success());
+                    assert!(installation.read_snapshot("real-daemon", &cwd).is_err());
+                    assert!(!output.stdout.contains(&b'{'));
+                }
+            }
+        }
+    }
+
     #[sqlx::test(migrator = "crate::MIGRATOR")]
     async fn graph_failure_after_commit_keeps_published_revision(pool: PgPool) {
         let app = app_with_mock(pool.clone(), spawn_mock_server().await);
@@ -1192,6 +1362,9 @@ mod tests {
             write.policy_key = key.to_owned();
             write.delivery_class = DeliveryClass::Mandatory;
             write.selectors.profile = Some(BTreeSet::from([profile.to_owned()]));
+            write.selectors.phase = Some(BTreeSet::from(["reworking".to_owned()]));
+            write.selectors.language = Some(BTreeSet::from(["rust".to_owned()]));
+            write.selectors.tool = Some(BTreeSet::from(["cargo".to_owned()]));
             write
                 .values
                 .insert("build.target".to_owned(), storage.to_owned());
@@ -1199,6 +1372,18 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let mut general_contextual = policy_request(None, 1).policy.unwrap();
+        general_contextual.policy_key = "editor.format".to_owned();
+        general_contextual.selectors.profile =
+            Some(BTreeSet::from(["workstation-host".to_owned()]));
+        crate::policy::publish_new(&pool, &scoped_memory("general", 7), &general_contextual)
+            .await
+            .unwrap();
+        let mut project_override = general_contextual.clone();
+        project_override.selectors.phase = Some(BTreeSet::from(["reworking".to_owned()]));
+        crate::policy::publish_new(&pool, &scoped_memory("app", 8), &project_override)
+            .await
+            .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1222,7 +1407,7 @@ mod tests {
         };
         for (profile, expected_id) in [("workstation-host", 1), ("woodpecker-container", 2)] {
             for endpoint in ["rules", "bootstrap"] {
-                let context = format!("{{\"profile\":\"{profile}\"}}");
+                let context = real_daemon_context_json(profile);
                 let response = client
                     .get(url(
                         endpoint,
@@ -1242,9 +1427,14 @@ mod tests {
                     body["canonical"]["mandatory"][0]["id"],
                     Uuid::from_u128(expected_id).to_string()
                 );
-                assert_eq!(body["canonical"]["effective"].as_array().unwrap().len(), 1);
+                assert!(
+                    !body["canonical"]["effective"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
             }
-            let context = format!("{{\"profile\":\"{profile}\"}}");
+            let context = real_daemon_context_json(profile);
             let response = client
                 .get(url("guardrails", &[("context", &context)]))
                 .send()
@@ -1258,10 +1448,7 @@ mod tests {
             let pack: memory_common::guardrails::GuardrailPack = response.json().await.unwrap();
             assert_eq!(pack.mandatory.len(), 1);
             assert_eq!(pack.mandatory[0].id, Uuid::from_u128(expected_id));
-            let selected_context = memory_common::policy::ResolutionContext {
-                profile: Some(profile.to_owned()),
-                ..memory_common::policy::ResolutionContext::default()
-            };
+            let selected_context = real_daemon_context(profile);
             pack.validate_for("app", &selected_context).unwrap();
             let hook_http = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -1284,86 +1471,37 @@ mod tests {
                 pack.publication().unwrap()
             );
             #[cfg(target_os = "linux")]
-            {
-                let stored_pack = hook_pack.clone();
-                let stored_profile = profile.to_owned();
-                tokio::task::spawn_blocking(move || {
-                use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
-
-                let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
-                    .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
-                    .or_else(|| std::env::var_os("HOME"))
-                    .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-                for adapter in [
-                    memory_hooks::config::ClientAdapter::CodexV1,
-                    memory_hooks::config::ClientAdapter::ClaudeV1,
-                ] {
-                let root = tempfile::tempdir_in(&base).unwrap();
-                let cwd = root.path().join("workspace");
-                std::fs::create_dir(&cwd).unwrap();
-                let config_path = root.path().join("hooks.toml");
-                let additional = if adapter == memory_hooks::config::ClientAdapter::CodexV1 {
-                    "additional_context_limit = 0\n"
-                } else {
-                    ""
-                };
-                let adapter_name = adapter.name();
-                let config = format!(
-                    "schema_version = 2\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"app\"\n[bindings.context]\nprofile = {stored_profile:?}\n[transport]\nmemoryd_url = \"http://{addr}/\"\nunauthenticated = true\ncredential_revision = \"fixture\"\n[client]\nadapter = {adapter_name:?}\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\n{additional}",
-                    root.path().join("snapshots").display().to_string(),
-                    cwd.display().to_string()
-                );
-                let mut file = std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&config_path)
-                    .unwrap();
-                file.write_all(config.as_bytes()).unwrap();
-                let control = root.path().join("control");
-                let id = memory_hooks::Installation::initialize(
-                    &control,
-                    adapter,
-                )
-                .unwrap();
-                let installation = memory_hooks::Installation::open(
-                    &control,
-                    id,
-                    adapter,
-                )
-                .unwrap();
-                installation.activate(&config_path).unwrap();
-                let pending = installation.begin_session("real-daemon").unwrap();
-                let binding = installation.attach_binding(&pending, &cwd).unwrap();
-                let mut output = Vec::new();
-                installation
-                    .complete_session(&pending, &cwd, stored_pack.clone(), &mut output)
-                    .unwrap();
-                let decoded: serde_json::Value = serde_json::from_slice(&output).unwrap();
-                assert_eq!(
-                    decoded["hookSpecificOutput"]["additionalContext"],
-                    stored_pack.publication().unwrap()
-                );
-                let snapshot = installation.read_snapshot("real-daemon", &cwd).unwrap();
-                assert_eq!(snapshot.pack, stored_pack);
-                assert_eq!(snapshot.epoch, pending.epoch());
-                assert_eq!(snapshot.generation, pending.generation());
-                assert_eq!(snapshot.binding, binding.public_json().unwrap());
-                }
-                })
-                .await
-                .unwrap();
-            }
+            tokio::task::spawn_blocking({
+                let selected = hook_pack.clone();
+                let profile = profile.to_owned();
+                move || assert_real_daemon_adapters(addr, &profile, Some(&selected))
+            })
+            .await
+            .unwrap();
         }
-        let unmatched = memory_common::policy::ResolutionContext {
-            profile: Some("unmatched".to_owned()),
-            ..memory_common::policy::ResolutionContext::default()
-        };
+        let override_response = client
+            .get(url(
+                "rules",
+                &[("context", &real_daemon_context_json("workstation-host"))],
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(override_response.status(), StatusCode::OK);
+        let override_body: serde_json::Value = override_response.json().await.unwrap();
+        let effective = override_body["canonical"]["effective"].as_array().unwrap();
+        let selected = effective
+            .iter()
+            .find(|rule| rule["policy_key"] == "editor.format")
+            .unwrap();
+        assert_eq!(selected["project"], "app");
+        assert_eq!(selected["id"], Uuid::from_u128(8).to_string());
+        assert_eq!(selected["overrides"]["id"], Uuid::from_u128(7).to_string());
+        let unmatched = real_daemon_context("unmatched");
         let empty_response = client
             .get(url(
                 "guardrails",
-                &[("context", r#"{"profile":"unmatched"}"#)],
+                &[("context", &real_daemon_context_json("unmatched"))],
             ))
             .send()
             .await
@@ -1381,26 +1519,32 @@ mod tests {
             empty_shared,
             Err(memory_common::error::Error::Policy { code, .. }) if code == "guardrails_empty"
         ));
+        #[cfg(target_os = "linux")]
+        tokio::task::spawn_blocking(move || {
+            assert_real_daemon_adapters(addr, "unmatched", None);
+        })
+        .await
+        .unwrap();
         let mut successor = policy_request(None, 1).policy.unwrap();
         successor.policy_key = "storage.host".to_owned();
         successor.revision = 2;
         successor.supersedes = Some(Uuid::from_u128(1));
         successor.delivery_class = DeliveryClass::Mandatory;
         successor.selectors.profile = Some(BTreeSet::from(["workstation-host".to_owned()]));
+        successor.selectors.phase = Some(BTreeSet::from(["reworking".to_owned()]));
+        successor.selectors.language = Some(BTreeSet::from(["rust".to_owned()]));
+        successor.selectors.tool = Some(BTreeSet::from(["cargo".to_owned()]));
         successor
             .values
             .insert("build.target".to_owned(), "persistent-disk".to_owned());
         crate::policy::publish_new(&pool, &scoped_memory("general", 6), &successor)
             .await
             .unwrap();
-        let context = memory_common::policy::ResolutionContext {
-            profile: Some("workstation-host".to_owned()),
-            ..memory_common::policy::ResolutionContext::default()
-        };
+        let context = real_daemon_context("workstation-host");
         let response = client
             .get(url(
                 "guardrails",
-                &[("context", r#"{"profile":"workstation-host"}"#)],
+                &[("context", &real_daemon_context_json("workstation-host"))],
             ))
             .send()
             .await
@@ -1426,6 +1570,13 @@ mod tests {
         assert_eq!(shared_pack.mandatory.len(), 1);
         assert_eq!(shared_pack.mandatory[0].id, Uuid::from_u128(6));
         assert_eq!(shared_pack.mandatory[0].revision, Some(2));
+        #[cfg(target_os = "linux")]
+        tokio::task::spawn_blocking({
+            let selected = shared_pack.clone();
+            move || assert_real_daemon_adapters(addr, "workstation-host", Some(&selected))
+        })
+        .await
+        .unwrap();
         for endpoint in ["rules", "bootstrap"] {
             let response = client
                 .get(url(endpoint, &[("include_recall", "false")]))
@@ -1440,7 +1591,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .len(),
-                2
+                4
             );
         }
         let response = client.get(url("guardrails", &[])).send().await.unwrap();
@@ -1462,7 +1613,7 @@ mod tests {
             .get(url(
                 "rules",
                 &[
-                    ("context", r#"{"profile":"workstation-host"}"#),
+                    ("context", &real_daemon_context_json("workstation-host")),
                     ("tags", "missing"),
                 ],
             ))
@@ -1479,7 +1630,7 @@ mod tests {
         let conflict_response = client
             .get(url(
                 "guardrails",
-                &[("context", r#"{"profile":"workstation-host"}"#)],
+                &[("context", &real_daemon_context_json("workstation-host"))],
             ))
             .send()
             .await
@@ -1490,16 +1641,19 @@ mod tests {
         let conflict_shared =
             memory_common::http_client::HttpMemoryClient::new(&format!("http://{addr}/"), None)
                 .unwrap()
-                .with_context(memory_common::policy::ResolutionContext {
-                    profile: Some("workstation-host".to_owned()),
-                    ..memory_common::policy::ResolutionContext::default()
-                })
+                .with_context(real_daemon_context("workstation-host"))
                 .guardrails("app")
                 .await;
         assert!(matches!(
             conflict_shared,
             Err(memory_common::error::Error::Policy { code, .. }) if code == "policy_value_conflict"
         ));
+        #[cfg(target_os = "linux")]
+        tokio::task::spawn_blocking(move || {
+            assert_real_daemon_adapters(addr, "workstation-host", None);
+        })
+        .await
+        .unwrap();
 
         incompatible.revision = 2;
         incompatible.supersedes = Some(Uuid::from_u128(4));
@@ -1520,7 +1674,7 @@ mod tests {
             .get(url(
                 "bootstrap",
                 &[
-                    ("context", r#"{"profile":"workstation-host"}"#),
+                    ("context", &real_daemon_context_json("workstation-host")),
                     ("include_recall", "false"),
                 ],
             ))
@@ -1534,7 +1688,7 @@ mod tests {
         let override_response = client
             .get(url(
                 "guardrails",
-                &[("context", r#"{"profile":"workstation-host"}"#)],
+                &[("context", &real_daemon_context_json("workstation-host"))],
             ))
             .send()
             .await
