@@ -4,6 +4,8 @@
 pub(crate) mod audit;
 #[cfg(target_os = "linux")]
 pub mod config;
+#[cfg(target_os = "linux")]
+pub mod delegated;
 pub mod error;
 #[cfg(target_os = "linux")]
 pub mod identity;

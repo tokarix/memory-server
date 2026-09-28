@@ -427,6 +427,8 @@ pack for every observed PreToolUse event, records a required private audit
 entry, and returns an empty neutral result only after exact snapshot equality.
 See [managed gate operations](docs/hooks-gate.md) for registration, denial,
 recovery, coverage and maintenance.
+See [delegated hook status](docs/hooks-delegation.md) for the advisory child
+startup path, pinned client fixture evidence, and remaining enforcement work.
 
 The shell scripts below are legacy optional recall and transcript-capture
 features. They do not establish mandatory delivery and should be configured

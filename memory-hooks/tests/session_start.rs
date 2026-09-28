@@ -418,6 +418,75 @@ fn invoke_raw(id: Uuid, cwd: &Path, adapter: ClientAdapter, event: &[u8]) -> std
     invoke_raw_with_env(id, cwd, adapter, event, &[])
 }
 
+fn invoke_delegated_raw(
+    id: Uuid,
+    cwd: &Path,
+    adapter: ClientAdapter,
+    event: &[u8],
+) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("delegated-start")
+        .arg("--installation")
+        .arg(cwd.parent().expect("fixture root").join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(adapter.name())
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn delegated helper");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event)
+        .expect("event write");
+    child.wait_with_output().expect("helper output")
+}
+
+#[test]
+fn unsupported_child_start_is_explicit_and_keeps_root_authority() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let root = private_fixture();
+        let (installation, id, cwd) = configured(root.path(), adapter, 55489);
+        let pending = installation.begin_session("parent").expect("pending");
+        installation
+            .attach_binding(&pending, &cwd)
+            .expect("binding");
+        installation
+            .complete_session(&pending, &cwd, pack(&installation, &cwd), &mut Vec::new())
+            .expect("root emission");
+        let mut event = serde_json::json!({
+            "hook_event_name": "SubagentStart",
+            "session_id": "parent",
+            "agent_id": "child",
+            "agent_type": "Explore",
+            "cwd": cwd,
+        });
+        if adapter == ClientAdapter::CodexV1 {
+            event["turn_id"] = serde_json::json!("turn");
+        }
+        let output = invoke_delegated_raw(id, &cwd, adapter, event.to_string().as_bytes());
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            b"delegated_start: status=advisory_only code=unsupported_capability\n"
+        );
+        assert!(installation.read_snapshot("parent", &cwd).is_ok());
+        event["agent_id"] = serde_json::Value::Null;
+        event["agent_type"] = serde_json::json!("SENTINEL_PRIVATE_TYPE");
+        let malformed = invoke_delegated_raw(id, &cwd, adapter, event.to_string().as_bytes());
+        assert!(!malformed.status.success());
+        assert!(malformed.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&malformed.stderr).contains("SENTINEL"));
+        assert!(installation.read_snapshot("parent", &cwd).is_ok());
+    }
+}
+
 fn invoke_raw_with_env(
     id: Uuid,
     cwd: &Path,
