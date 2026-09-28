@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use memory_common::guardrails::GuardrailPack;
 use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
+use memory_hooks::snapshot::{PublicationEvent, serialize_publication};
 use memory_hooks::{Installation, config::ClientAdapter};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -130,6 +131,26 @@ fn exact_output_and_public_reader_require_a_complete_emitted_head() {
     assert_eq!(read.pack, pack);
     assert_eq!(read.epoch, pending.epoch());
     assert_eq!(read.generation, pending.generation());
+}
+
+#[test]
+fn child_publication_uses_its_exact_event_envelope() {
+    let rig = Rig::new();
+    let pack = rig.pack("Child text: 🦀\n\"exact\"");
+    let root = serialize_publication(&pack, PublicationEvent::SessionStart).expect("root output");
+    let child =
+        serialize_publication(&pack, PublicationEvent::SubagentStart).expect("child output");
+    assert_ne!(root, child);
+    let decoded: serde_json::Value = serde_json::from_slice(&child).expect("child JSON");
+    assert_eq!(
+        decoded["hookSpecificOutput"]["hookEventName"],
+        "SubagentStart"
+    );
+    assert_eq!(
+        decoded["hookSpecificOutput"]["additionalContext"],
+        pack.publication().expect("publication")
+    );
+    assert!(child.len() <= memory_hooks::snapshot::OUTPUT_BYTES);
 }
 
 struct CrashWriter {

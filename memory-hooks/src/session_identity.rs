@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
-use crate::config::ClientAdapter;
+use crate::config::{ClientAdapter, hash_part};
 use crate::error::{Error, Result};
 use crate::limits;
 
@@ -27,6 +29,18 @@ impl ChildIdentity {
     #[must_use]
     pub fn agent_id(&self) -> &str {
         &self.agent_id
+    }
+
+    /// Domain-separated stable key for one child in a protected installation.
+    #[must_use]
+    pub fn store_hash(&self, installation_id: Uuid, adapter: ClientAdapter) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"memory-hooks-control-child-v1\0");
+        hash_part(&mut hash, installation_id.as_bytes());
+        hash_part(&mut hash, adapter.name().as_bytes());
+        hash_part(&mut hash, self.session_id.as_bytes());
+        hash_part(&mut hash, self.agent_id.as_bytes());
+        format!("{:x}", hash.finalize())
     }
 }
 
@@ -162,6 +176,7 @@ pub fn parse_delegated_start(adapter: ClientAdapter, bytes: &[u8]) -> Result<Del
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use uuid::Uuid;
 
     use super::{ClientAdapter, parse_delegated_start};
 
@@ -216,5 +231,23 @@ mod tests {
         let mut bytes = serde_json::to_vec(&event(adapter)).unwrap();
         bytes.extend_from_slice(b"{}");
         assert!(parse_delegated_start(adapter, &bytes).is_err());
+    }
+
+    #[test]
+    fn child_keys_isolate_all_identity_dimensions_and_text_collisions() {
+        let adapter = ClientAdapter::ClaudeV1;
+        let id = Uuid::new_v4();
+        let mut value = event(adapter);
+        let a = parse_delegated_start(adapter, &serde_json::to_vec(&value).unwrap()).unwrap();
+        value["session_id"] = json!("parentchild");
+        value["agent_id"] = json!("");
+        assert!(parse_delegated_start(adapter, &serde_json::to_vec(&value).unwrap()).is_err());
+        value["session_id"] = json!("parentc");
+        value["agent_id"] = json!("hild");
+        let b = parse_delegated_start(adapter, &serde_json::to_vec(&value).unwrap()).unwrap();
+        let first = a.identity().store_hash(id, adapter);
+        assert_ne!(first, b.identity().store_hash(id, adapter));
+        assert_ne!(first, a.identity().store_hash(Uuid::new_v4(), adapter));
+        assert_ne!(first, a.identity().store_hash(id, ClientAdapter::CodexV1));
     }
 }

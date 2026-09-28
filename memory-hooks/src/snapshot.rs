@@ -18,6 +18,24 @@ use crate::state::{PrivateDirectory, RootMode};
 /// Maximum serialized hook output, including worst-case JSON string escaping.
 pub const OUTPUT_BYTES: usize = 192 * 1024;
 
+/// The client event whose exact publication envelope was emitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationEvent {
+    /// Top-level session delivery.
+    SessionStart,
+    /// Child-bound lifecycle delivery.
+    SubagentStart,
+}
+
+impl PublicationEvent {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::SubagentStart => "SubagentStart",
+        }
+    }
+}
+
 // A JSON string can expand each publication byte to at most six ASCII bytes
 // (a \u00XX escape). The fixed envelope, quotes and newline need <256 bytes.
 // This accepts every shared-valid 24-KiB publication without truncation.
@@ -384,13 +402,17 @@ fn current_pending(installation: &Installation, pending: &PendingGeneration) -> 
     Ok(head)
 }
 
-fn exact_output(pack: &GuardrailPack) -> Result<Vec<u8>> {
+/// Serialize an exact, bounded hook-specific publication for a lifecycle event.
+///
+/// # Errors
+/// Rejects a pack whose publication or JSON envelope exceeds shared limits.
+pub fn serialize_publication(pack: &GuardrailPack, event: PublicationEvent) -> Result<Vec<u8>> {
     let publication = pack
         .publication()
         .map_err(|_| Error::SnapshotInvalid("publication"))?;
     let output = HookOutput {
         hook_specific_output: HookSpecificOutput {
-            hook_event_name: "SessionStart",
+            hook_event_name: event.name(),
             additional_context: &publication,
         },
     };
@@ -401,6 +423,10 @@ fn exact_output(pack: &GuardrailPack) -> Result<Vec<u8>> {
         return Err(Error::OutputTooLarge);
     }
     Ok(bytes)
+}
+
+fn exact_output(pack: &GuardrailPack) -> Result<Vec<u8>> {
+    serialize_publication(pack, PublicationEvent::SessionStart)
 }
 
 fn validate_payload(
