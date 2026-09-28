@@ -13,6 +13,8 @@ pub mod limits;
 #[cfg(target_os = "linux")]
 pub mod pre_tool;
 #[cfg(target_os = "linux")]
+pub mod session_identity;
+#[cfg(target_os = "linux")]
 pub mod session_start;
 #[cfg(target_os = "linux")]
 pub mod snapshot;

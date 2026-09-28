@@ -26,15 +26,44 @@ struct Event {
     cwd: Option<Value>,
     hook_event_name: Option<Value>,
     source: Option<Value>,
-    parent_session_id: Option<Value>,
-    subagent_id: Option<Value>,
-    is_subagent: Option<Value>,
+    #[serde(default, deserialize_with = "present")]
+    parent_session_id: Presence,
+    #[serde(default, deserialize_with = "present")]
+    subagent_id: Presence,
+    #[serde(default, deserialize_with = "present")]
+    is_subagent: Presence,
+    #[serde(default, deserialize_with = "present")]
+    agent_id: Presence,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum Presence {
+    #[default]
+    Missing,
+    Present,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Presence, D::Error> {
+    let _ = Value::deserialize(deserializer)?;
+    Ok(Presence::Present)
 }
 
 fn string_field<'a>(field: Option<&'a Value>, name: &'static str) -> Result<&'a str> {
     field
         .and_then(Value::as_str)
         .ok_or(Error::EventInvalid(name))
+}
+
+fn has_delegation(event: &Event) -> bool {
+    [
+        event.parent_session_id,
+        event.subagent_id,
+        event.is_subagent,
+        event.agent_id,
+    ]
+    .contains(&Presence::Present)
 }
 
 fn checked_event(event: &Event, adapter: ClientAdapter) -> Result<PathBuf> {
@@ -47,10 +76,7 @@ fn checked_event(event: &Event, adapter: ClientAdapter) -> Result<PathBuf> {
     {
         return Err(Error::EventInvalid("source"));
     }
-    if event.parent_session_id.is_some()
-        || event.subagent_id.is_some()
-        || event.is_subagent.is_some()
-    {
+    if has_delegation(event) {
         return Err(Error::EventInvalid("delegation"));
     }
     let cwd = string_field(event.cwd.as_ref(), "cwd")?;
@@ -235,6 +261,9 @@ pub fn run(installation: &Installation) -> Result<()> {
     if session.is_empty() || session.len() > limits::EXTERNAL_ID_BYTES {
         return Err(Error::EventInvalid("session_id length"));
     }
+    if has_delegation(&event) {
+        return Err(Error::EventInvalid("delegation"));
+    }
     let pending = installation.begin_session(session)?;
     let cwd = at_stage(
         "event",
@@ -313,5 +342,12 @@ mod tests {
         )
         .unwrap();
         assert!(checked_event(&wrong, ClientAdapter::CodexV1).is_err());
+        for value in ["null", "1", "\"child\""] {
+            let input = format!(
+                "{{\"session_id\":\"a\",\"cwd\":\"/\",\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"agent_id\":{value}}}"
+            );
+            let child: Event = serde_json::from_str(&input).unwrap();
+            assert!(checked_event(&child, ClientAdapter::CodexV1).is_err());
+        }
     }
 }

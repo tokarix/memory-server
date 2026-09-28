@@ -1005,6 +1005,30 @@ fn input_identity_and_exact_byte_bounds_control_retirement() {
 
         let other = root.path().join("other-cwd");
         fs::create_dir(&other).expect("other cwd");
+        let root_generation = installation
+            .read_snapshot("session", &cwd)
+            .expect("root before child-shaped event")
+            .generation;
+        for (field, value) in [
+            ("agent_id", serde_json::json!("child")),
+            ("agent_id", serde_json::Value::Null),
+            ("is_subagent", serde_json::json!(false)),
+            ("parent_session_id", serde_json::json!("parent")),
+        ] {
+            let mut event = serde_json::json!({"session_id":"session", "cwd":cwd,
+                "hook_event_name":"SessionStart", "source":"resume"});
+            event[field] = value;
+            let output = invoke_raw(id, &cwd, adapter, event.to_string().as_bytes());
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                installation
+                    .read_snapshot("session", &cwd)
+                    .expect("child-shaped event keeps parent")
+                    .generation,
+                root_generation
+            );
+        }
         let identifiable = [
             serde_json::json!({"session_id":"session", "cwd":cwd,
                 "hook_event_name":"Other", "source":"resume"}),
@@ -1012,8 +1036,6 @@ fn input_identity_and_exact_byte_bounds_control_retirement() {
                 "hook_event_name":"SessionStart", "source":"refresh"}),
             serde_json::json!({"session_id":"session", "cwd":cwd,
                 "hook_event_name":"SessionStart", "source":null}),
-            serde_json::json!({"session_id":"session", "cwd":cwd,
-                "hook_event_name":"SessionStart", "source":"resume", "is_subagent":false}),
             serde_json::json!({"session_id":"session", "cwd":other,
                 "hook_event_name":"SessionStart", "source":"resume"}),
             serde_json::json!({"session_id":"session", "cwd":"relative",

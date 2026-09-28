@@ -405,6 +405,22 @@ fn identifiable_malformed_event_retires_its_delivery() {
 }
 
 #[test]
+fn malformed_child_event_cannot_retire_parent_delivery() {
+    let rig = Rig::new();
+    rig.deliver(rig.pack("same"));
+    for identity in [
+        br#"{"session_id":"session","agent_id":"child","cwd":"/","hook_event_name":"PreToolUse"}"#
+            .as_slice(),
+        br#"{"session_id":"session","agent_id":null,"cwd":"/","hook_event_name":"PreToolUse"}"#
+            .as_slice(),
+    ] {
+        let output = rig.invoke(identity);
+        assert_eq!(decision(&output).as_deref(), Some("event_invalid"));
+        assert!(rig.installation.read_snapshot("session", &rig.cwd).is_ok());
+    }
+}
+
+#[test]
 fn internal_worker_cannot_be_registered_directly() {
     let rig = Rig::new();
     let output = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))

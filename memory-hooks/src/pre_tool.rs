@@ -78,6 +78,8 @@ struct CodexEvent {
     subagent_id: Presence,
     #[serde(default, deserialize_with = "present")]
     is_subagent: Presence,
+    #[serde(default, deserialize_with = "present")]
+    agent_id: Presence,
 }
 
 #[derive(Deserialize)]
@@ -96,11 +98,21 @@ struct ClaudeEvent {
     subagent_id: Presence,
     #[serde(default, deserialize_with = "present")]
     is_subagent: Presence,
+    #[serde(default, deserialize_with = "present")]
+    agent_id: Presence,
 }
 
 #[derive(Deserialize)]
 struct SessionProbe {
     session_id: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    parent_session_id: Presence,
+    #[serde(default, deserialize_with = "present")]
+    subagent_id: Presence,
+    #[serde(default, deserialize_with = "present")]
+    is_subagent: Presence,
+    #[serde(default, deserialize_with = "present")]
+    agent_id: Presence,
 }
 
 /// Return only an unambiguous bounded session identity from malformed input.
@@ -109,6 +121,16 @@ pub(crate) fn identifiable_session(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let probe: SessionProbe = serde_json::from_slice(bytes).ok()?;
+    if [
+        probe.parent_session_id,
+        probe.subagent_id,
+        probe.is_subagent,
+        probe.agent_id,
+    ]
+    .contains(&Presence::Present)
+    {
+        return None;
+    }
     let session = probe.session_id?;
     nonempty_bounded(&session, limits::EXTERNAL_ID_BYTES).then_some(session)
 }
@@ -255,6 +277,7 @@ pub fn parse_event(adapter: ClientAdapter, bytes: &[u8]) -> Result<PreToolEvent>
                         event.parent_session_id,
                         event.subagent_id,
                         event.is_subagent,
+                        event.agent_id,
                     ]
                     .contains(&Presence::Present),
                     client_shape_valid: nonempty_bounded(&event.turn_id, limits::EXTERNAL_ID_BYTES),
@@ -277,6 +300,7 @@ pub fn parse_event(adapter: ClientAdapter, bytes: &[u8]) -> Result<PreToolEvent>
                         event.parent_session_id,
                         event.subagent_id,
                         event.is_subagent,
+                        event.agent_id,
                     ]
                     .contains(&Presence::Present),
                     client_shape_valid: event.turn_id == Presence::Missing,
@@ -510,7 +534,9 @@ pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{ClientAdapter, EVENT_BYTES, ToolCategory, deny_json, parse_event};
+    use super::{
+        ClientAdapter, EVENT_BYTES, ToolCategory, deny_json, identifiable_session, parse_event,
+    };
 
     fn event(tool: &str, input: &Value) -> Vec<u8> {
         serde_json::to_vec(&json!({
@@ -618,6 +644,37 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn agent_identity_cannot_fall_back_to_root_on_parse_failure() {
+        for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+            let mut value: Value = serde_json::from_slice(&event("Agent", &json!({}))).unwrap();
+            if adapter == ClientAdapter::ClaudeV1 {
+                value.as_object_mut().unwrap().remove("turn_id");
+            }
+            for field in [
+                "agent_id",
+                "parent_session_id",
+                "subagent_id",
+                "is_subagent",
+            ] {
+                value[field] = Value::Null;
+                let bytes = serde_json::to_vec(&value).unwrap();
+                assert!(parse_event(adapter, &bytes).is_err());
+                assert_eq!(identifiable_session(&bytes), None);
+                value.as_object_mut().unwrap().remove(field);
+            }
+            value["agent_id"] = json!("child");
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(parse_event(adapter, &bytes).is_err());
+            assert_eq!(identifiable_session(&bytes), None);
+            value.as_object_mut().unwrap().remove("agent_id");
+            assert_eq!(
+                identifiable_session(&serde_json::to_vec(&value).unwrap()),
+                Some("session".to_owned())
+            );
+        }
     }
 
     #[test]
