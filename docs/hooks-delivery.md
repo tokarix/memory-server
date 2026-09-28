@@ -4,15 +4,16 @@
 `SessionStart` event, fetches a fresh authoritative mandatory pack, writes one
 JSON response with its exact `GuardrailPack::publication()` in
 `hookSpecificOutput.additionalContext`, and records local emission evidence.
-It does not gate later actions. Use `Installation::read_snapshot` and revalidate
-its epoch and generation for downstream checks; mutation gating belongs to
-issue #87. Optional bootstrap, recall, transcript capture and pre-compact
+It does not gate later actions by itself. A [v3 managed pre-tool gate](hooks-gate.md)
+revalidates the current exact snapshot and fresh authoritative pack for every
+observed guarded event. Optional bootstrap, recall, transcript capture and pre-compact
 scripts have separate state and failure budgets and cannot rescue an invalid
 mandatory snapshot.
 
 ## Provisioning and activation
 
 Install the helper and a protected [v2 TOML configuration](../memory-hooks-v2.toml.example)
+or [v3 gate configuration](../memory-hooks-v3.toml.example)
 outside every workspace. Use a fixed absolute control directory for each
 installation. The trusted launcher supplies its generated UUID and adapter;
 events, environment variables, repository content, and the active config

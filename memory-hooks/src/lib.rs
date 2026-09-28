@@ -1,6 +1,8 @@
 //! Trusted configuration, repository identity, and private state for future hooks.
 
 #[cfg(target_os = "linux")]
+pub(crate) mod audit;
+#[cfg(target_os = "linux")]
 pub mod config;
 pub mod error;
 #[cfg(target_os = "linux")]
@@ -9,11 +11,15 @@ pub mod identity;
 pub mod installation;
 pub mod limits;
 #[cfg(target_os = "linux")]
+pub mod pre_tool;
+#[cfg(target_os = "linux")]
 pub mod session_start;
 #[cfg(target_os = "linux")]
 pub mod snapshot;
 #[cfg(target_os = "linux")]
 pub mod state;
+#[cfg(target_os = "linux")]
+pub mod supervisor;
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported;

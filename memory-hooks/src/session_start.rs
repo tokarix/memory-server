@@ -108,7 +108,7 @@ fn nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn read_event(deadline: Instant) -> Result<Event> {
+pub(crate) fn read_event_bytes(deadline: Instant) -> Result<Vec<u8>> {
     nonblocking(libc::STDIN_FILENO).map_err(|error| crate::error::io("input flags", &error))?;
     let mut bytes = Vec::with_capacity(4096);
     loop {
@@ -137,15 +137,20 @@ fn read_event(deadline: Instant) -> Result<Event> {
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
+    Ok(bytes)
+}
+
+fn read_event(deadline: Instant) -> Result<Event> {
+    let bytes = read_event_bytes(deadline)?;
     serde_json::from_slice(&bytes).map_err(|_| Error::EventInvalid("JSON object"))
 }
 
-struct DeadlineWriter {
+pub(crate) struct DeadlineWriter {
     deadline: Instant,
 }
 
 impl DeadlineWriter {
-    fn new(deadline: Instant) -> io::Result<Self> {
+    pub(crate) fn new(deadline: Instant) -> io::Result<Self> {
         nonblocking(libc::STDOUT_FILENO)?;
         Ok(Self { deadline })
     }
@@ -179,7 +184,7 @@ impl Write for DeadlineWriter {
     }
 }
 
-fn map_fetch_error(error: &SharedError) -> Error {
+pub(crate) fn map_fetch_error(error: &SharedError) -> Error {
     match error {
         SharedError::Policy { code, .. } => {
             let reason = match code.as_str() {

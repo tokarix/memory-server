@@ -416,14 +416,17 @@ The current schema is migration-driven. For the next planned shape, see
 ## Hooks
 
 For mandatory startup guardrails, use the managed `memory-hooks session-start`
-helper with a protected version-two configuration and a fixed installation
+helper with a protected version-two or version-three configuration and a fixed installation
 anchor. It fetches a fresh classified mandatory pack for every supported
 `SessionStart`, publishes its exact text to Codex or Claude Code, and records
 the local output result for later validation. Provisioning, client registration,
 root migration, and recovery are described in
 [`docs/hooks-delivery.md`](docs/hooks-delivery.md). Startup delivery is not
-action gating; later actions must revalidate through the public snapshot
-reader.
+action gating. The version-three `memory-hooks pre-tool` command checks a fresh
+pack for every observed PreToolUse event, records a required private audit
+entry, and returns an empty neutral result only after exact snapshot equality.
+See [managed gate operations](docs/hooks-gate.md) for registration, denial,
+recovery, coverage and maintenance.
 
 The shell scripts below are legacy optional recall and transcript-capture
 features. They do not establish mandatory delivery and should be configured
@@ -442,8 +445,8 @@ per-message session capture:
   normalized remote session row
 - [`hooks/capture-message.sh`](hooks/capture-message.sh): append a user or
   assistant message to the normalized remote session stream
-- [`hooks/pre-command.sh`](hooks/pre-command.sh): ensures bootstrap state
-  exists for the session and records command attempts as session events
+- [`hooks/pre-command.sh`](hooks/pre-command.sh): retired migration denial;
+  remove old PreToolUse registrations and use the managed gate
 - [`hooks/session-stop.sh`](hooks/session-stop.sh): final flush of the
   normalized session into searchable chunks
 
@@ -472,12 +475,6 @@ Example wiring with explicit agent identities:
       "hooks": [{
         "type": "command",
         "command": "/absolute/path/to/memory-server/hooks/capture-message.sh claude assistant"
-      }]
-    }],
-    "PreToolUse": [{
-      "hooks": [{
-        "type": "command",
-        "command": "/absolute/path/to/memory-server/hooks/pre-command.sh claude"
       }]
     }],
     "PreCompact": [{
@@ -509,8 +506,10 @@ Notes:
 - Hook state is cached under `/tmp/memory-server-hooks/<external-session-id>/`.
 
 The managed helper's trust and private-state boundary is documented in
-[`docs/hooks-trust.md`](docs/hooks-trust.md). It is not wired into the scripts
-above. Its configuration and state are separate from the legacy hook files.
+[`docs/hooks-trust.md`](docs/hooks-trust.md). Its configuration and state are
+separate from the legacy hook files. Existing historical raw command logs are
+not automatically scrubbed, and separately configured transcript systems may
+still capture raw tool input.
 
 For durable instruction enforcement, prefer the following flow over
 duplicating guidance in `AGENTS.md` or `CLAUDE.md`:

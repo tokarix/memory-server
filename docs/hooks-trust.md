@@ -1,5 +1,10 @@
 # Trusted hooks foundation
 
+The [v3 managed pre-tool gate](hooks-gate.md) adds a synchronous fresh-fetch
+check and required redacted anchor audit for supported PreToolUse events.
+The fixed anchor, canonical binding and protected configuration rules below
+also apply to that gate. V2 remains a delivery-only contract.
+
 `memory-hooks` validates protected configuration and canonical repository
 bindings. Its managed `session-start` command fetches and emits exact mandatory
 guardrails for Codex and Claude Code. The public `Installation::read_snapshot`
@@ -11,11 +16,13 @@ is imported or migrated by this crate.
 
 ## Managed installation
 
-Install the helper executable and [v1 example](../memory-hooks.toml.example) or
-[v2 delivery example](../memory-hooks-v2.toml.example)
+Install the helper executable and [v1 example](../memory-hooks.toml.example),
+[v2 delivery example](../memory-hooks-v2.toml.example), or
+[v3 gate example](../memory-hooks-v3.toml.example)
 outside every configured workspace. A managed launcher must supply a fixed
 absolute `--config` argument for v1 inspection, or the immutable
-`--installation`, `--installation-id`, and `--client` arguments for v2 delivery.
+`--installation`, `--installation-id`, and `--client` arguments for v2/v3
+delivery and v3 `pre-tool`.
 Repository text, model output, and tool arguments cannot change them. The
 process cannot prove who authored its argv. Pin
 the helper binary, configuration and their parent directories with OS access
@@ -49,7 +56,8 @@ Both CLI commands reject unknown or duplicate arguments; the caller cannot
 supply a project, profile, phase, language, or tool override. The CLI validates
 the supplied `--cwd`; later adapters must establish the actual effective cwd
 of a tool themselves. This command is not proof of where an arbitrary pending
-command will execute.
+command will execute. The v3 pre-tool adapter checks canonical process cwd
+against the event cwd and checks a structured shell workdir when supplied.
 
 ## Schema and binding
 
@@ -75,6 +83,12 @@ requires `additional_context_limit = 0`. The v2 fingerprint includes these
 normalized values and all existing trust inputs, but never bearer-token bytes.
 All delivery-affecting changes require explicit activation. Do not edit an
 active config in place; a detected mismatch advances the epoch to Changing.
+
+V3 retains the delivery contract and adds `gate.contract =
+"managed-pre-tool-v1"`, synchronous execution, and an anchor-relative audit
+contract. Its checked record count, total bytes and per-record byte limits are
+part of the fingerprint. Activating v3 advances the epoch and requires fresh
+delivery; an old v2 Emitted snapshot cannot authorize a v3 pre-tool call.
 
 `ResolutionContext` is the shared `memory-common` schema. Its `profile` and
 optional `phase` use canonical identifiers, and optional `language` and

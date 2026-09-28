@@ -644,9 +644,11 @@ mod journal_fault_tests {
     use uuid::Uuid;
 
     use super::{ReplaceStage, with_replace_fault, with_replace_pause};
+    use crate::audit;
     use crate::config::ClientAdapter;
     use crate::error::Error;
     use crate::installation::Installation;
+    use crate::pre_tool::ToolCategory;
 
     const STAGES: [ReplaceStage; 6] = [
         ReplaceStage::Create,
@@ -704,6 +706,18 @@ mod journal_fault_tests {
                 .open(&self.config)
                 .expect("config");
             file.write_all(source.as_bytes()).expect("config bytes");
+        }
+
+        fn upgrade_gate(&self) {
+            let source = fs::read_to_string(&self.config).expect("delivery config");
+            let source = source.replace("schema_version = 2", "schema_version = 3");
+            let source = format!(
+                "{source}[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n"
+            );
+            fs::write(&self.config, source).expect("gate config");
+            self.installation
+                .activate(&self.config)
+                .expect("gate activate");
         }
 
         fn reopen(&self) -> Installation {
@@ -1065,6 +1079,179 @@ mod journal_fault_tests {
             assert!(reopened.read_snapshot("session", &rig.cwd).is_err());
             rig.emit("session");
             assert!(rig.reopen().read_snapshot("session", &rig.cwd).is_ok());
+        }
+    }
+
+    #[test]
+    fn guard_claim_faults_retire_old_emitted_authority() {
+        let stages = STAGES.into_iter().chain([ReplaceStage::AfterParentSync]);
+        for prefix in ["guard-journal-", "guard-"] {
+            for stage in stages.clone() {
+                let rig = Rig::new();
+                rig.upgrade_gate();
+                rig.emit("session");
+                let occurrence = usize::from(prefix == "guard-") + 1;
+                let result = with_replace_fault(prefix, stage, occurrence, || {
+                    rig.installation.claim_check("session", &rig.cwd)
+                });
+                assert!(result.is_err(), "{prefix} {stage:?}");
+                assert!(
+                    rig.reopen().read_snapshot("session", &rig.cwd).is_err(),
+                    "{prefix} {stage:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audit_record_and_counter_faults_never_leave_a_neutral_generation() {
+        let stages = STAGES.into_iter().chain([ReplaceStage::AfterParentSync]);
+        for prefix in ["audit-00000001", "audit-counter"] {
+            for stage in stages.clone() {
+                let rig = Rig::new();
+                rig.upgrade_gate();
+                rig.emit("session");
+                let claim = rig
+                    .installation
+                    .claim_check("session", &rig.cwd)
+                    .expect("claim");
+                let gate = rig
+                    .installation
+                    .active()
+                    .expect("active")
+                    .config
+                    .gate()
+                    .expect("gate");
+                let result = with_replace_fault(prefix, stage, 1, || {
+                    audit::append(
+                        &rig.installation,
+                        &claim,
+                        ClientAdapter::CodexV1,
+                        ToolCategory::Unknown,
+                        "neutral",
+                        "checked",
+                        gate,
+                    )
+                });
+                assert!(result.is_err(), "{prefix} {stage:?}");
+                rig.installation
+                    .fail_check(&claim)
+                    .expect("retire failed audit");
+                assert!(
+                    rig.reopen().read_snapshot("session", &rig.cwd).is_err(),
+                    "{prefix} {stage:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_gate_transition_worker() {
+        let Ok(case) = std::env::var("MEMORY_HOOKS_GATE_CRASH_CASE") else {
+            return;
+        };
+        let control =
+            PathBuf::from(std::env::var_os("MEMORY_HOOKS_GATE_CRASH_CONTROL").expect("control"));
+        let cwd = PathBuf::from(std::env::var_os("MEMORY_HOOKS_GATE_CRASH_CWD").expect("cwd"));
+        let barrier =
+            PathBuf::from(std::env::var_os("MEMORY_HOOKS_GATE_CRASH_BARRIER").expect("barrier"));
+        let id: Uuid = std::env::var("MEMORY_HOOKS_GATE_CRASH_ID")
+            .expect("id")
+            .parse()
+            .expect("uuid");
+        let installation =
+            Installation::open(&control, id, ClientAdapter::CodexV1).expect("installation");
+        if case == "claim" {
+            with_replace_pause(
+                "guard-journal-",
+                ReplaceStage::AfterParentSync,
+                1,
+                barrier,
+                || installation.claim_check("gate-crash", &cwd),
+            )
+            .expect("paused claim");
+        } else {
+            let claim = installation.claim_check("gate-crash", &cwd).expect("claim");
+            let gate = installation
+                .active()
+                .expect("active")
+                .config
+                .gate()
+                .expect("gate");
+            let audit = || {
+                audit::append(
+                    &installation,
+                    &claim,
+                    ClientAdapter::CodexV1,
+                    ToolCategory::Unknown,
+                    "neutral",
+                    "checked",
+                    gate,
+                )
+            };
+            if case == "audit" {
+                with_replace_pause(
+                    "audit-00000001",
+                    ReplaceStage::AfterParentSync,
+                    1,
+                    barrier,
+                    audit,
+                )
+                .expect("paused audit");
+            } else if case == "final" {
+                with_replace_pause(
+                    "guard-journal-",
+                    ReplaceStage::AfterParentSync,
+                    1,
+                    barrier,
+                    || installation.finish_check(&claim, audit),
+                )
+                .expect("paused final transition");
+            } else {
+                panic!("unknown gate crash case");
+            }
+        }
+        panic!("gate transition returned before crash barrier");
+    }
+
+    #[test]
+    fn killed_gate_transitions_remain_unusable_after_reopen() {
+        for case in ["claim", "audit", "final"] {
+            let rig = Rig::new();
+            rig.upgrade_gate();
+            rig.emit("gate-crash");
+            let barrier = rig.root.path().join("gate-crash-barrier");
+            let mut child = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "state::journal_fault_tests::interrupted_gate_transition_worker",
+                ])
+                .env("MEMORY_HOOKS_GATE_CRASH_CASE", case)
+                .env(
+                    "MEMORY_HOOKS_GATE_CRASH_CONTROL",
+                    rig.root.path().join("control"),
+                )
+                .env("MEMORY_HOOKS_GATE_CRASH_CWD", &rig.cwd)
+                .env("MEMORY_HOOKS_GATE_CRASH_BARRIER", &barrier)
+                .env("MEMORY_HOOKS_GATE_CRASH_ID", rig.id.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("gate crash worker");
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !barrier.exists() && Instant::now() < deadline {
+                assert!(child.try_wait().expect("worker status").is_none(), "{case}");
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(barrier.exists(), "{case}");
+            child.kill().expect("terminate worker");
+            child.wait().expect("reap worker");
+            assert!(
+                rig.reopen().read_snapshot("gate-crash", &rig.cwd).is_err(),
+                "{case}"
+            );
+            rig.emit("gate-crash");
+            assert!(rig.reopen().read_snapshot("gate-crash", &rig.cwd).is_ok());
         }
     }
 

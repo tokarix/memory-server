@@ -158,6 +158,24 @@ fn run() -> memory_hooks::Result<()> {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        let command = std::env::args_os().nth(1);
+        if command.as_deref() == Some(OsStr::new("pre-tool")) {
+            std::process::exit(memory_hooks::supervisor::run_supervisor());
+        }
+        if command.as_deref() == Some(OsStr::new("pre-tool-worker")) {
+            std::process::exit(memory_hooks::supervisor::run_worker_entry());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    if matches!(
+        std::env::args_os().nth(1).as_deref(),
+        Some(command) if command == "pre-tool" || command == "pre-tool-worker"
+    ) {
+        eprintln!("pre_tool: unsupported capability");
+        std::process::exit(2);
+    }
     if let Err(error) = run() {
         eprintln!("{error}");
         std::process::exit(1);

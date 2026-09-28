@@ -363,6 +363,12 @@ impl Installation {
         self.transition(&changing, TransitionKind::Activation)
     }
 
+    /// Advance valid control authority when a session lineage cannot be read.
+    pub(crate) fn poison_locked(&self) -> Result<()> {
+        let current = self.clean_manifest()?;
+        self.invalidate_mismatch(&current)
+    }
+
     /// Reload the active protected config and root under the fixed lock.
     ///
     /// A mismatch commits a new Changing epoch, so reverting edited bytes

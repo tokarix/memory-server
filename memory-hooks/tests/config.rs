@@ -189,3 +189,53 @@ fn v2_root_origin_and_managed_client_are_strict() {
         "config_invalid"
     );
 }
+
+#[test]
+fn v3_requires_a_synchronous_bounded_audit_contract() {
+    let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    let fixture = tempfile::tempdir_in(base).expect("fixture");
+    let plain = fixture.path().join("plain");
+    fs::create_dir(&plain).expect("directory");
+    let path = fixture.path().join("hooks.toml");
+    let source = format!(
+        "schema_version = 3\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"general\"\n[bindings.context]\nprofile = \"workstation\"\n[transport]\nmemoryd_url = \"https://example.invalid/\"\nunauthenticated = true\ncredential_revision = \"initial\"\n[client]\nadapter = \"codex-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\nadditional_context_limit = 0\n[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n",
+        fixture.path().join("state").display().to_string(),
+        plain.display().to_string()
+    );
+    let write = |body: &str| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("config file");
+        file.write_all(body.as_bytes()).expect("config write");
+    };
+    write(&source);
+    let first = TrustedHooksConfig::load(&path).expect("gate config");
+    assert!(first.fingerprint().starts_with("v3:"));
+    assert_eq!(first.gate().expect("gate").audit_max_records(), 4096);
+    write(&source.replace("audit_max_records = 4096", "audit_max_records = 2048"));
+    assert_ne!(
+        first.fingerprint(),
+        TrustedHooksConfig::load(&path)
+            .expect("smaller audit store")
+            .fingerprint()
+    );
+    for change in [
+        source.replace(
+            "async_hook = false\naudit_location",
+            "async_hook = true\naudit_location",
+        ),
+        source.replace("audit_max_records = 4096", "audit_max_records = 4097"),
+        source.replace("managed-pre-tool-v1", "unsupported"),
+        source.replace("installation-anchor-v1", "workspace"),
+    ] {
+        write(&change);
+        assert!(TrustedHooksConfig::load(&path).is_err());
+    }
+}

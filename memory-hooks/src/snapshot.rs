@@ -4,13 +4,14 @@ use std::io::Write;
 use std::path::Path;
 
 use memory_common::guardrails::{GuardrailPack, MAX_PUBLICATION_BYTES};
+use memory_common::policy::ResolutionContext;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::{ClientAdapter, hash_part};
 use crate::error::{Error, Result, io};
-use crate::installation::Installation;
+use crate::installation::{ActiveInstallation, Installation};
 use crate::limits;
 use crate::state::{PrivateDirectory, RootMode};
 
@@ -82,6 +83,57 @@ struct Payload {
     pack: GuardrailPack,
 }
 
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GuardState {
+    Idle,
+    Checking,
+    Completed,
+    Invalid,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GuardRecord {
+    version: u32,
+    installation_id: Uuid,
+    client: ClientAdapter,
+    session_hash: String,
+    epoch: u64,
+    nonce: Uuid,
+    generation: Uuid,
+    sequence: u64,
+    state: GuardState,
+    attempt: Option<Uuid>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GuardJournal {
+    version: u32,
+    generation: Uuid,
+    sequence: u64,
+    attempt: Option<Uuid>,
+    resolved: bool,
+}
+
+/// One claimed check; only a matching current attempt may complete it.
+pub(crate) struct ClaimedCheck {
+    pub(crate) hash: String,
+    pub(crate) epoch: u64,
+    nonce: Uuid,
+    sequence: u64,
+    pub(crate) generation: Uuid,
+    pub(crate) attempt: Uuid,
+    pub(crate) pack: GuardrailPack,
+    pub(crate) binding: String,
+    cwd: std::path::PathBuf,
+    pub(crate) project: String,
+    pub(crate) context: ResolutionContext,
+    pub(crate) origin: String,
+    pub(crate) api_token: Option<String>,
+}
+
 #[derive(Serialize)]
 struct HookOutput<'a> {
     #[serde(rename = "hookSpecificOutput")]
@@ -135,7 +187,7 @@ fn sha256(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-fn session_hash(installation: &Installation, session: &str) -> Result<String> {
+pub(crate) fn session_hash(installation: &Installation, session: &str) -> Result<String> {
     if session.is_empty() || session.len() > limits::EXTERNAL_ID_BYTES {
         return Err(Error::SessionInvalid("session_id length"));
     }
@@ -157,6 +209,83 @@ fn journal_name(hash: &str) -> String {
 
 fn lock_name(hash: &str) -> String {
     format!("lock-session-{hash}")
+}
+
+fn guard_name(hash: &str) -> String {
+    format!("guard-{hash}")
+}
+
+fn guard_journal_name(hash: &str) -> String {
+    format!("guard-journal-{hash}")
+}
+
+fn validate_guard(installation: &Installation, head: &Head, guard: &GuardRecord) -> Result<()> {
+    if guard.version != 1
+        || guard.installation_id != installation.id()
+        || guard.client != installation.client()
+        || guard.session_hash != head.session_hash
+        || guard.epoch != head.epoch
+        || guard.nonce != head.nonce
+        || guard.generation != head.generation
+        || guard.sequence != head.sequence
+        || matches!(guard.state, GuardState::Checking | GuardState::Completed)
+            != guard.attempt.is_some()
+        || guard.attempt.is_some_and(|attempt| attempt.is_nil())
+    {
+        return Err(Error::SnapshotInvalid("guard identity"));
+    }
+    Ok(())
+}
+
+fn read_guard(installation: &Installation, head: &Head) -> Result<GuardRecord> {
+    let directory = installation.directory();
+    let bytes = directory
+        .read(&guard_name(&head.session_hash))?
+        .ok_or(Error::SnapshotInvalid("guard missing"))?;
+    let journal = directory
+        .read(&guard_journal_name(&head.session_hash))?
+        .ok_or(Error::SnapshotInvalid("guard journal missing"))?;
+    let guard: GuardRecord =
+        serde_json::from_slice(&bytes).map_err(|_| Error::SnapshotInvalid("guard JSON"))?;
+    let journal: GuardJournal = serde_json::from_slice(&journal)
+        .map_err(|_| Error::SnapshotInvalid("guard journal JSON"))?;
+    validate_guard(installation, head, &guard)?;
+    if journal.version != 1
+        || journal.generation != guard.generation
+        || journal.sequence != guard.sequence
+        || journal.attempt != guard.attempt
+        || !journal.resolved
+    {
+        return Err(Error::SnapshotInvalid("unresolved guard transition"));
+    }
+    Ok(guard)
+}
+
+fn replace_guard(installation: &Installation, head: &Head, guard: &GuardRecord) -> Result<()> {
+    validate_guard(installation, head, guard)?;
+    let directory = installation.directory();
+    let journal = GuardJournal {
+        version: 1,
+        generation: guard.generation,
+        sequence: guard.sequence,
+        attempt: guard.attempt,
+        resolved: false,
+    };
+    let unresolved =
+        serde_json::to_vec(&journal).map_err(|_| Error::SnapshotInvalid("guard journal JSON"))?;
+    directory.replace(&guard_journal_name(&head.session_hash), &unresolved)?;
+    let bytes = serde_json::to_vec(guard).map_err(|_| Error::SnapshotInvalid("guard JSON"))?;
+    directory.replace(&guard_name(&head.session_hash), &bytes)?;
+    let resolved = serde_json::to_vec(&GuardJournal {
+        resolved: true,
+        ..journal
+    })
+    .map_err(|_| Error::SnapshotInvalid("guard journal JSON"))?;
+    directory.resolve_journal(
+        &guard_journal_name(&head.session_hash),
+        &resolved,
+        &unresolved,
+    )
 }
 
 fn payload_name(hash: &str, generation: Uuid) -> String {
@@ -326,7 +455,52 @@ fn validate_payload(
     Ok(payload.pack)
 }
 
+fn retire_current_locked(installation: &Installation, hash: &str) -> Result<()> {
+    match read_head(installation, hash) {
+        Ok(Some(mut head)) if head.state == DeliveryState::Emitted => {
+            head.state = DeliveryState::Invalid;
+            head.payload_name = None;
+            head.payload_sha256 = None;
+            head.output_sha256 = None;
+            head.output_bytes = None;
+            replace_head(installation, hash, &head)
+        }
+        Ok(_) => Ok(()),
+        Err(_) => installation.poison_locked(),
+    }
+}
+
 impl Installation {
+    /// Retire an unambiguously identified session after a malformed event.
+    ///
+    /// # Errors
+    /// Corrupt lineage poisons valid installation control authority.
+    pub(crate) fn reject_event_session(&self, session: &str) -> Result<()> {
+        let hash = session_hash(self, session)?;
+        let _installation_lock = self.lock()?;
+        let _active = self.active_locked()?;
+        let _session_lock = self.directory().lock(&lock_name(&hash))?;
+        retire_current_locked(self, &hash)
+    }
+
+    /// Retire only the generation observed before an outer worker failure.
+    ///
+    /// # Errors
+    /// A corrupt current head poisons installation authority.
+    pub(crate) fn reject_observed_generation(&self, session: &str, generation: Uuid) -> Result<()> {
+        let hash = session_hash(self, session)?;
+        let _installation_lock = self.lock()?;
+        let _session_lock = self.directory().lock(&lock_name(&hash))?;
+        match read_head(self, &hash) {
+            Ok(Some(head)) if head.generation == generation => retire_current_locked(self, &hash),
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.poison_locked()?;
+                Err(error)
+            }
+        }
+    }
+
     /// Advance an unresolved session transition to a fresh pending tombstone.
     ///
     /// This is an explicit administrative repair. It uses the largest checked
@@ -518,6 +692,24 @@ impl Installation {
             .write_all(&output)
             .map_err(|error| io("output write", &error))?;
         writer.flush().map_err(|error| io("output flush", &error))?;
+        if active.config.gate().is_some() {
+            replace_guard(
+                self,
+                &head,
+                &GuardRecord {
+                    version: 1,
+                    installation_id: self.id(),
+                    client: self.client(),
+                    session_hash: pending.session_hash.clone(),
+                    epoch: pending.epoch,
+                    nonce: pending.nonce,
+                    generation: pending.generation,
+                    sequence: pending.sequence,
+                    state: GuardState::Idle,
+                    attempt: None,
+                },
+            )?;
+        }
         head.state = DeliveryState::Emitted;
         replace_head(self, &pending.session_hash, &head)?;
         let readback = read_head(self, &pending.session_hash)?
@@ -540,12 +732,29 @@ impl Installation {
         let _installation_lock = self.lock()?;
         let active = self.active_locked()?;
         let _session_lock = self.directory().lock(&lock_name(&hash))?;
-        let head = read_head(self, &hash)?.ok_or(Error::SnapshotInvalid("head missing"))?;
+        self.read_snapshot_locked(&active, &hash, cwd)
+    }
+
+    fn read_snapshot_locked(
+        &self,
+        active: &ActiveInstallation,
+        hash: &str,
+        cwd: &Path,
+    ) -> Result<ValidatedSnapshot> {
+        let head = read_head(self, hash)?.ok_or(Error::SnapshotInvalid("head missing"))?;
         if head.epoch != active.epoch
             || head.nonce != active.nonce
             || head.state != DeliveryState::Emitted
         {
             return Err(Error::SnapshotInvalid("head not current emitted"));
+        }
+        if active.config.gate().is_some()
+            && !matches!(
+                read_guard(self, &head)?.state,
+                GuardState::Idle | GuardState::Completed
+            )
+        {
+            return Err(Error::SnapshotInvalid("guard unavailable"));
         }
         let binding = active.config.resolve(cwd)?;
         let binding_json = binding.public_json()?;
@@ -564,5 +773,220 @@ impl Installation {
             generation: head.generation,
             binding: binding_json,
         })
+    }
+
+    /// Claim a fresh check, making this generation unreadable until it resolves.
+    ///
+    /// # Errors
+    /// A missing delivery, concurrent check, or nondurable marker denies use.
+    pub(crate) fn claim_check(&self, session: &str, cwd: &Path) -> Result<ClaimedCheck> {
+        let hash = session_hash(self, session)?;
+        let _installation_lock = self.lock()?;
+        let active = self.active_locked()?;
+        let delivery = active
+            .config
+            .delivery()
+            .ok_or(Error::InstallationInactive)?;
+        if active.config.gate().is_none() {
+            return Err(Error::ConfigInvalid("gate_contract_required"));
+        }
+        let _session_lock = self.directory().lock(&lock_name(&hash))?;
+        let head = match read_head(self, &hash) {
+            Ok(Some(head)) => head,
+            Ok(None) => return Err(Error::SnapshotInvalid("head missing")),
+            Err(error) => {
+                self.poison_locked()?;
+                return Err(error);
+            }
+        };
+        let mut guard = match read_guard(self, &head) {
+            Ok(guard) => guard,
+            Err(error) => {
+                retire_current_locked(self, &hash)?;
+                return Err(error);
+            }
+        };
+        if guard.state == GuardState::Checking {
+            guard.state = GuardState::Invalid;
+            guard.attempt = None;
+            replace_guard(self, &head, &guard)?;
+            let mut invalid = head;
+            invalid.state = DeliveryState::Invalid;
+            invalid.payload_name = None;
+            invalid.payload_sha256 = None;
+            invalid.output_sha256 = None;
+            invalid.output_bytes = None;
+            replace_head(self, &hash, &invalid)?;
+            return Err(Error::SnapshotInvalid("concurrent check"));
+        }
+        if !matches!(guard.state, GuardState::Idle | GuardState::Completed) {
+            return Err(Error::SnapshotInvalid("guard invalid"));
+        }
+        let snapshot = match self.read_snapshot_locked(&active, &hash, cwd) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                retire_current_locked(self, &hash)?;
+                return Err(error);
+            }
+        };
+        let binding = active.config.resolve(cwd)?;
+        guard.state = GuardState::Checking;
+        guard.attempt = Some(Uuid::new_v4());
+        if let Err(error) = replace_guard(self, &head, &guard) {
+            retire_current_locked(self, &hash)?;
+            return Err(error);
+        }
+        let readback = match read_guard(self, &head) {
+            Ok(readback) => readback,
+            Err(error) => {
+                retire_current_locked(self, &hash)?;
+                return Err(error);
+            }
+        };
+        if readback.state != GuardState::Checking || readback.attempt != guard.attempt {
+            retire_current_locked(self, &hash)?;
+            return Err(Error::SnapshotInvalid("guard claim readback"));
+        }
+        Ok(ClaimedCheck {
+            hash,
+            epoch: head.epoch,
+            nonce: head.nonce,
+            sequence: head.sequence,
+            generation: head.generation,
+            attempt: guard
+                .attempt
+                .ok_or(Error::SnapshotInvalid("guard attempt"))?,
+            pack: snapshot.pack,
+            binding: snapshot.binding,
+            cwd: cwd.to_path_buf(),
+            project: binding.project().to_owned(),
+            context: binding.context().clone(),
+            origin: delivery.origin().to_owned(),
+            api_token: delivery.api_token().map(str::to_owned),
+        })
+    }
+
+    /// Conditionally invalidate only the captured generation and check.
+    ///
+    /// # Errors
+    /// Returns an error when state cannot be durably retired.
+    pub(crate) fn fail_check(&self, claim: &ClaimedCheck) -> Result<()> {
+        self.fail_hash_attempt(&claim.hash, claim.generation, claim.attempt)
+    }
+
+    /// Invalidate a supervisor-observed attempt without trusting worker success.
+    ///
+    /// # Errors
+    /// Returns an error when the matching state cannot be retired durably.
+    pub(crate) fn fail_attempt(
+        &self,
+        session: &str,
+        generation: Uuid,
+        attempt: Uuid,
+    ) -> Result<()> {
+        let hash = session_hash(self, session)?;
+        self.fail_hash_attempt(&hash, generation, attempt)
+    }
+
+    fn fail_hash_attempt(&self, hash: &str, generation: Uuid, attempt: Uuid) -> Result<()> {
+        let _installation_lock = self.lock()?;
+        let _session_lock = self.directory().lock(&lock_name(hash))?;
+        let mut head = match read_head(self, hash) {
+            Ok(Some(head)) => head,
+            Ok(None) => return Err(Error::SnapshotInvalid("head missing")),
+            Err(error) => {
+                self.poison_locked()?;
+                return Err(error);
+            }
+        };
+        if head.generation != generation {
+            return Ok(());
+        }
+        let mut guard = match read_guard(self, &head) {
+            Ok(guard) => guard,
+            Err(error) => {
+                retire_current_locked(self, hash)?;
+                return Err(error);
+            }
+        };
+        if !matches!(guard.state, GuardState::Checking | GuardState::Completed)
+            || guard.attempt != Some(attempt)
+        {
+            return Ok(());
+        }
+        guard.state = GuardState::Invalid;
+        guard.attempt = None;
+        replace_guard(self, &head, &guard)?;
+        head.state = DeliveryState::Invalid;
+        head.payload_name = None;
+        head.payload_sha256 = None;
+        head.output_sha256 = None;
+        head.output_bytes = None;
+        replace_head(self, hash, &head)
+    }
+
+    /// Revalidate the complete captured snapshot and finalize under control locks.
+    ///
+    /// The supplied audit closure runs while the lineage is locked. A failed
+    /// closure leaves the check unresolved for conditional invalidation.
+    ///
+    /// # Errors
+    /// Any supersession or mismatch rejects the original event.
+    pub(crate) fn finish_check(
+        &self,
+        claim: &ClaimedCheck,
+        audit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let _installation_lock = self.lock()?;
+        let active = self.active_locked()?;
+        if active.epoch != claim.epoch || active.nonce != claim.nonce {
+            return Err(Error::SessionStale);
+        }
+        let _session_lock = self.directory().lock(&lock_name(&claim.hash))?;
+        let head = match read_head(self, &claim.hash) {
+            Ok(Some(head)) => head,
+            Ok(None) => return Err(Error::SnapshotInvalid("head missing")),
+            Err(error) => {
+                self.poison_locked()?;
+                return Err(error);
+            }
+        };
+        if head.epoch != claim.epoch
+            || head.nonce != claim.nonce
+            || head.sequence != claim.sequence
+            || head.generation != claim.generation
+            || head.state != DeliveryState::Emitted
+        {
+            return Err(Error::SessionStale);
+        }
+        let mut guard = read_guard(self, &head)?;
+        if guard.state != GuardState::Checking || guard.attempt != Some(claim.attempt) {
+            return Err(Error::SessionStale);
+        }
+        let binding = active.config.resolve(&claim.cwd)?;
+        let binding_json = binding.public_json()?;
+        if binding_json != claim.binding {
+            return Err(Error::SessionStale);
+        }
+        let root = PrivateDirectory::open(&active.config.state_root, RootMode::Existing)?;
+        let pack = validate_payload(
+            self,
+            &head,
+            &root,
+            &binding_json,
+            binding.project(),
+            binding.context(),
+        )?;
+        if pack != claim.pack {
+            return Err(Error::SnapshotInvalid("pack changed"));
+        }
+        audit().map_err(|_| Error::AuditFailed)?;
+        guard.state = GuardState::Completed;
+        replace_guard(self, &head, &guard)?;
+        let readback = read_guard(self, &head)?;
+        if readback.state != GuardState::Completed || readback.attempt != Some(claim.attempt) {
+            return Err(Error::SnapshotInvalid("guard completion readback"));
+        }
+        Ok(())
     }
 }

@@ -51,6 +51,8 @@ pub enum Error {
     SnapshotInvalid(&'static str),
     /// Exact accepted output exceeds its framing bound.
     OutputTooLarge,
+    /// Required local audit evidence could not be made durable.
+    AuditFailed,
     /// An operation failed; the OS code is safe to disclose.
     Io(&'static str, Option<i32>),
     /// A write may have been renamed but not durably synced.
@@ -89,6 +91,7 @@ impl Error {
             Self::SessionStale => "session_stale",
             Self::SnapshotInvalid(_) => "snapshot_invalid",
             Self::OutputTooLarge => "output_too_large",
+            Self::AuditFailed => "audit_failed",
             Self::Io(_, _) | Self::DurabilityUncertain => "io",
             Self::UnsupportedPlatform => "unsupported_platform",
         }

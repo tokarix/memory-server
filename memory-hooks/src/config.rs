@@ -46,6 +46,35 @@ pub struct TrustedHooksConfig {
     pub(crate) bindings: Vec<Binding>,
     pub(crate) fingerprint: String,
     pub(crate) delivery: Option<DeliveryConfig>,
+    pub(crate) gate: Option<GateConfig>,
+}
+
+/// Operator declaration for the synchronous, installation anchored mutation gate.
+#[derive(Clone, Copy)]
+pub struct GateConfig {
+    max_records: u32,
+    max_bytes: u32,
+    record_bytes: u32,
+}
+
+impl GateConfig {
+    /// Maximum number of retained audit records before guarded work is denied.
+    #[must_use]
+    pub const fn audit_max_records(self) -> u32 {
+        self.max_records
+    }
+
+    /// Maximum total active audit bytes.
+    #[must_use]
+    pub const fn audit_max_bytes(self) -> u32 {
+        self.max_bytes
+    }
+
+    /// Maximum bytes in an individual audit record.
+    #[must_use]
+    pub const fn audit_record_bytes(self) -> u32 {
+        self.record_bytes
+    }
 }
 
 /// Trusted transport and managed client promise for schema v2.
@@ -149,6 +178,38 @@ struct RawConfig {
     bindings: Vec<RawBinding>,
     transport: Option<RawTransport>,
     client: Option<RawClient>,
+    gate: Option<RawGate>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGate {
+    contract: String,
+    async_hook: bool,
+    audit_location: String,
+    audit_max_records: u32,
+    audit_max_bytes: u32,
+    audit_record_bytes: u32,
+}
+
+impl RawGate {
+    fn validate(self) -> Result<GateConfig> {
+        if self.contract != "managed-pre-tool-v1"
+            || self.async_hook
+            || self.audit_location != "installation-anchor-v1"
+            || !(1..=4096).contains(&self.audit_max_records)
+            || !(1..=8 * 1024 * 1024).contains(&self.audit_max_bytes)
+            || !(1..=2048).contains(&self.audit_record_bytes)
+            || self.audit_record_bytes > self.audit_max_bytes
+        {
+            return Err(Error::ConfigInvalid("gate contract or audit limits"));
+        }
+        Ok(GateConfig {
+            max_records: self.audit_max_records,
+            max_bytes: self.audit_max_bytes,
+            record_bytes: self.audit_record_bytes,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -438,6 +499,7 @@ fn fingerprint(
     git: &Path,
     bindings: &[Binding],
     delivery: Option<&DeliveryConfig>,
+    gate: Option<GateConfig>,
 ) -> Result<String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -463,7 +525,9 @@ fn fingerprint(
     }
     entries.sort();
     let mut hasher = Sha256::new();
-    if delivery.is_some() {
+    if gate.is_some() {
+        hasher.update(b"memory-hooks-config-v3\0");
+    } else if delivery.is_some() {
         hasher.update(b"memory-hooks-config-v2\0");
     } else {
         hasher.update(b"memory-hooks-config-v1\0");
@@ -489,9 +553,22 @@ fn fingerprint(
         hash_part(&mut hasher, b"managed-session-start-v1");
         hash_part(&mut hasher, &delivery.client.timeout_seconds.to_be_bytes());
     }
+    if let Some(gate) = gate {
+        hash_part(&mut hasher, b"managed-pre-tool-v1");
+        hash_part(&mut hasher, b"installation-anchor-v1");
+        hash_part(&mut hasher, &gate.max_records.to_be_bytes());
+        hash_part(&mut hasher, &gate.max_bytes.to_be_bytes());
+        hash_part(&mut hasher, &gate.record_bytes.to_be_bytes());
+    }
     Ok(format!(
         "{}:{:x}",
-        if delivery.is_some() { "v2" } else { "v1" },
+        if gate.is_some() {
+            "v3"
+        } else if delivery.is_some() {
+            "v2"
+        } else {
+            "v1"
+        },
         hasher.finalize()
     ))
 }
@@ -535,9 +612,14 @@ impl TrustedHooksConfig {
                 + 1;
             Error::ConfigSyntax { line, column }
         })?;
+        let gate = match raw.schema_version {
+            1 | 2 if raw.gate.is_none() => None,
+            3 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
+            _ => return Err(Error::ConfigInvalid("schema_version")),
+        };
         let delivery = match raw.schema_version {
             1 if raw.transport.is_none() && raw.client.is_none() => None,
-            2 => {
+            2 | 3 => {
                 let client = raw
                     .client
                     .ok_or(Error::ConfigInvalid("client"))?
@@ -697,6 +779,7 @@ impl TrustedHooksConfig {
             &git,
             &bindings,
             delivery.as_ref(),
+            gate,
         )?;
         Ok(Self {
             git,
@@ -706,6 +789,7 @@ impl TrustedHooksConfig {
             bindings,
             fingerprint,
             delivery,
+            gate,
         })
     }
 
@@ -719,5 +803,11 @@ impl TrustedHooksConfig {
     #[must_use]
     pub fn delivery(&self) -> Option<&DeliveryConfig> {
         self.delivery.as_ref()
+    }
+
+    /// Synchronous gate settings are present only in a validated v3 config.
+    #[must_use]
+    pub const fn gate(&self) -> Option<GateConfig> {
+        self.gate
     }
 }

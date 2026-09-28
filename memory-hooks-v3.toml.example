@@ -1,0 +1,40 @@
+# Protected synchronous SessionStart and PreToolUse gate configuration.
+# Install outside every workspace and activate through a fixed installation.
+schema_version = 3
+state_root = "/var/lib/memory-hooks/snapshots"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "workstation-host"
+phase = "implementing"
+language = ["rust"]
+
+[transport]
+memoryd_url = "https://memoryd.example.internal/"
+api_token = "replace-with-protected-bearer-token"
+unauthenticated = false
+credential_revision = "initial"
+
+[client]
+adapter = "codex-v1"
+contract = "managed-session-start-v1"
+async_hook = false
+timeout_seconds = 90
+additional_context_limit = 0
+
+[gate]
+contract = "managed-pre-tool-v1"
+async_hook = false
+audit_location = "installation-anchor-v1"
+audit_max_records = 4096
+audit_max_bytes = 8388608
+audit_record_bytes = 2048
+
+# Claude needs a separate anchor and UUID, adapter = "claude-v1", and no
+# additional_context_limit setting.
