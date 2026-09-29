@@ -13,8 +13,8 @@ use crate::config::ClientAdapter;
 use crate::error::{Error, Result};
 use crate::installation::Installation;
 use crate::pre_tool::{
-    DenyReason, PreToolEvent, WorkerMessage, deny_json, identifiable_session, parse_event,
-    run_worker,
+    DenyReason, IdentifiableIdentity, PreToolEvent, WorkerMessage, deny_json,
+    identifiable_identity, parse_event, run_worker,
 };
 use crate::session_start::{DeadlineWriter, read_event_bytes};
 
@@ -71,6 +71,10 @@ fn map_error(error: Error) -> DenyReason {
         Error::AuditFailed => DenyReason::AuditFailed,
         Error::InstallationInactive | Error::SessionStale => DenyReason::FreshSessionRequired,
         Error::UnsupportedPlatform => DenyReason::UnsupportedCapability,
+        Error::SnapshotInvalid("child head missing") => DenyReason::MissingChildLinkage,
+        Error::SnapshotInvalid("parent missing" | "parent location" | "parent changed") => {
+            DenyReason::ParentInvalid
+        }
         _ => DenyReason::SnapshotInvalid,
     }
 }
@@ -228,6 +232,66 @@ fn audit_denial(
     reason
 }
 
+fn reject_observed(installation: &Installation, event: &PreToolEvent, generation: Uuid) {
+    if let Some(child) = event.child() {
+        let _ = installation.reject_observed_child_generation(child, generation);
+    } else {
+        let _ = installation.reject_observed_generation(event.session_id(), generation);
+    }
+}
+
+fn fail_attempt(
+    installation: &Installation,
+    event: &PreToolEvent,
+    generation: Uuid,
+    attempt: Uuid,
+) {
+    if let Some(child) = event.child() {
+        let _ = installation.fail_child_attempt(child, generation, attempt);
+    } else {
+        let _ = installation.fail_attempt(event.session_id(), generation, attempt);
+    }
+}
+
+fn ambiguous_root_denial(
+    installation: &Installation,
+    event: &PreToolEvent,
+) -> Option<(DenyReason, bool)> {
+    if event.child().is_none()
+        && !installation
+            .is_ambiguous(event.session_id())
+            .is_ok_and(|ambiguous| !ambiguous)
+    {
+        return Some((
+            audit_denial(installation, Some(event), DenyReason::UnsupportedCapability),
+            false,
+        ));
+    }
+    None
+}
+
+fn parse_supervised_event(
+    installation: &Installation,
+    client: ClientAdapter,
+    bytes: &[u8],
+) -> std::result::Result<PreToolEvent, (DenyReason, bool)> {
+    match parse_event(client, bytes) {
+        Ok(event) => Ok(event),
+        Err(error) => {
+            match identifiable_identity(bytes) {
+                Some(IdentifiableIdentity::Root(session)) => {
+                    let _ = installation.reject_event_session(&session);
+                }
+                Some(IdentifiableIdentity::Child(child)) => {
+                    let _ = installation.reject_event_child(&child);
+                }
+                None => {}
+            }
+            Err((audit_denial(installation, None, map_error(error)), false))
+        }
+    }
+}
+
 fn spawn_worker(path: &Path, id: Uuid, client: ClientAdapter) -> Result<Child> {
     let executable =
         std::env::current_exe().map_err(|error| crate::error::io("worker executable", &error))?;
@@ -264,22 +328,23 @@ fn supervise() -> (DenyReason, bool) {
         Ok(bytes) => bytes,
         Err(error) => return (audit_denial(&installation, None, map_error(error)), false),
     };
-    let event = match parse_event(client, &event_bytes) {
+    let event = match parse_supervised_event(&installation, client, &event_bytes) {
         Ok(value) => value,
-        Err(error) => {
-            if let Some(session) = identifiable_session(&event_bytes) {
-                let _ = installation.reject_event_session(&session);
-            }
-            return (audit_denial(&installation, None, map_error(error)), false);
-        }
+        Err(denial) => return denial,
     };
-    let observed = installation
-        .read_snapshot(event.session_id(), event.cwd())
-        .ok()
-        .map(|snapshot| snapshot.generation);
+    if let Some(denial) = ambiguous_root_denial(&installation, &event) {
+        return denial;
+    }
+    let observed = (if let Some(child) = event.child() {
+        installation.read_child_snapshot(child, event.cwd())
+    } else {
+        installation.read_snapshot(event.session_id(), event.cwd())
+    })
+    .ok()
+    .map(|snapshot| snapshot.generation);
     let Ok(mut child) = spawn_worker(&path, id, client) else {
         if let Some(generation) = observed {
-            let _ = installation.reject_observed_generation(event.session_id(), generation);
+            reject_observed(&installation, &event, generation);
         }
         return (
             audit_denial(
@@ -294,7 +359,7 @@ fn supervise() -> (DenyReason, bool) {
     if write_result.is_err() {
         terminate(&mut child);
         if let Some(generation) = observed {
-            let _ = installation.reject_observed_generation(event.session_id(), generation);
+            reject_observed(&installation, &event, generation);
         }
         return (
             audit_denial(
@@ -310,9 +375,9 @@ fn supervise() -> (DenyReason, bool) {
     if collected.is_err() {
         terminate(&mut child);
         if let Some((generation, attempt)) = claimed_prefix(&bytes) {
-            let _ = installation.fail_attempt(event.session_id(), generation, attempt);
+            fail_attempt(&installation, &event, generation, attempt);
         } else if let Some(generation) = observed {
-            let _ = installation.reject_observed_generation(event.session_id(), generation);
+            reject_observed(&installation, &event, generation);
         }
     }
     if collected.is_err() {
@@ -332,13 +397,15 @@ fn supervise() -> (DenyReason, bool) {
         && (status.is_none_or(|status| !status.success())
             || !parsed.as_ref().is_ok_and(|(_, _, neutral)| *neutral))
     {
-        let _ = installation.fail_attempt(event.session_id(), generation, attempt);
+        fail_attempt(&installation, &event, generation, attempt);
     } else if (status.is_none_or(|status| !status.success())
         || parsed.is_err()
-        || parsed.as_ref().is_ok_and(|(claim, _, _)| claim.is_none()))
+        || parsed.as_ref().is_ok_and(|(claim, reason, _)| {
+            claim.is_none() && !matches!(reason, DenyReason::UnsupportedCapability)
+        }))
         && let Some(generation) = observed
     {
-        let _ = installation.reject_observed_generation(event.session_id(), generation);
+        reject_observed(&installation, &event, generation);
     }
     match (status, parsed) {
         (Some(status), Ok((_, reason, true))) if status.success() => (reason, true),

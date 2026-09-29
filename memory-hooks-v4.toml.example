@@ -1,6 +1,6 @@
-# Advisory-only delegated lifecycle configuration for Claude Code 2.1.92.
-# Install outside every workspace with mode 0600. It does not authorize child
-# mutations or publish child guardrails until child lineage is implemented.
+# Direct same-cwd managed delegation for Claude Code 2.1.92.
+# Install outside every workspace with mode 0600. Register SessionStart,
+# SubagentStart and catch-all PreToolUse synchronously as documented.
 schema_version = 4
 state_root = "/var/lib/memory-hooks/snapshots"
 git_executable = "/usr/bin/git"
@@ -39,7 +39,7 @@ audit_record_bytes = 2048
 [delegation]
 contract = "managed-delegation-v1"
 client_pin = "claude-code-2.1.92"
-mode = "advisory"
+mode = "enforced"
 max_depth = 1
 synchronous_start = true
 synchronous_pre_tool = true

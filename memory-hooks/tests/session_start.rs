@@ -447,6 +447,570 @@ fn invoke_delegated_raw(
     child.wait_with_output().expect("helper output")
 }
 
+fn invoke_pre_tool_raw(id: Uuid, cwd: &Path, event: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("pre-tool")
+        .arg("--installation")
+        .arg(cwd.parent().expect("fixture root").join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::ClaudeV1.name())
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn pre-tool helper");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event)
+        .expect("event write");
+    child.wait_with_output().expect("pre-tool output")
+}
+
+fn activate_enforced_claude(installation: &Installation, fixture: &Path) {
+    let config = fixture.join("config.toml");
+    let mut source = fs::read_to_string(&config).expect("config");
+    source = source.replacen("schema_version = 2", "schema_version = 4", 1);
+    source.push_str("[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n[delegation]\ncontract = \"managed-delegation-v1\"\nclient_pin = \"claude-code-2.1.92\"\nmode = \"enforced\"\nmax_depth = 1\nsynchronous_start = true\nsynchronous_pre_tool = true\ncatch_all_pre_tool = true\ndelivery = \"subagent-start-context\"\nchild_identity = \"agent-id-on-pre-tool\"\nblocking_pre_tool = \"pre-tool-deny\"\nparent_spawn = \"Agent\"\nrepeat_start = \"new-child-required\"\ncross_cwd = \"same-cwd-only\"\n");
+    fs::write(&config, source).expect("v4 config");
+    installation.activate(&config).expect("activate v4");
+}
+
+#[test]
+fn managed_v4_child_publishes_exact_context_once_from_a_live_parent() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let expected = pack(&installation, &cwd);
+    let body = serde_json::to_vec(&expected).expect("pack JSON");
+    let root_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let root_output = invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent");
+    assert!(root_output.status.success(), "{:?}", root_output.stderr);
+    root_response.join().expect("root request");
+    let child_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let event = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "SENTINEL_PRIVATE_AGENT_TYPE_89",
+        "cwd": cwd,
+    });
+    let child = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        event.to_string().as_bytes(),
+    );
+    assert!(child.status.success(), "{:?}", child.stderr);
+    assert!(child.stderr.is_empty());
+    child_response.join().expect("child request");
+    let published: serde_json::Value = serde_json::from_slice(&child.stdout).expect("output");
+    assert_eq!(
+        published["hookSpecificOutput"]["hookEventName"],
+        "SubagentStart"
+    );
+    assert_eq!(
+        published["hookSpecificOutput"]["additionalContext"],
+        expected.publication().expect("publication")
+    );
+    let child_tool = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "agent_id": "child",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_use_id": Uuid::new_v4().to_string(),
+        "tool_input": {"command": "SENTINEL_PRIVATE_COMMAND_89"},
+    });
+    let tool_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let guarded = invoke_pre_tool_raw(id, &cwd, child_tool.to_string().as_bytes());
+    assert!(guarded.status.success(), "{:?}", guarded.stderr);
+    assert!(guarded.stdout.is_empty(), "child check must be neutral");
+    tool_response.join().expect("tool request");
+    let mut missing = child_tool.clone();
+    missing["agent_id"] = serde_json::json!("never-started");
+    let missing_output = invoke_pre_tool_raw(id, &cwd, missing.to_string().as_bytes());
+    let missing_deny: serde_json::Value =
+        serde_json::from_slice(&missing_output.stdout).expect("deny");
+    assert_eq!(
+        missing_deny["hookSpecificOutput"]["permissionDecisionReason"],
+        "missing_child_linkage"
+    );
+    check_sibling_and_spawn(
+        &installation,
+        id,
+        &cwd,
+        &listener,
+        body,
+        &event,
+        &child_tool,
+    );
+    for entry in fs::read_dir(root.path().join("control")).expect("anchor") {
+        let path = entry.expect("entry").path();
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("audit-"))
+        {
+            let record = fs::read(path).expect("audit record");
+            assert!(
+                !record
+                    .windows(b"SENTINEL_PRIVATE".len())
+                    .any(|bytes| bytes == b"SENTINEL_PRIVATE")
+            );
+        }
+    }
+}
+
+fn check_sibling_and_spawn(
+    installation: &Installation,
+    id: Uuid,
+    cwd: &Path,
+    listener: &TcpListener,
+    body: Vec<u8>,
+    event: &serde_json::Value,
+    child_tool: &serde_json::Value,
+) {
+    let mut sibling_event = event.clone();
+    sibling_event["agent_id"] = serde_json::json!("sibling");
+    let sibling_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let sibling = invoke_delegated_raw(
+        id,
+        cwd,
+        ClientAdapter::ClaudeV1,
+        sibling_event.to_string().as_bytes(),
+    );
+    assert!(sibling.status.success());
+    sibling_response.join().expect("sibling request");
+    let repeated = invoke_delegated_raw(
+        id,
+        cwd,
+        ClientAdapter::ClaudeV1,
+        event.to_string().as_bytes(),
+    );
+    assert!(!repeated.status.success());
+    assert!(repeated.stdout.is_empty());
+    let stale = invoke_pre_tool_raw(id, cwd, child_tool.to_string().as_bytes());
+    assert!(!stale.stdout.is_empty());
+    let mut sibling_tool = child_tool.clone();
+    sibling_tool["agent_id"] = serde_json::json!("sibling");
+    let sibling_check = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let sibling_guarded = invoke_pre_tool_raw(id, cwd, sibling_tool.to_string().as_bytes());
+    assert!(sibling_guarded.stdout.is_empty());
+    sibling_check.join().expect("sibling check");
+    let mut nested_spawn = sibling_tool.clone();
+    nested_spawn["tool_name"] = serde_json::json!("Agent");
+    nested_spawn["tool_input"] = serde_json::json!({});
+    let nested = invoke_pre_tool_raw(id, cwd, nested_spawn.to_string().as_bytes());
+    let nested_deny: serde_json::Value = serde_json::from_slice(&nested.stdout).expect("deny");
+    assert_eq!(
+        nested_deny["hookSpecificOutput"]["permissionDecisionReason"],
+        "unsupported_capability"
+    );
+    let mut root_spawn = nested_spawn.clone();
+    root_spawn
+        .as_object_mut()
+        .expect("object")
+        .remove("agent_id");
+    let spawn_check = response(listener.try_clone().expect("listener"), body, "200 OK");
+    let parent_spawn = invoke_pre_tool_raw(id, cwd, root_spawn.to_string().as_bytes());
+    assert!(parent_spawn.stdout.is_empty(), "covered parent spawn");
+    spawn_check.join().expect("parent spawn check");
+    root_spawn["tool_name"] = serde_json::json!("Task");
+    let unsupported = invoke_pre_tool_raw(id, cwd, root_spawn.to_string().as_bytes());
+    let unsupported_deny: serde_json::Value =
+        serde_json::from_slice(&unsupported.stdout).expect("deny");
+    assert_eq!(
+        unsupported_deny["hookSpecificOutput"]["permissionDecisionReason"],
+        "unsupported_capability"
+    );
+    sibling_tool["tool_input"] = serde_json::Value::Null;
+    let malformed = invoke_pre_tool_raw(id, cwd, sibling_tool.to_string().as_bytes());
+    assert!(!malformed.stdout.is_empty());
+    sibling_tool["tool_input"] = serde_json::json!({"command": "true"});
+    let retired = invoke_pre_tool_raw(id, cwd, sibling_tool.to_string().as_bytes());
+    assert!(!retired.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", cwd).is_ok());
+}
+
+#[test]
+fn parent_refresh_during_child_check_cannot_return_neutral() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let expected = pack(&installation, &cwd);
+    let body = serde_json::to_vec(&expected).expect("pack JSON");
+    let root_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    root_response.join().expect("root request");
+    let child_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    assert!(
+        invoke_delegated_raw(
+            id,
+            &cwd,
+            ClientAdapter::ClaudeV1,
+            start.to_string().as_bytes()
+        )
+        .status
+        .success()
+    );
+    child_response.join().expect("child request");
+    let tool = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "agent_id": "child",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_use_id": Uuid::new_v4().to_string(),
+        "tool_input": {"command": "true"},
+    });
+    let (arrived_tx, arrived_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let delayed = delayed_response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        arrived_tx,
+        release_rx,
+    );
+    let child_cwd = cwd.clone();
+    let child_tool =
+        thread::spawn(move || invoke_pre_tool_raw(id, &child_cwd, tool.to_string().as_bytes()));
+    arrived_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("child fetch arrived");
+    let refresh_response = response(listener, body, "200 OK");
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "resume", "parent")
+            .status
+            .success()
+    );
+    refresh_response.join().expect("refresh request");
+    release_tx.send(()).expect("release child fetch");
+    delayed.join().expect("old child fetch");
+    let outcome = child_tool.join().expect("child check");
+    assert!(!outcome.stdout.is_empty(), "stale child must deny");
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
+#[test]
+fn child_publication_rejects_context_that_the_client_would_spill() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let mut large = pack(&installation, &cwd);
+    large.mandatory[0].content = "x".repeat(11_000);
+    let large = GuardrailPack::new(
+        large.project,
+        large.context,
+        large.resolver_schema_version,
+        large.mandatory,
+    )
+    .expect("shared-valid large pack");
+    let body = serde_json::to_vec(&large).expect("pack JSON");
+    let root_response = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    root_response.join().expect("root request");
+    let child_response = response(listener, body, "200 OK");
+    let start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    let output = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        start.to_string().as_bytes(),
+    );
+    child_response.join().expect("child request");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
+#[test]
+fn absent_parent_and_different_child_cwd_never_publish() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let mut start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "absent-parent-child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    let absent = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        start.to_string().as_bytes(),
+    );
+    assert!(!absent.status.success());
+    assert!(absent.stdout.is_empty());
+    let expected = pack(&installation, &cwd);
+    let response = response(
+        listener,
+        serde_json::to_vec(&expected).expect("pack JSON"),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    response.join().expect("root fetch");
+    let other = root.path().join("other-project");
+    fs::create_dir(&other).expect("other cwd");
+    start["agent_id"] = serde_json::json!("other-child");
+    start["cwd"] = serde_json::json!(other);
+    let changed = invoke_delegated_raw(
+        id,
+        &other,
+        ClientAdapter::ClaudeV1,
+        start.to_string().as_bytes(),
+    );
+    assert!(!changed.status.success());
+    assert!(changed.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
+#[test]
+fn changed_parent_pack_blocks_child_and_retires_only_captured_parent() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let initial = pack(&installation, &cwd);
+    let first = response(
+        listener.try_clone().expect("listener"),
+        serde_json::to_vec(&initial).expect("pack"),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    first.join().expect("root fetch");
+    let changed = pack(&installation, &cwd);
+    let mut rules = changed.mandatory;
+    rules[0].content = "changed".to_owned();
+    let changed = GuardrailPack::new(changed.project, changed.context, 1, rules).expect("pack");
+    let second = response(
+        listener,
+        serde_json::to_vec(&changed).expect("pack"),
+        "200 OK",
+    );
+    let start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    let output = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        start.to_string().as_bytes(),
+    );
+    second.join().expect("child fetch");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_err());
+}
+
+#[test]
+fn child_audit_failure_cannot_commit_usable_publication() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let expected = pack(&installation, &cwd);
+    let body = serde_json::to_vec(&expected).expect("pack JSON");
+    let first = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    first.join().expect("root fetch");
+    let mut audit = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.path().join("control/audit-counter"))
+        .expect("audit counter");
+    audit.write_all(b"{").expect("corrupt counter");
+    let second = response(listener, body, "200 OK");
+    let start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    let output = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        start.to_string().as_bytes(),
+    );
+    second.join().expect("child fetch");
+    assert!(!output.status.success());
+    let tool = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "agent_id": "child",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_use_id": Uuid::new_v4().to_string(),
+        "tool_input": {"command": "true"},
+    });
+    let denied = invoke_pre_tool_raw(id, &cwd, tool.to_string().as_bytes());
+    assert!(!denied.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
+#[test]
+fn child_output_write_failure_leaves_no_usable_generation() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let expected = pack(&installation, &cwd);
+    let body = serde_json::to_vec(&expected).expect("pack JSON");
+    let first = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "startup", "parent")
+            .status
+            .success()
+    );
+    first.join().expect("root fetch");
+    let second = response(listener, body, "200 OK");
+    let start = serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "cwd": cwd,
+    });
+    let full = OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("full sink");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("delegated-start")
+        .arg("--installation")
+        .arg(root.path().join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::ClaudeV1.name())
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("child helper");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(start.to_string().as_bytes())
+        .expect("start event");
+    let result = child.wait_with_output().expect("child result");
+    second.join().expect("child fetch");
+    assert!(!result.status.success());
+    let tool = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "agent_id": "child",
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_use_id": Uuid::new_v4().to_string(),
+        "tool_input": {"command": "true"},
+    });
+    assert!(
+        !invoke_pre_tool_raw(id, &cwd, tool.to_string().as_bytes())
+            .stdout
+            .is_empty()
+    );
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
 #[test]
 fn unsupported_child_start_is_explicit_and_keeps_root_authority() {
     for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {

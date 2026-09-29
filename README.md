@@ -422,13 +422,13 @@ anchor. It fetches a fresh classified mandatory pack for every supported
 the local output result for later validation. Provisioning, client registration,
 root migration, and recovery are described in
 [`docs/hooks-delivery.md`](docs/hooks-delivery.md). Startup delivery is not
-action gating. The version-three `memory-hooks pre-tool` command checks a fresh
+action gating. The managed `memory-hooks pre-tool` command checks a fresh
 pack for every observed PreToolUse event, records a required private audit
 entry, and returns an empty neutral result only after exact snapshot equality.
 See [managed gate operations](docs/hooks-gate.md) for registration, denial,
 recovery, coverage and maintenance.
-See [delegated hook status](docs/hooks-delegation.md) for the advisory child
-startup path, pinned client fixture evidence, and remaining enforcement work.
+See [managed delegated hooks](docs/hooks-delegation.md) for the direct-child
+Claude contract, pinned client evidence, recovery, and coverage limits.
 
 The shell scripts below are legacy optional recall and transcript-capture
 features. They do not establish mandatory delivery and should be configured

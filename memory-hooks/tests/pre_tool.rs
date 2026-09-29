@@ -343,6 +343,49 @@ fn fresh_equal_pack_is_neutral_each_time_and_keeps_native_permission_flow() {
 }
 
 #[test]
+fn observed_unsupported_codex_child_makes_root_shaped_calls_ambiguous() {
+    let rig = Rig::new_with(ClientAdapter::CodexV1);
+    let pack = rig.pack("same");
+    rig.deliver(pack.clone());
+    let event = json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "session",
+        "agent_id": "child",
+        "agent_type": "Explore",
+        "turn_id": "turn",
+        "cwd": rig.cwd,
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("delegated-start")
+        .arg("--installation")
+        .arg(rig.root.path().join("control"))
+        .arg("--installation-id")
+        .arg(rig.id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::CodexV1.name())
+        .current_dir(&rig.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("delegated helper");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event.to_string().as_bytes())
+        .expect("event");
+    let outcome = child.wait_with_output().expect("start result");
+    assert!(outcome.status.success());
+    assert!(outcome.stdout.is_empty());
+    for _ in 0..2 {
+        let denial = rig.invoke(&rig.event("Bash", &json!({"command": "true"})));
+        assert_eq!(decision(&denial).as_deref(), Some("unsupported_capability"));
+        rig.deliver(pack.clone());
+    }
+}
+
+#[test]
 fn changed_policy_invalidates_until_fresh_delivery() {
     let rig = Rig::new();
     let old = rig.pack("old");

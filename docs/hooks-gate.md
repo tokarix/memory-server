@@ -65,8 +65,10 @@ These are managed registration examples, not an installation action. Verify
 that the chosen client actually runs the handler synchronously for every
 covered tool path. Operator configuration declares the intended capability;
 it cannot attest at runtime that a hook was installed. The same binary rejects
-unrecognized event shapes and explicit delegated identity. A child session
-does not inherit the parent's snapshot authority.
+unrecognized event shapes. In schema v4, a verified Claude child carries a
+separate `agent_id` and is checked against its own published snapshot and
+current parent; older configurations still deny child mutations. See
+[managed delegated hooks](hooks-delegation.md) for its exact pin and limits.
 
 ## Denial and recovery
 
@@ -76,10 +78,13 @@ be emitted, the command exits 2 with a short static stderr message. Neither
 path grants permission. The codes include `fresh_session_required`,
 `policy_changed`, `guardrails_unavailable`, `snapshot_invalid`,
 `scope_mismatch`, `event_invalid`, `gate_contract_required`,
-`unsupported_capability` and `audit_failed`. A failed current check leaves a
+`unsupported_capability` and `audit_failed`. Schema v4 also distinguishes
+`missing_child_linkage` and `parent_invalid`. A failed current check leaves a
 permanent generation tombstone. Restore service or configuration, then deliver
 a fresh `SessionStart` and replan the denied action. Repeating the same old
 invocation never converts its denial into permission.
+For an invalid v4 child, start a new child ID after the parent is freshly
+delivered; repeating `SubagentStart` for the old ID cannot replace its context.
 
 An audit record contains only its schema version, random event and attempt
 UUIDs, adapter, fixed tool category, hashed session and binding identities,

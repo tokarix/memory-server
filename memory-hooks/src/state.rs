@@ -1126,8 +1126,8 @@ mod journal_fault_tests {
                     audit::append(
                         &rig.installation,
                         &claim,
-                        ClientAdapter::CodexV1,
                         ToolCategory::Unknown,
+                        false,
                         "neutral",
                         "checked",
                         gate,
@@ -1182,8 +1182,8 @@ mod journal_fault_tests {
                 audit::append(
                     &installation,
                     &claim,
-                    ClientAdapter::CodexV1,
                     ToolCategory::Unknown,
+                    false,
                     "neutral",
                     "checked",
                     gate,

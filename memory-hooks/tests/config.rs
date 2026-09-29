@@ -271,8 +271,12 @@ fn v4_advisory_pin_and_capabilities_are_strict_and_fingerprinted() {
     let delegation = trusted.delegation().expect("delegation");
     assert_eq!(delegation.pin(), DelegationPin::Claude2192);
     assert_eq!(delegation.max_depth(), 1);
+    assert!(!delegation.enforced());
+    write(&source.replace("mode = \"advisory\"", "mode = \"enforced\""));
+    let enforced = TrustedHooksConfig::load(&path).expect("verified Claude contract");
+    assert!(enforced.delegation().expect("delegation").enforced());
+    assert_ne!(trusted.fingerprint(), enforced.fingerprint());
     for altered in [
-        source.replace("mode = \"advisory\"", "mode = \"enforced\""),
         source.replace("max_depth = 1", "max_depth = 2"),
         source.replace("synchronous_start = true", "synchronous_start = false"),
         source.replace("catch_all_pre_tool = true", "catch_all_pre_tool = false"),

@@ -50,7 +50,7 @@ pub struct TrustedHooksConfig {
     pub(crate) delegation: Option<DelegationConfig>,
 }
 
-/// Exact client version selected for advisory delegated lifecycle handling.
+/// Exact client version selected for delegated lifecycle handling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DelegationPin {
     /// Codex CLI 0.158.0; child pre-tool linkage remains unverified.
@@ -70,11 +70,12 @@ impl DelegationPin {
     }
 }
 
-/// Validated v4 advisory contract; it does not authorize child mutations.
+/// Validated v4 managed delegation contract.
 #[derive(Clone, Copy)]
 pub struct DelegationConfig {
     pin: DelegationPin,
     max_depth: u8,
+    enforced: bool,
 }
 
 impl DelegationConfig {
@@ -84,10 +85,16 @@ impl DelegationConfig {
         self.pin
     }
 
-    /// Maximum direct lineage depth in this advisory contract.
+    /// Maximum supported direct lineage depth.
     #[must_use]
     pub const fn max_depth(self) -> u8 {
         self.max_depth
+    }
+
+    /// Whether the verified direct-child path is permitted to publish and gate.
+    #[must_use]
+    pub const fn enforced(self) -> bool {
+        self.enforced
     }
 }
 
@@ -258,8 +265,12 @@ impl RawDelegation {
                 "Agent",
             ),
         };
+        let enforced = match self.mode.as_str() {
+            "advisory" => false,
+            "enforced" if pin == DelegationPin::Claude2192 => true,
+            _ => return Err(Error::ConfigInvalid("delegation mode")),
+        };
         if self.contract != "managed-delegation-v1"
-            || self.mode != "advisory"
             || self.max_depth != 1
             || !self.synchronous_start
             || !self.synchronous_pre_tool
@@ -276,6 +287,7 @@ impl RawDelegation {
         Ok(DelegationConfig {
             pin,
             max_depth: self.max_depth,
+            enforced,
         })
     }
 }
@@ -594,7 +606,14 @@ fn reject_symlink_components(path: &Path, field: &'static str) -> Result<()> {
 
 fn hash_delegation(hasher: &mut Sha256, delegation: DelegationConfig) {
     hash_part(hasher, b"managed-delegation-v1");
-    hash_part(hasher, b"advisory");
+    hash_part(
+        hasher,
+        if delegation.enforced {
+            b"enforced"
+        } else {
+            b"advisory"
+        },
+    );
     hash_part(hasher, delegation.pin.name().as_bytes());
     hash_part(hasher, &[delegation.max_depth]);
     hash_part(hasher, b"synchronous-start");

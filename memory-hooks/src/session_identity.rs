@@ -19,6 +19,12 @@ pub struct ChildIdentity {
 }
 
 impl ChildIdentity {
+    pub(crate) fn from_validated(session_id: &str, agent_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        }
+    }
     /// The enclosing client session identifier.
     #[must_use]
     pub fn session_id(&self) -> &str {

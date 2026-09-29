@@ -11,10 +11,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::audit;
-use crate::config::ClientAdapter;
+use crate::config::{ClientAdapter, DelegationConfig};
 use crate::error::{Error, Result};
 use crate::installation::Installation;
 use crate::limits;
+use crate::session_identity::ChildIdentity;
 use crate::session_start::read_event_bytes;
 
 /// Maximum UTF-8 bytes in a single client event.
@@ -36,11 +37,20 @@ pub enum ToolCategory {
     Unknown,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SpawnKind {
+    None,
+    Supported,
+    Unsupported,
+}
+
 /// Validated event identity, without retaining tool arguments or freeform metadata.
 pub struct PreToolEvent {
     session_id: String,
+    child: Option<ChildIdentity>,
     cwd: PathBuf,
     category: ToolCategory,
+    spawn: SpawnKind,
 }
 
 impl PreToolEvent {
@@ -48,6 +58,12 @@ impl PreToolEvent {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Separate verified child identifier, when the pinned callback carries it.
+    #[must_use]
+    pub const fn child(&self) -> Option<&ChildIdentity> {
+        self.child.as_ref()
     }
 
     /// Canonical process working directory, checked against client input.
@@ -60,6 +76,14 @@ impl PreToolEvent {
     #[must_use]
     pub const fn category(&self) -> ToolCategory {
         self.category
+    }
+
+    pub(crate) const fn is_agent_operation(&self) -> bool {
+        !matches!(self.spawn, SpawnKind::None)
+    }
+
+    pub(crate) const fn supported_spawn(&self) -> bool {
+        matches!(self.spawn, SpawnKind::Supported)
     }
 }
 
@@ -98,8 +122,8 @@ struct ClaudeEvent {
     subagent_id: Presence,
     #[serde(default, deserialize_with = "present")]
     is_subagent: Presence,
-    #[serde(default, deserialize_with = "present")]
-    agent_id: Presence,
+    #[serde(default, deserialize_with = "agent_field")]
+    agent_id: AgentField,
 }
 
 #[derive(Deserialize)]
@@ -111,28 +135,49 @@ struct SessionProbe {
     subagent_id: Presence,
     #[serde(default, deserialize_with = "present")]
     is_subagent: Presence,
-    #[serde(default, deserialize_with = "present")]
-    agent_id: Presence,
+    #[serde(default, deserialize_with = "agent_field")]
+    agent_id: AgentField,
 }
 
-/// Return only an unambiguous bounded session identity from malformed input.
-pub(crate) fn identifiable_session(bytes: &[u8]) -> Option<String> {
+pub(crate) enum IdentifiableIdentity {
+    Root(String),
+    Child(ChildIdentity),
+}
+
+/// Return only an unambiguous bounded identity from malformed input.
+pub(crate) fn identifiable_identity(bytes: &[u8]) -> Option<IdentifiableIdentity> {
     if bytes.len() > EVENT_BYTES {
         return None;
     }
     let probe: SessionProbe = serde_json::from_slice(bytes).ok()?;
-    if [
-        probe.parent_session_id,
-        probe.subagent_id,
-        probe.is_subagent,
-        probe.agent_id,
-    ]
-    .contains(&Presence::Present)
-    {
+    let session = probe.session_id?;
+    if !nonempty_bounded(&session, limits::EXTERNAL_ID_BYTES) {
         return None;
     }
-    let session = probe.session_id?;
-    nonempty_bounded(&session, limits::EXTERNAL_ID_BYTES).then_some(session)
+    match probe.agent_id {
+        AgentField::Missing
+            if ![
+                probe.parent_session_id,
+                probe.subagent_id,
+                probe.is_subagent,
+            ]
+            .contains(&Presence::Present) =>
+        {
+            Some(IdentifiableIdentity::Root(session))
+        }
+        AgentField::Id(agent) if nonempty_bounded(&agent, limits::EXTERNAL_ID_BYTES) => Some(
+            IdentifiableIdentity::Child(ChildIdentity::from_validated(&session, &agent)),
+        ),
+        AgentField::Missing | AgentField::Id(_) | AgentField::Invalid => None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn identifiable_session(bytes: &[u8]) -> Option<String> {
+    match identifiable_identity(bytes)? {
+        IdentifiableIdentity::Root(session) => Some(session),
+        IdentifiableIdentity::Child(_) => None,
+    }
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -140,6 +185,23 @@ enum Presence {
     #[default]
     Missing,
     Present,
+}
+
+#[derive(Default)]
+enum AgentField {
+    #[default]
+    Missing,
+    Id(String),
+    Invalid,
+}
+
+fn agent_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<AgentField, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .map_or(AgentField::Invalid, |id| AgentField::Id(id.to_owned())))
 }
 
 fn present<'de, D: serde::Deserializer<'de>>(
@@ -181,6 +243,7 @@ struct EventParts<'a> {
     tool_use_id: &'a str,
     input: &'a Value,
     delegated: bool,
+    agent_id: Option<&'a str>,
     client_shape_valid: bool,
 }
 
@@ -190,6 +253,9 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
         || !nonempty_bounded(parts.tool_name, limits::EXTERNAL_ID_BYTES)
         || parts.event != "PreToolUse"
         || parts.delegated
+        || parts
+            .agent_id
+            .is_some_and(|id| !nonempty_bounded(id, limits::EXTERNAL_ID_BYTES))
         || !parts.client_shape_valid
     {
         return Err(Error::EventInvalid("pre-tool identity"));
@@ -246,8 +312,16 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
     }
     Ok(PreToolEvent {
         session_id: parts.session_id.to_owned(),
+        child: parts
+            .agent_id
+            .map(|id| ChildIdentity::from_validated(parts.session_id, id)),
         cwd,
         category: category(adapter, parts.tool_name),
+        spawn: match (adapter, parts.tool_name) {
+            (ClientAdapter::ClaudeV1, "Agent") => SpawnKind::Supported,
+            (_, "Task" | "Agent" | "TaskCreate" | "TaskUpdate") => SpawnKind::Unsupported,
+            _ => SpawnKind::None,
+        },
     })
 }
 
@@ -280,6 +354,7 @@ pub fn parse_event(adapter: ClientAdapter, bytes: &[u8]) -> Result<PreToolEvent>
                         event.agent_id,
                     ]
                     .contains(&Presence::Present),
+                    agent_id: None,
                     client_shape_valid: nonempty_bounded(&event.turn_id, limits::EXTERNAL_ID_BYTES),
                 },
             )
@@ -287,6 +362,11 @@ pub fn parse_event(adapter: ClientAdapter, bytes: &[u8]) -> Result<PreToolEvent>
         ClientAdapter::ClaudeV1 => {
             let event: ClaudeEvent =
                 serde_json::from_str(source).map_err(|_| Error::EventInvalid("Claude JSON"))?;
+            let agent_id = match &event.agent_id {
+                AgentField::Missing => None,
+                AgentField::Id(id) => Some(id.as_str()),
+                AgentField::Invalid => return Err(Error::EventInvalid("agent_id")),
+            };
             checked(
                 adapter,
                 EventParts {
@@ -300,9 +380,9 @@ pub fn parse_event(adapter: ClientAdapter, bytes: &[u8]) -> Result<PreToolEvent>
                         event.parent_session_id,
                         event.subagent_id,
                         event.is_subagent,
-                        event.agent_id,
                     ]
                     .contains(&Presence::Present),
+                    agent_id,
                     client_shape_valid: event.turn_id == Presence::Missing,
                 },
             )
@@ -342,6 +422,8 @@ pub fn deny_json(reason: &'static str) -> Result<Vec<u8>> {
             | "audit_failed"
             | "event_invalid"
             | "gate_contract_required"
+            | "missing_child_linkage"
+            | "parent_invalid"
     ) {
         return Err(Error::EventInvalid("denial reason"));
     }
@@ -379,6 +461,8 @@ pub(crate) enum DenyReason {
     AuditFailed,
     EventInvalid,
     GateContractRequired,
+    MissingChildLinkage,
+    ParentInvalid,
 }
 
 impl DenyReason {
@@ -393,6 +477,8 @@ impl DenyReason {
             Self::AuditFailed => "audit_failed",
             Self::EventInvalid => "event_invalid",
             Self::GateContractRequired => "gate_contract_required",
+            Self::MissingChildLinkage => "missing_child_linkage",
+            Self::ParentInvalid => "parent_invalid",
         }
     }
 }
@@ -436,6 +522,76 @@ fn fresh_pack(
         })
 }
 
+fn check_fresh_pack(claim: &crate::snapshot::ClaimedCheck) -> Option<DenyReason> {
+    match fresh_pack(claim) {
+        Err(reason) => Some(reason),
+        Ok(pack) if pack.validate_for(&claim.project, &claim.context).is_err() => {
+            Some(DenyReason::ScopeMismatch)
+        }
+        Ok(pack)
+            if pack != claim.pack
+                || claim
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| pack != parent.pack) =>
+        {
+            Some(DenyReason::PolicyChanged)
+        }
+        Ok(_) => None,
+    }
+}
+
+fn deny_unsupported_agent(
+    installation: &Installation,
+    event: &PreToolEvent,
+    delegated: bool,
+    gate: crate::config::GateConfig,
+    writer: &mut impl Write,
+) -> Result<bool> {
+    if delegated
+        && event.is_agent_operation()
+        && (event.child().is_some() || !event.supported_spawn())
+    {
+        audit::append_preclaim(installation, Some(event), "unsupported_capability", gate)
+            .map_err(|_| Error::AuditFailed)?;
+        write_message(
+            writer,
+            &WorkerMessage::Denied {
+                reason: DenyReason::UnsupportedCapability,
+            },
+        )?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn claim_event(
+    installation: &Installation,
+    event: &PreToolEvent,
+    gate: crate::config::GateConfig,
+) -> Result<crate::snapshot::ClaimedCheck> {
+    let result = if let Some(child) = event.child() {
+        installation.claim_child_check(child, event.cwd())
+    } else {
+        installation.claim_check(event.session_id(), event.cwd())
+    };
+    match result {
+        Ok(claim) => Ok(claim),
+        Err(error) => {
+            let reason = match error {
+                Error::SnapshotInvalid("child head missing") => "missing_child_linkage",
+                Error::SnapshotInvalid("parent missing" | "parent location" | "parent changed") => {
+                    "parent_invalid"
+                }
+                _ => "snapshot_invalid",
+            };
+            audit::append_preclaim(installation, Some(event), reason, gate)
+                .map_err(|_| Error::AuditFailed)?;
+            Err(error)
+        }
+    }
+}
+
 /// Execute one check inside a supervised worker; this output is internal only.
 ///
 /// # Errors
@@ -448,21 +604,20 @@ pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -
         .config
         .gate()
         .ok_or(Error::ConfigInvalid("gate_contract_required"))?;
-    let claim = match installation.claim_check(event.session_id(), event.cwd()) {
-        Ok(claim) => claim,
-        Err(error) => {
-            if audit::append_preclaim(installation, Some(&event), "snapshot_invalid", gate).is_err()
-            {
-                return write_message(
-                    writer,
-                    &WorkerMessage::Denied {
-                        reason: DenyReason::AuditFailed,
-                    },
-                );
-            }
-            return Err(error);
-        }
-    };
+    let enforced = active
+        .config
+        .delegation()
+        .is_some_and(DelegationConfig::enforced);
+    if event.child().is_none() && installation.is_ambiguous(event.session_id())? {
+        return Err(Error::UnsupportedPlatform);
+    }
+    if event.child().is_some() && !enforced {
+        return Err(Error::UnsupportedPlatform);
+    }
+    if deny_unsupported_agent(installation, &event, enforced, gate, writer)? {
+        return Ok(());
+    }
+    let claim = claim_event(installation, &event, gate)?;
     if let Err(error) = write_message(
         writer,
         &WorkerMessage::Claimed {
@@ -473,21 +628,17 @@ pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -
         let _ = installation.fail_check(&claim);
         return Err(error);
     }
-    let fetched = fresh_pack(&claim);
-    let reason = match fetched {
-        Err(reason) => Some(reason),
-        Ok(pack) if pack.validate_for(&claim.project, &claim.context).is_err() => {
-            Some(DenyReason::ScopeMismatch)
-        }
-        Ok(pack) if pack != claim.pack => Some(DenyReason::PolicyChanged),
-        Ok(_) => None,
-    };
+    let reason = check_fresh_pack(&claim);
     if let Some(reason) = reason {
+        if let Some(parent) = &claim.parent {
+            let _ =
+                installation.reject_observed_generation(event.session_id(), parent.generation());
+        }
         let audit_result = audit::append(
             installation,
             &claim,
-            installation.client(),
             event.category(),
+            enforced && event.supported_spawn(),
             "deny",
             reason.code(),
             gate,
@@ -504,8 +655,8 @@ pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -
         audit::append(
             installation,
             &claim,
-            installation.client(),
             event.category(),
+            enforced && event.supported_spawn(),
             "neutral",
             "checked",
             gate,
@@ -667,7 +818,18 @@ mod tests {
             }
             value["agent_id"] = json!("child");
             let bytes = serde_json::to_vec(&value).unwrap();
-            assert!(parse_event(adapter, &bytes).is_err());
+            if adapter == ClientAdapter::ClaudeV1 {
+                assert_eq!(
+                    parse_event(adapter, &bytes)
+                        .unwrap()
+                        .child()
+                        .unwrap()
+                        .agent_id(),
+                    "child"
+                );
+            } else {
+                assert!(parse_event(adapter, &bytes).is_err());
+            }
             assert_eq!(identifiable_session(&bytes), None);
             value.as_object_mut().unwrap().remove("agent_id");
             assert_eq!(

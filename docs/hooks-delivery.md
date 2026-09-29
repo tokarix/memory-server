@@ -125,6 +125,11 @@ process cwd fail. Other bounded metadata cannot select project, profile,
 context, config, endpoint or root. An unambiguous session ID claims a new
 generation before source/cwd/config/root validation, retiring old success.
 
+Schema v4 retains this exact root output contract. It also captures a bounded
+private canonical process-cwd record tied to the root generation for
+[direct-child publication](hooks-delegation.md). `SubagentStart` uses the
+separate `delegated-start` command; it never reuses the root's output envelope.
+
 The helper uses the shared five-second `HttpMemoryClient::guardrails` request
 with the trusted binding context. It rejects redirects and ambient proxies.
 The configured URL must be a root HTTP(S) origin, with no userinfo, query,

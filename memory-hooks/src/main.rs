@@ -43,7 +43,7 @@ fn admin(
         return memory_hooks::session_start::run(&anchor);
     }
     if command == "delegated-start" && config.is_none() && session_id.is_none() {
-        return memory_hooks::delegated::run_advisory(&anchor);
+        return memory_hooks::delegated::run(&anchor);
     }
     if command == "repair-session" && config.is_none() {
         let session = session_id

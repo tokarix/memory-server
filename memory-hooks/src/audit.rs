@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::config::{ClientAdapter, GateConfig, hash_part};
+use crate::config::{ClientAdapter, DelegationConfig, GateConfig, hash_part};
 use crate::error::{Error, Result};
 use crate::installation::Installation;
 use crate::pre_tool::{PreToolEvent, ToolCategory};
+use crate::session_identity::ChildIdentity;
 use crate::snapshot::{ClaimedCheck, session_hash};
 
 const COUNTER: &str = "audit-counter";
@@ -36,6 +37,20 @@ struct Record {
     generation: Option<Uuid>,
     intent: String,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_kind: Option<AuditEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AuditEvent {
+    ChildStart,
+    ChildPreTool,
+    ParentSpawn,
 }
 
 fn name(index: u32) -> String {
@@ -53,6 +68,7 @@ fn valid_reason(reason: &str) -> bool {
     matches!(
         reason,
         "checked"
+            | "published"
             | "policy_changed"
             | "guardrails_unavailable"
             | "snapshot_invalid"
@@ -62,7 +78,63 @@ fn valid_reason(reason: &str) -> bool {
             | "event_invalid"
             | "gate_contract_required"
             | "unsupported_capability"
+            | "missing_child_linkage"
+            | "parent_invalid"
     )
+}
+
+/// Persist bounded child publication evidence before Emitted becomes usable.
+pub(crate) fn append_child_start(
+    installation: &Installation,
+    child_hash: &str,
+    parent_hash: &str,
+    binding: &str,
+    epoch: u64,
+    generation: Uuid,
+    limits: GateConfig,
+) -> Result<()> {
+    let record = Record {
+        version: 2,
+        event_id: Uuid::new_v4(),
+        attempt: Uuid::new_v4(),
+        adapter: installation.client(),
+        category: ToolCategory::Agent,
+        session_hash: None,
+        binding_hash: Some(binding_hash(binding)),
+        epoch: Some(epoch),
+        generation: Some(generation),
+        intent: "published".to_owned(),
+        reason: "published".to_owned(),
+        event_kind: Some(AuditEvent::ChildStart),
+        parent_hash: Some(parent_hash.to_owned()),
+        child_hash: Some(child_hash.to_owned()),
+    };
+    append_record(installation, &record, limits)
+}
+
+/// Record an observed child start that has no enforced publication contract.
+pub(crate) fn append_unsupported_start(
+    installation: &Installation,
+    identity: &ChildIdentity,
+    limits: GateConfig,
+) -> Result<()> {
+    let record = Record {
+        version: 2,
+        event_id: Uuid::new_v4(),
+        attempt: Uuid::new_v4(),
+        adapter: installation.client(),
+        category: ToolCategory::Agent,
+        session_hash: None,
+        binding_hash: None,
+        epoch: None,
+        generation: None,
+        intent: "deny".to_owned(),
+        reason: "unsupported_capability".to_owned(),
+        event_kind: Some(AuditEvent::ChildStart),
+        parent_hash: Some(session_hash(installation, identity.session_id())?),
+        child_hash: Some(identity.store_hash(installation.id(), installation.client())),
+    };
+    append_record(installation, &record, limits)
 }
 
 fn valid_hash(value: &str) -> bool {
@@ -70,11 +142,10 @@ fn valid_hash(value: &str) -> bool {
 }
 
 fn validate_record(record: &Record, installation: &Installation) -> Result<()> {
-    if record.version != 1
-        || record.event_id.is_nil()
+    if record.event_id.is_nil()
         || record.attempt.is_nil()
         || record.adapter != installation.client()
-        || !matches!(record.intent.as_str(), "neutral" | "deny")
+        || !matches!(record.intent.as_str(), "neutral" | "deny" | "published")
         || !valid_reason(&record.reason)
         || record
             .session_hash
@@ -85,6 +156,44 @@ fn validate_record(record: &Record, installation: &Installation) -> Result<()> {
             .as_deref()
             .is_some_and(|hash| !valid_hash(hash))
         || record.generation.is_some_and(|id| id.is_nil())
+        || record
+            .parent_hash
+            .as_deref()
+            .is_some_and(|hash| !valid_hash(hash))
+        || record
+            .child_hash
+            .as_deref()
+            .is_some_and(|hash| !valid_hash(hash))
+        || match record.version {
+            1 => {
+                record.event_kind.is_some()
+                    || record.parent_hash.is_some()
+                    || record.child_hash.is_some()
+                    || record.intent == "published"
+                    || record.reason == "published"
+            }
+            2 => {
+                record.parent_hash.is_none()
+                    || record.session_hash.is_some()
+                    || match record.event_kind {
+                        Some(AuditEvent::ChildStart) => {
+                            record.child_hash.is_none()
+                                || record.category != ToolCategory::Agent
+                                || (record.intent == "published") != (record.reason == "published")
+                        }
+                        Some(AuditEvent::ChildPreTool) => {
+                            record.child_hash.is_none() || record.intent == "published"
+                        }
+                        Some(AuditEvent::ParentSpawn) => {
+                            record.child_hash.is_some()
+                                || record.category != ToolCategory::Agent
+                                || record.intent == "published"
+                        }
+                        None => true,
+                    }
+            }
+            _ => true,
+        }
     {
         return Err(Error::StateCorrupt);
     }
@@ -169,24 +278,47 @@ fn append_record(installation: &Installation, record: &Record, limits: GateConfi
 pub(crate) fn append(
     installation: &Installation,
     claim: &ClaimedCheck,
-    adapter: ClientAdapter,
     category: ToolCategory,
+    spawn: bool,
     intent: &'static str,
     reason: &'static str,
     limits: GateConfig,
 ) -> Result<()> {
+    let (version, event_kind, parent_hash, child_hash, session_hash) =
+        if let Some(parent) = &claim.parent {
+            (
+                2,
+                Some(AuditEvent::ChildPreTool),
+                Some(parent.hash().to_owned()),
+                Some(claim.hash.clone()),
+                None,
+            )
+        } else if spawn {
+            (
+                2,
+                Some(AuditEvent::ParentSpawn),
+                Some(claim.hash.clone()),
+                None,
+                None,
+            )
+        } else {
+            (1, None, None, None, Some(claim.hash.clone()))
+        };
     let record = Record {
-        version: 1,
+        version,
         event_id: Uuid::new_v4(),
         attempt: claim.attempt,
-        adapter,
+        adapter: installation.client(),
         category,
-        session_hash: Some(claim.hash.clone()),
+        session_hash,
         binding_hash: Some(binding_hash(&claim.binding)),
         epoch: Some(claim.epoch),
         generation: Some(claim.generation),
         intent: intent.to_owned(),
         reason: reason.to_owned(),
+        event_kind,
+        parent_hash,
+        child_hash,
     };
     append_record(installation, &record, limits)
 }
@@ -201,20 +333,57 @@ pub(crate) fn append_preclaim(
     reason: &'static str,
     limits: GateConfig,
 ) -> Result<()> {
+    let child = event.and_then(PreToolEvent::child);
+    let (version, event_kind, parent_hash, child_hash, session_hash) = if let Some(child) = child {
+        (
+            2,
+            Some(AuditEvent::ChildPreTool),
+            Some(session_hash(installation, child.session_id())?),
+            Some(child.store_hash(installation.id(), installation.client())),
+            None,
+        )
+    } else if event.is_some_and(PreToolEvent::is_agent_operation)
+        && installation
+            .active()
+            .ok()
+            .and_then(|active| active.config.delegation())
+            .is_some_and(DelegationConfig::enforced)
+    {
+        (
+            2,
+            Some(AuditEvent::ParentSpawn),
+            event
+                .map(|event| session_hash(installation, event.session_id()))
+                .transpose()?,
+            None,
+            None,
+        )
+    } else {
+        (
+            1,
+            None,
+            None,
+            None,
+            event
+                .map(|event| session_hash(installation, event.session_id()))
+                .transpose()?,
+        )
+    };
     let record = Record {
-        version: 1,
+        version,
         event_id: Uuid::new_v4(),
         attempt: Uuid::new_v4(),
         adapter: installation.client(),
         category: event.map_or(ToolCategory::Unknown, PreToolEvent::category),
-        session_hash: event
-            .map(|event| session_hash(installation, event.session_id()))
-            .transpose()?,
+        session_hash,
         binding_hash: None,
         epoch: None,
         generation: None,
         intent: "deny".to_owned(),
         reason: reason.to_owned(),
+        event_kind,
+        parent_hash,
+        child_hash,
     };
     append_record(installation, &record, limits)
 }
