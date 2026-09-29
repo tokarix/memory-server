@@ -6,7 +6,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-use memory_hooks::TrustedHooksConfig;
+use memory_hooks::{TrustedHooksConfig, config::DelegationPin};
 
 #[test]
 fn typed_external_config_is_strict_and_normalized() {
@@ -238,4 +238,62 @@ fn v3_requires_a_synchronous_bounded_audit_contract() {
         write(&change);
         assert!(TrustedHooksConfig::load(&path).is_err());
     }
+}
+
+#[test]
+fn v4_advisory_pin_and_capabilities_are_strict_and_fingerprinted() {
+    let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    let fixture = tempfile::tempdir_in(base).expect("fixture");
+    let plain = fixture.path().join("plain");
+    fs::create_dir(&plain).expect("directory");
+    let path = fixture.path().join("hooks.toml");
+    let source = format!(
+        "schema_version = 4\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"plain\"\nroot = {:?}\nguardrails_project = \"general\"\n[bindings.context]\nprofile = \"workstation\"\n[transport]\nmemoryd_url = \"https://example.invalid/\"\nunauthenticated = true\ncredential_revision = \"initial\"\n[client]\nadapter = \"claude-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\n[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n[delegation]\ncontract = \"managed-delegation-v1\"\nclient_pin = \"claude-code-2.1.92\"\nmode = \"advisory\"\nmax_depth = 1\nsynchronous_start = true\nsynchronous_pre_tool = true\ncatch_all_pre_tool = true\ndelivery = \"subagent-start-context\"\nchild_identity = \"agent-id-on-pre-tool\"\nblocking_pre_tool = \"pre-tool-deny\"\nparent_spawn = \"Agent\"\nrepeat_start = \"new-child-required\"\ncross_cwd = \"same-cwd-only\"\n",
+        fixture.path().join("state").display().to_string(),
+        plain.display().to_string()
+    );
+    let write = |body: &str| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("config file");
+        file.write_all(body.as_bytes()).expect("config write");
+    };
+    write(&source);
+    let trusted = TrustedHooksConfig::load(&path).expect("v4 advisory");
+    assert!(trusted.fingerprint().starts_with("v4:"));
+    let delegation = trusted.delegation().expect("delegation");
+    assert_eq!(delegation.pin(), DelegationPin::Claude2192);
+    assert_eq!(delegation.max_depth(), 1);
+    for altered in [
+        source.replace("mode = \"advisory\"", "mode = \"enforced\""),
+        source.replace("max_depth = 1", "max_depth = 2"),
+        source.replace("synchronous_start = true", "synchronous_start = false"),
+        source.replace("catch_all_pre_tool = true", "catch_all_pre_tool = false"),
+        source.replace("parent_spawn = \"Agent\"", "parent_spawn = \"Task\""),
+        source.replace(
+            "client_pin = \"claude-code-2.1.92\"",
+            "client_pin = \"codex-cli-0.158.0\"",
+        ),
+        source.replace("schema_version = 4", "schema_version = 3"),
+    ] {
+        write(&altered);
+        assert!(TrustedHooksConfig::load(&path).is_err());
+    }
+    write(&source.replace(
+        "credential_revision = \"initial\"",
+        "credential_revision = \"next\"",
+    ));
+    assert_ne!(
+        trusted.fingerprint(),
+        TrustedHooksConfig::load(&path)
+            .expect("revision")
+            .fingerprint()
+    );
 }

@@ -1,0 +1,52 @@
+# Advisory-only delegated lifecycle configuration for Claude Code 2.1.92.
+# Install outside every workspace with mode 0600. It does not authorize child
+# mutations or publish child guardrails until child lineage is implemented.
+schema_version = 4
+state_root = "/var/lib/memory-hooks/snapshots"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "workstation-host"
+phase = "implementing"
+language = ["rust"]
+
+[transport]
+memoryd_url = "https://memoryd.example.internal/"
+api_token = "replace-with-protected-bearer-token"
+unauthenticated = false
+credential_revision = "initial"
+
+[client]
+adapter = "claude-v1"
+contract = "managed-session-start-v1"
+async_hook = false
+timeout_seconds = 90
+
+[gate]
+contract = "managed-pre-tool-v1"
+async_hook = false
+audit_location = "installation-anchor-v1"
+audit_max_records = 4096
+audit_max_bytes = 8388608
+audit_record_bytes = 2048
+
+[delegation]
+contract = "managed-delegation-v1"
+client_pin = "claude-code-2.1.92"
+mode = "advisory"
+max_depth = 1
+synchronous_start = true
+synchronous_pre_tool = true
+catch_all_pre_tool = true
+delivery = "subagent-start-context"
+child_identity = "agent-id-on-pre-tool"
+blocking_pre_tool = "pre-tool-deny"
+parent_spawn = "Agent"
+repeat_start = "new-child-required"
+cross_cwd = "same-cwd-only"

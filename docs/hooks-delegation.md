@@ -9,6 +9,11 @@ guardrail delivery. Where the v3 catch-all gate is registered, a recognized
 child `PreToolUse` carrying `agent_id` is denied; it cannot use the enclosing
 root session's snapshot.
 
+The strict [v4 example](../memory-hooks-v4.toml.example) records the exact
+candidate pin and separate lifecycle capabilities, with `mode = "advisory"`.
+Activation advances the installation epoch and requires fresh root delivery.
+An enforced mode is rejected until the child transaction and gate are wired.
+
 The exact local binary versions available during this implementation were
 Codex CLI 0.158.0 and Claude Code 2.1.92. Both remain advisory in this helper:
 

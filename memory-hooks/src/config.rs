@@ -47,6 +47,48 @@ pub struct TrustedHooksConfig {
     pub(crate) fingerprint: String,
     pub(crate) delivery: Option<DeliveryConfig>,
     pub(crate) gate: Option<GateConfig>,
+    pub(crate) delegation: Option<DelegationConfig>,
+}
+
+/// Exact client version selected for advisory delegated lifecycle handling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DelegationPin {
+    /// Codex CLI 0.158.0; child pre-tool linkage remains unverified.
+    Codex01580,
+    /// Claude Code 2.1.92; direct same-cwd fixture behavior was observed.
+    Claude2192,
+}
+
+impl DelegationPin {
+    /// Stable, nonsecret pin used in the trust fingerprint.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex01580 => "codex-cli-0.158.0",
+            Self::Claude2192 => "claude-code-2.1.92",
+        }
+    }
+}
+
+/// Validated v4 advisory contract; it does not authorize child mutations.
+#[derive(Clone, Copy)]
+pub struct DelegationConfig {
+    pin: DelegationPin,
+    max_depth: u8,
+}
+
+impl DelegationConfig {
+    /// Client binary version selected by the operator.
+    #[must_use]
+    pub const fn pin(self) -> DelegationPin {
+        self.pin
+    }
+
+    /// Maximum direct lineage depth in this advisory contract.
+    #[must_use]
+    pub const fn max_depth(self) -> u8 {
+        self.max_depth
+    }
 }
 
 /// Operator declaration for the synchronous, installation anchored mutation gate.
@@ -179,6 +221,63 @@ struct RawConfig {
     transport: Option<RawTransport>,
     client: Option<RawClient>,
     gate: Option<RawGate>,
+    delegation: Option<RawDelegation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDelegation {
+    contract: String,
+    client_pin: String,
+    mode: String,
+    max_depth: u8,
+    synchronous_start: bool,
+    synchronous_pre_tool: bool,
+    catch_all_pre_tool: bool,
+    delivery: String,
+    child_identity: String,
+    blocking_pre_tool: String,
+    parent_spawn: String,
+    repeat_start: String,
+    cross_cwd: String,
+}
+
+impl RawDelegation {
+    fn validate(self, adapter: ClientAdapter) -> Result<DelegationConfig> {
+        let pin = match (adapter, self.client_pin.as_str()) {
+            (ClientAdapter::CodexV1, "codex-cli-0.158.0") => DelegationPin::Codex01580,
+            (ClientAdapter::ClaudeV1, "claude-code-2.1.92") => DelegationPin::Claude2192,
+            _ => return Err(Error::ConfigInvalid("delegation client pin")),
+        };
+        let capabilities = match pin {
+            DelegationPin::Codex01580 => ("unverified", "unverified", "unverified", "unverified"),
+            DelegationPin::Claude2192 => (
+                "subagent-start-context",
+                "agent-id-on-pre-tool",
+                "pre-tool-deny",
+                "Agent",
+            ),
+        };
+        if self.contract != "managed-delegation-v1"
+            || self.mode != "advisory"
+            || self.max_depth != 1
+            || !self.synchronous_start
+            || !self.synchronous_pre_tool
+            || !self.catch_all_pre_tool
+            || self.delivery != capabilities.0
+            || self.child_identity != capabilities.1
+            || self.blocking_pre_tool != capabilities.2
+            || self.parent_spawn != capabilities.3
+            || self.repeat_start != "new-child-required"
+            || self.cross_cwd != "same-cwd-only"
+        {
+            return Err(Error::ConfigInvalid("delegation contract"));
+        }
+        Ok(DelegationConfig {
+            pin,
+            max_depth: self.max_depth,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -493,6 +592,35 @@ fn reject_symlink_components(path: &Path, field: &'static str) -> Result<()> {
     Ok(())
 }
 
+fn hash_delegation(hasher: &mut Sha256, delegation: DelegationConfig) {
+    hash_part(hasher, b"managed-delegation-v1");
+    hash_part(hasher, b"advisory");
+    hash_part(hasher, delegation.pin.name().as_bytes());
+    hash_part(hasher, &[delegation.max_depth]);
+    hash_part(hasher, b"synchronous-start");
+    hash_part(hasher, b"synchronous-pre-tool");
+    hash_part(hasher, b"catch-all-pre-tool");
+    match delegation.pin {
+        DelegationPin::Codex01580 => {
+            for _ in 0..4 {
+                hash_part(hasher, b"unverified");
+            }
+        }
+        DelegationPin::Claude2192 => {
+            for fact in [
+                b"subagent-start-context".as_slice(),
+                b"agent-id-on-pre-tool",
+                b"pre-tool-deny",
+                b"Agent",
+            ] {
+                hash_part(hasher, fact);
+            }
+        }
+    }
+    hash_part(hasher, b"new-child-required");
+    hash_part(hasher, b"same-cwd-only");
+}
+
 fn fingerprint(
     config_path: &Path,
     state: &Path,
@@ -500,6 +628,7 @@ fn fingerprint(
     bindings: &[Binding],
     delivery: Option<&DeliveryConfig>,
     gate: Option<GateConfig>,
+    delegation: Option<DelegationConfig>,
 ) -> Result<String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -525,7 +654,9 @@ fn fingerprint(
     }
     entries.sort();
     let mut hasher = Sha256::new();
-    if gate.is_some() {
+    if delegation.is_some() {
+        hasher.update(b"memory-hooks-config-v4\0");
+    } else if gate.is_some() {
         hasher.update(b"memory-hooks-config-v3\0");
     } else if delivery.is_some() {
         hasher.update(b"memory-hooks-config-v2\0");
@@ -560,9 +691,14 @@ fn fingerprint(
         hash_part(&mut hasher, &gate.max_bytes.to_be_bytes());
         hash_part(&mut hasher, &gate.record_bytes.to_be_bytes());
     }
+    if let Some(delegation) = delegation {
+        hash_delegation(&mut hasher, delegation);
+    }
     Ok(format!(
         "{}:{:x}",
-        if gate.is_some() {
+        if delegation.is_some() {
+            "v4"
+        } else if gate.is_some() {
             "v3"
         } else if delivery.is_some() {
             "v2"
@@ -614,12 +750,12 @@ impl TrustedHooksConfig {
         })?;
         let gate = match raw.schema_version {
             1 | 2 if raw.gate.is_none() => None,
-            3 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
+            3 | 4 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
             _ => return Err(Error::ConfigInvalid("schema_version")),
         };
         let delivery = match raw.schema_version {
             1 if raw.transport.is_none() && raw.client.is_none() => None,
-            2 | 3 => {
+            2..=4 => {
                 let client = raw
                     .client
                     .ok_or(Error::ConfigInvalid("client"))?
@@ -631,6 +767,21 @@ impl TrustedHooksConfig {
                 )
             }
             _ => return Err(Error::ConfigInvalid("schema_version")),
+        };
+        let delegation = match raw.schema_version {
+            1..=3 if raw.delegation.is_none() => None,
+            4 => Some(
+                raw.delegation
+                    .ok_or(Error::ConfigInvalid("delegation"))?
+                    .validate(
+                        delivery
+                            .as_ref()
+                            .ok_or(Error::ConfigInvalid("client"))?
+                            .client()
+                            .adapter(),
+                    )?,
+            ),
+            _ => return Err(Error::ConfigInvalid("delegation schema")),
         };
         if raw.bindings.is_empty() || raw.bindings.len() > limits::BINDINGS {
             return Err(Error::ConfigInvalid("schema_version or bindings"));
@@ -780,6 +931,7 @@ impl TrustedHooksConfig {
             &bindings,
             delivery.as_ref(),
             gate,
+            delegation,
         )?;
         Ok(Self {
             git,
@@ -790,6 +942,7 @@ impl TrustedHooksConfig {
             fingerprint,
             delivery,
             gate,
+            delegation,
         })
     }
 
@@ -809,5 +962,11 @@ impl TrustedHooksConfig {
     #[must_use]
     pub const fn gate(&self) -> Option<GateConfig> {
         self.gate
+    }
+
+    /// Advisory delegated lifecycle settings are present only in v4.
+    #[must_use]
+    pub const fn delegation(&self) -> Option<DelegationConfig> {
+        self.delegation
     }
 }
