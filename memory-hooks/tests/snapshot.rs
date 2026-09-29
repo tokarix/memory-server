@@ -2,8 +2,10 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -151,6 +153,90 @@ fn child_publication_uses_its_exact_event_envelope() {
         pack.publication().expect("publication")
     );
     assert!(child.len() <= memory_hooks::snapshot::OUTPUT_BYTES);
+}
+
+#[test]
+fn v4_parent_location_worker() {
+    let Some(control) = std::env::var_os("MEMORY_HOOKS_V4_LOCATION_CONTROL") else {
+        return;
+    };
+    let id =
+        Uuid::parse_str(&std::env::var("MEMORY_HOOKS_V4_LOCATION_ID").expect("installation ID"))
+            .expect("installation UUID");
+    let cwd = PathBuf::from(std::env::var_os("MEMORY_HOOKS_V4_LOCATION_CWD").expect("cwd"));
+    let pack: GuardrailPack = serde_json::from_slice(
+        &fs::read(std::env::var_os("MEMORY_HOOKS_V4_LOCATION_PACK").expect("pack path"))
+            .expect("pack bytes"),
+    )
+    .expect("pack JSON");
+    let installation =
+        Installation::open(Path::new(&control), id, ClientAdapter::CodexV1).expect("open");
+    let pending = installation.begin_session("S").expect("begin");
+    installation.attach_binding(&pending, &cwd).expect("bind");
+    installation
+        .complete_session(&pending, &cwd, pack, &mut std::io::stdout().lock())
+        .expect("publish");
+}
+
+#[test]
+fn v4_parent_location_tracks_the_actual_cwd_and_current_generation() {
+    let rig = Rig::new();
+    let mut source = fs::read_to_string(&rig.config_path).expect("config");
+    source = source.replacen("schema_version = 2", "schema_version = 4", 1);
+    source.push_str("[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n[delegation]\ncontract = \"managed-delegation-v1\"\nclient_pin = \"codex-cli-0.158.0\"\nmode = \"advisory\"\nmax_depth = 1\nsynchronous_start = true\nsynchronous_pre_tool = true\ncatch_all_pre_tool = true\ndelivery = \"unverified\"\nchild_identity = \"unverified\"\nblocking_pre_tool = \"unverified\"\nparent_spawn = \"unverified\"\nrepeat_start = \"new-child-required\"\ncross_cwd = \"same-cwd-only\"\n");
+    fs::write(&rig.config_path, source).expect("v4 config");
+    rig.installation
+        .activate(&rig.config_path)
+        .expect("activate v4");
+    let pack_file = rig.root.path().join("pack.json");
+    fs::write(
+        &pack_file,
+        serde_json::to_vec(&rig.pack("parent")).expect("pack JSON"),
+    )
+    .expect("pack file");
+    let control = rig.root.path().join("control");
+    let mut previous = None;
+    for _ in 0..2 {
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("v4_parent_location_worker")
+            .arg("--nocapture")
+            .env("MEMORY_HOOKS_V4_LOCATION_CONTROL", &control)
+            .env("MEMORY_HOOKS_V4_LOCATION_ID", rig.id.to_string())
+            .env("MEMORY_HOOKS_V4_LOCATION_CWD", &rig.cwd)
+            .env("MEMORY_HOOKS_V4_LOCATION_PACK", &pack_file)
+            .current_dir(&rig.cwd)
+            .output()
+            .expect("worker");
+        assert!(
+            output.status.success(),
+            "worker failed: {:?}",
+            output.status
+        );
+        let read = rig
+            .installation
+            .read_snapshot("S", &rig.cwd)
+            .expect("root snapshot");
+        assert_ne!(previous, Some(read.generation));
+        previous = Some(read.generation);
+        let files: Vec<_> = fs::read_dir(&control)
+            .expect("anchor")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("parent-location-"))
+            })
+            .collect();
+        assert_eq!(files.len(), 1);
+        let location: serde_json::Value =
+            serde_json::from_slice(&fs::read(&files[0]).expect("location")).expect("JSON");
+        assert_eq!(location["generation"], read.generation.to_string());
+        let mut expected_path = String::new();
+        for byte in rig.cwd.as_os_str().as_bytes() {
+            write!(&mut expected_path, "{byte:02x}").expect("path hex");
+        }
+        assert_eq!(location["path_hex"], expected_path);
+    }
 }
 
 struct CrashWriter {

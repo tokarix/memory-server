@@ -1,7 +1,9 @@
 //! Generation-scoped `SessionStart` delivery and validated snapshot reads.
 
+use std::ffi::OsString;
 use std::io::Write;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 
 use memory_common::guardrails::{GuardrailPack, MAX_PUBLICATION_BYTES};
 use memory_common::policy::ResolutionContext;
@@ -99,6 +101,21 @@ struct Payload {
     output_sha256: String,
     output_bytes: u32,
     pack: GuardrailPack,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParentLocation {
+    version: u32,
+    installation_id: Uuid,
+    client: ClientAdapter,
+    session_hash: String,
+    epoch: u64,
+    nonce: Uuid,
+    generation: Uuid,
+    sequence: u64,
+    binding: String,
+    path_hex: String,
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -235,6 +252,128 @@ fn guard_name(hash: &str) -> String {
 
 fn guard_journal_name(hash: &str) -> String {
     format!("guard-journal-{hash}")
+}
+
+fn location_name(hash: &str) -> String {
+    format!("parent-location-{hash}")
+}
+
+fn path_hex(path: &Path) -> Result<String> {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > limits::PATH_BYTES
+        || bytes.contains(&0)
+        || !path.is_absolute()
+    {
+        return Err(Error::SnapshotInvalid("parent location path"));
+    }
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    Ok(encoded)
+}
+
+fn nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn path_from_hex(encoded: &str) -> Result<PathBuf> {
+    let bytes = encoded.as_bytes();
+    if bytes.is_empty() || bytes.len() > 2 * limits::PATH_BYTES || !bytes.len().is_multiple_of(2) {
+        return Err(Error::SnapshotInvalid("parent location encoding"));
+    }
+    let mut decoded = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = nibble(pair[0]).ok_or(Error::SnapshotInvalid("parent location encoding"))?;
+        let low = nibble(pair[1]).ok_or(Error::SnapshotInvalid("parent location encoding"))?;
+        decoded.push((high << 4) | low);
+    }
+    if decoded.contains(&0) {
+        return Err(Error::SnapshotInvalid("parent location path"));
+    }
+    let path = PathBuf::from(OsString::from_vec(decoded));
+    if !path.is_absolute() {
+        return Err(Error::SnapshotInvalid("parent location path"));
+    }
+    Ok(path)
+}
+
+fn read_parent_location(
+    installation: &Installation,
+    active: &ActiveInstallation,
+    head: &Head,
+) -> Result<PathBuf> {
+    let bytes = installation
+        .directory()
+        .read(&location_name(&head.session_hash))?
+        .ok_or(Error::SnapshotInvalid("parent location missing"))?;
+    let location: ParentLocation = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::SnapshotInvalid("parent location JSON"))?;
+    if location.version != 1
+        || location.installation_id != installation.id()
+        || location.client != installation.client()
+        || location.session_hash != head.session_hash
+        || location.epoch != head.epoch
+        || location.nonce != head.nonce
+        || location.generation != head.generation
+        || location.sequence != head.sequence
+        || head.binding.as_deref() != Some(location.binding.as_str())
+    {
+        return Err(Error::SnapshotInvalid("parent location identity"));
+    }
+    let path = path_from_hex(&location.path_hex)?;
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|_| Error::SnapshotInvalid("parent location unavailable"))?;
+    if canonical != path || active.config.resolve(&canonical)?.public_json()? != location.binding {
+        return Err(Error::SnapshotInvalid("parent location scope"));
+    }
+    Ok(path)
+}
+
+fn replace_parent_location(
+    installation: &Installation,
+    active: &ActiveInstallation,
+    head: &Head,
+    cwd: &Path,
+) -> Result<()> {
+    let actual = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| Error::SnapshotInvalid("process cwd"))?;
+    if actual != cwd {
+        return Err(Error::SnapshotInvalid("parent location cwd mismatch"));
+    }
+    let location = ParentLocation {
+        version: 1,
+        installation_id: installation.id(),
+        client: installation.client(),
+        session_hash: head.session_hash.clone(),
+        epoch: head.epoch,
+        nonce: head.nonce,
+        generation: head.generation,
+        sequence: head.sequence,
+        binding: head
+            .binding
+            .clone()
+            .ok_or(Error::SnapshotInvalid("parent binding missing"))?,
+        path_hex: path_hex(cwd)?,
+    };
+    let bytes = serde_json::to_vec(&location)
+        .map_err(|_| Error::SnapshotInvalid("parent location JSON"))?;
+    installation
+        .directory()
+        .replace(&location_name(&head.session_hash), &bytes)?;
+    let readback = read_parent_location(installation, active, head)?;
+    if readback != cwd {
+        return Err(Error::SnapshotInvalid("parent location readback"));
+    }
+    Ok(())
 }
 
 fn validate_guard(installation: &Installation, head: &Head, guard: &GuardRecord) -> Result<()> {
@@ -714,6 +853,9 @@ impl Installation {
         head.output_sha256 = Some(output_hash);
         head.output_bytes = Some(output_bytes);
         replace_head(self, &pending.session_hash, &head)?;
+        if active.config.delegation().is_some() {
+            replace_parent_location(self, &active, &head, cwd)?;
+        }
         writer
             .write_all(&output)
             .map_err(|error| io("output write", &error))?;
@@ -1014,5 +1156,26 @@ impl Installation {
             return Err(Error::SnapshotInvalid("guard completion readback"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod parent_location_tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    use super::{path_from_hex, path_hex};
+
+    #[test]
+    fn preserves_bounded_non_utf8_os_paths() {
+        let path = PathBuf::from(OsString::from_vec(b"/private/\xff/parent".to_vec()));
+        let encoded = path_hex(&path).expect("encode path");
+        assert_eq!(path_from_hex(&encoded).expect("decode path"), path);
+        assert!(path_hex(&PathBuf::from("relative")).is_err());
+        assert!(path_from_hex("2f00").is_err());
+        assert!(path_from_hex("2f0").is_err());
+        assert!(path_from_hex("2fGG").is_err());
+        assert!(path_from_hex("72656c6174697665").is_err());
     }
 }
