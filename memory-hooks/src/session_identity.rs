@@ -232,7 +232,7 @@ mod tests {
         let adapter = ClientAdapter::ClaudeV1;
         let mut bytes = serde_json::to_vec(&event(adapter)).unwrap();
         bytes.pop();
-        bytes.extend_from_slice(br#",\"agent_id\":\"other\"}"#);
+        bytes.extend_from_slice(br#", "agent_id": "other"}"#);
         assert!(parse_delegated_start(adapter, &bytes).is_err());
         let mut bytes = serde_json::to_vec(&event(adapter)).unwrap();
         bytes.extend_from_slice(b"{}");

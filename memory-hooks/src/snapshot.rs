@@ -1714,3 +1714,296 @@ mod parent_location_tests {
         assert!(path_from_hex("72656c6174697665").is_err());
     }
 }
+
+#[cfg(test)]
+mod child_output_tests {
+    use std::collections::BTreeMap;
+    use std::fs::{self, OpenOptions};
+    use std::io::{self, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    use memory_common::guardrails::GuardrailPack;
+    use memory_common::policy::{CanonicalRule, DeliveryClass, PolicySelectors};
+
+    use super::{Installation, PublicationEvent, serialize_publication};
+    use crate::config::ClientAdapter;
+    use crate::session_identity::ChildIdentity;
+    use crate::state::{ReplaceStage, with_replace_fault};
+
+    struct CutWriter {
+        bytes_left: usize,
+        fail_flush: bool,
+    }
+
+    impl Write for CutWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.bytes_left == 0 {
+                return Err(io::Error::other("fixture cut output"));
+            }
+            let count = bytes.len().min(self.bytes_left);
+            self.bytes_left -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::other("fixture flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct BarrierWriter {
+        arrived: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        output: Vec<u8>,
+    }
+
+    impl Write for BarrierWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.arrived
+                .send(())
+                .map_err(|_| io::Error::other("fixture arrival"))?;
+            self.release
+                .recv_timeout(Duration::from_secs(8))
+                .map_err(|_| io::Error::other("fixture release"))?;
+            self.output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn private_fixture() -> tempfile::TempDir {
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, PathBuf::from);
+        tempfile::tempdir_in(base).expect("private fixture")
+    }
+
+    fn pack(installation: &Installation, cwd: &Path) -> GuardrailPack {
+        let binding = installation
+            .active()
+            .expect("active")
+            .config
+            .resolve(cwd)
+            .expect("binding");
+        GuardrailPack::new(
+            binding.project().to_owned(),
+            binding.context().clone(),
+            1,
+            vec![CanonicalRule {
+                project: "general".to_owned(),
+                id: uuid::Uuid::from_u128(1),
+                policy_key: Some("child-output".to_owned()),
+                revision: Some(1),
+                delivery_class: Some(DeliveryClass::Mandatory),
+                selectors: PolicySelectors::default(),
+                values: BTreeMap::new(),
+                content: "guarded child output".to_owned(),
+                overrides: None,
+            }],
+        )
+        .expect("pack")
+    }
+
+    #[test]
+    fn zero_partial_last_byte_and_flush_failures_leave_children_unemitted() {
+        let root = private_fixture();
+        let cwd = root.path().join("workspace");
+        fs::create_dir(&cwd).expect("workspace");
+        let control = root.path().join("control");
+        let config = root.path().join("config.toml");
+        let source = format!(
+            "schema_version = 4\nstate_root = {:?}\ngit_executable = \"/usr/bin/git\"\n[[bindings]]\nkind = \"directory\"\nlabel = \"fixture\"\nroot = {:?}\nguardrails_project = \"general\"\n[bindings.context]\nprofile = \"workstation\"\n[transport]\nmemoryd_url = \"http://127.0.0.1:55486/\"\nunauthenticated = true\ncredential_revision = \"initial\"\n[client]\nadapter = \"claude-v1\"\ncontract = \"managed-session-start-v1\"\nasync_hook = false\ntimeout_seconds = 90\n[gate]\ncontract = \"managed-pre-tool-v1\"\nasync_hook = false\naudit_location = \"installation-anchor-v1\"\naudit_max_records = 4096\naudit_max_bytes = 8388608\naudit_record_bytes = 2048\n[delegation]\ncontract = \"managed-delegation-v1\"\nclient_pin = \"claude-code-2.1.92\"\nmode = \"enforced\"\nmax_depth = 1\nsynchronous_start = true\nsynchronous_pre_tool = true\ncatch_all_pre_tool = true\ndelivery = \"subagent-start-context\"\nchild_identity = \"agent-id-on-pre-tool\"\nblocking_pre_tool = \"pre-tool-deny\"\nparent_spawn = \"Agent\"\nrepeat_start = \"new-child-required\"\ncross_cwd = \"same-cwd-only\"\n",
+            root.path().join("state").display().to_string(),
+            cwd.display().to_string()
+        );
+        let mut config_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&config)
+            .expect("config");
+        config_file
+            .write_all(source.as_bytes())
+            .expect("config bytes");
+        let id = Installation::initialize(&control, ClientAdapter::ClaudeV1).expect("install");
+        let installation = Installation::open(&control, id, ClientAdapter::ClaudeV1).expect("open");
+        installation.activate(&config).expect("activate");
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "snapshot::child_output_tests::child_output_worker",
+            ])
+            .env("MEMORY_HOOKS_CHILD_OUTPUT_CONTROL", &control)
+            .env("MEMORY_HOOKS_CHILD_OUTPUT_ID", id.to_string())
+            .current_dir(&cwd)
+            .output()
+            .expect("child output fixture");
+        assert!(output.status.success(), "{:?}", output.status);
+    }
+
+    fn verify_parent_refresh_waits_for_child_output(
+        installation: &Arc<Installation>,
+        cwd: &Path,
+        policy: &GuardrailPack,
+    ) {
+        let identity = ChildIdentity::from_validated("parent", "output-race");
+        let pending = installation.begin_child(&identity).expect("child claim");
+        installation
+            .attach_binding(&pending, cwd)
+            .expect("child binding");
+        let proof = installation
+            .capture_parent("parent", cwd)
+            .expect("parent proof");
+        let (arrived_tx, arrived_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let child_installation = Arc::clone(installation);
+        let child = thread::spawn(move || {
+            let mut writer = BarrierWriter {
+                arrived: arrived_tx,
+                release: release_rx,
+                output: Vec::new(),
+            };
+            let result =
+                child_installation.complete_child(&identity, &pending, &proof, &mut writer);
+            (result, writer.output)
+        });
+        arrived_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("child reached output");
+        let (refresh_started_tx, refresh_started_rx) = mpsc::channel();
+        let (refresh_done_tx, refresh_done_rx) = mpsc::channel();
+        let refresh_installation = Arc::clone(installation);
+        let refresh = thread::spawn(move || {
+            refresh_started_tx.send(()).expect("refresh start");
+            let result = refresh_installation.begin_session("parent");
+            refresh_done_tx.send(result).expect("refresh result");
+        });
+        refresh_started_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("refresh scheduled");
+        assert!(
+            refresh_done_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "parent refresh must wait for child output completion"
+        );
+        release_tx.send(()).expect("release child output");
+        let (child_result, bytes) = child.join().expect("child output worker");
+        assert!(child_result.is_ok());
+        assert_eq!(
+            bytes,
+            serialize_publication(policy, PublicationEvent::SubagentStart)
+                .expect("exact child output")
+        );
+        let refreshed = refresh_done_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("parent refresh")
+            .expect("fresh parent generation");
+        refresh.join().expect("refresh worker");
+        let stale = ChildIdentity::from_validated("parent", "output-race");
+        assert!(installation.read_child_snapshot(&stale, cwd).is_err());
+        installation
+            .attach_binding(&refreshed, cwd)
+            .expect("refreshed binding");
+        installation
+            .complete_session(&refreshed, cwd, policy.clone(), &mut io::sink())
+            .expect("refreshed parent delivery");
+    }
+
+    #[test]
+    fn child_output_worker() {
+        let Some(control) = std::env::var_os("MEMORY_HOOKS_CHILD_OUTPUT_CONTROL") else {
+            return;
+        };
+        let id = uuid::Uuid::parse_str(
+            &std::env::var("MEMORY_HOOKS_CHILD_OUTPUT_ID").expect("installation ID"),
+        )
+        .expect("UUID");
+        let cwd = std::env::current_dir().expect("fixture cwd");
+        let installation = Arc::new(
+            Installation::open(Path::new(&control), id, ClientAdapter::ClaudeV1)
+                .expect("open fixture"),
+        );
+        let parent = installation.begin_session("parent").expect("parent claim");
+        installation
+            .attach_binding(&parent, &cwd)
+            .expect("parent binding");
+        let policy = pack(&installation, &cwd);
+        installation
+            .complete_session(&parent, &cwd, policy.clone(), &mut io::sink())
+            .expect("parent delivery");
+        let output_len = serialize_publication(&policy, PublicationEvent::SubagentStart)
+            .expect("child output")
+            .len();
+        for (agent, bytes_left, fail_flush) in [
+            ("zero", 0, false),
+            ("partial", 1, false),
+            ("last-byte", output_len - 1, false),
+            ("flush", output_len, true),
+        ] {
+            let identity = ChildIdentity::from_validated("parent", agent);
+            let pending = installation.begin_child(&identity).expect("child claim");
+            installation
+                .attach_binding(&pending, &cwd)
+                .expect("child binding");
+            let proof = installation
+                .capture_parent("parent", &cwd)
+                .expect("parent proof");
+            let mut writer = CutWriter {
+                bytes_left,
+                fail_flush,
+            };
+            assert!(
+                installation
+                    .complete_child(&identity, &pending, &proof, &mut writer)
+                    .is_err(),
+                "{agent} must fail"
+            );
+            assert!(
+                installation.read_child_snapshot(&identity, &cwd).is_err(),
+                "{agent} must remain unusable"
+            );
+            assert!(installation.read_snapshot("parent", &cwd).is_ok());
+        }
+        verify_parent_refresh_waits_for_child_output(&installation, &cwd, &policy);
+        let expected = serialize_publication(&policy, PublicationEvent::SubagentStart)
+            .expect("exact child output");
+        for (agent, prefix, stage, occurrence) in [
+            ("head-file-sync", "head-", ReplaceStage::FileSync, 2),
+            ("head-parent-sync", "head-", ReplaceStage::ParentSync, 2),
+            ("audit-file-sync", "audit-", ReplaceStage::FileSync, 1),
+        ] {
+            let identity = ChildIdentity::from_validated("parent", agent);
+            let pending = installation.begin_child(&identity).expect("child claim");
+            installation
+                .attach_binding(&pending, &cwd)
+                .expect("child binding");
+            let proof = installation
+                .capture_parent("parent", &cwd)
+                .expect("parent proof");
+            let mut output = Vec::new();
+            let result = with_replace_fault(prefix, stage, occurrence, || {
+                installation.complete_child(&identity, &pending, &proof, &mut output)
+            });
+            assert!(result.is_err(), "{agent} must fail");
+            assert_eq!(output, expected, "{agent} output was written");
+            assert!(
+                installation.read_child_snapshot(&identity, &cwd).is_err(),
+                "{agent} must remain unusable"
+            );
+            assert!(installation.read_snapshot("parent", &cwd).is_ok());
+        }
+    }
+}

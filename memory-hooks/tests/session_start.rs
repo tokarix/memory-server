@@ -480,6 +480,46 @@ fn activate_enforced_claude(installation: &Installation, fixture: &Path) {
     installation.activate(&config).expect("activate v4");
 }
 
+fn direct_child_start(cwd: &Path, agent_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        "session_id": "parent",
+        "agent_id": agent_id,
+        "agent_type": "SENTINEL_PRIVATE_AGENT_TYPE_89",
+        "cwd": cwd,
+    })
+}
+
+fn direct_child_tool(cwd: &Path, agent_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "parent",
+        "agent_id": agent_id,
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_use_id": Uuid::new_v4().to_string(),
+        "tool_input": {"command": "SENTINEL_PRIVATE_COMMAND_89"},
+    })
+}
+
+fn publish_v4_parent(
+    installation: &Installation,
+    id: Uuid,
+    cwd: &Path,
+    listener: &TcpListener,
+) -> Vec<u8> {
+    let body = serde_json::to_vec(&pack(installation, cwd)).expect("pack JSON");
+    let reply = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let output = invoke_session(id, cwd, ClientAdapter::ClaudeV1, "startup", "parent");
+    assert!(output.status.success(), "{:?}", output.stderr);
+    reply.join().expect("root response");
+    body
+}
+
 #[test]
 fn managed_v4_child_publishes_exact_context_once_from_a_live_parent() {
     let root = private_fixture();
@@ -507,6 +547,8 @@ fn managed_v4_child_publishes_exact_context_once_from_a_live_parent() {
         "session_id": "parent",
         "agent_id": "child",
         "agent_type": "SENTINEL_PRIVATE_AGENT_TYPE_89",
+        "transcript_path": "SENTINEL_PRIVATE_TRANSCRIPT_89",
+        "prompt": "SENTINEL_PRIVATE_PROMPT_89",
         "cwd": cwd,
     });
     let child = invoke_delegated_raw(
@@ -563,13 +605,13 @@ fn managed_v4_child_publishes_exact_context_once_from_a_live_parent() {
         &event,
         &child_tool,
     );
-    for entry in fs::read_dir(root.path().join("control")).expect("anchor") {
-        let path = entry.expect("entry").path();
-        if path
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("audit-"))
-        {
-            let record = fs::read(path).expect("audit record");
+    for store in [root.path().join("control"), root.path().join("snapshots")] {
+        for entry in fs::read_dir(store).expect("private store") {
+            let path = entry.expect("entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            let record = fs::read(path).expect("private record");
             assert!(
                 !record
                     .windows(b"SENTINEL_PRIVATE".len())
@@ -1008,6 +1050,447 @@ fn child_output_write_failure_leaves_no_usable_generation() {
             .stdout
             .is_empty()
     );
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+}
+
+#[test]
+fn child_start_requires_an_emitted_idle_parent_before_any_fetch() {
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("fixture output failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    for state in ["missing", "pending", "prepared", "invalid"] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+        activate_enforced_claude(&installation, root.path());
+        if state != "missing" {
+            let pending = installation
+                .begin_session("parent")
+                .expect("pending parent");
+            if state == "prepared" {
+                installation
+                    .attach_binding(&pending, &cwd)
+                    .expect("parent binding");
+                assert!(
+                    installation
+                        .complete_session(
+                            &pending,
+                            &cwd,
+                            pack(&installation, &cwd),
+                            &mut FailingWriter
+                        )
+                        .is_err()
+                );
+            } else if state == "invalid" {
+                let reply = response(
+                    listener.try_clone().expect("listener"),
+                    b"SENTINEL_PRIVATE_UPSTREAM_BODY_89".to_vec(),
+                    "500 Internal Server Error",
+                );
+                let failure = invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "resume", "parent");
+                assert!(!failure.status.success());
+                reply.join().expect("failed parent fetch");
+            }
+        }
+        let output = invoke_delegated_raw(
+            id,
+            &cwd,
+            ClientAdapter::ClaudeV1,
+            direct_child_start(&cwd, state).to_string().as_bytes(),
+        );
+        assert!(!output.status.success(), "{state}");
+        assert!(output.stdout.is_empty(), "{state}");
+        assert!(
+            !invoke_pre_tool_raw(
+                id,
+                &cwd,
+                direct_child_tool(&cwd, state).to_string().as_bytes()
+            )
+            .stdout
+            .is_empty(),
+            "{state} child mutation must deny"
+        );
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        assert!(listener.accept().is_err(), "{state} reached daemon");
+    }
+}
+
+#[test]
+fn malformed_fresh_parent_reply_prevents_child_publication() {
+    for variant in [
+        "invalid_selector",
+        "missing_selector",
+        "wrong_project",
+        "wrong_context",
+    ] {
+        let root = private_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+        activate_enforced_claude(&installation, root.path());
+        let body = publish_v4_parent(&installation, id, &cwd, &listener);
+        let malformed = invalid_pack_responses(&pack(&installation, &cwd))
+            .into_iter()
+            .find(|(name, _, _)| *name == variant)
+            .expect("variant");
+        let reply = response(listener, malformed.2, malformed.1);
+        let output = invoke_delegated_raw(
+            id,
+            &cwd,
+            ClientAdapter::ClaudeV1,
+            direct_child_start(&cwd, variant).to_string().as_bytes(),
+        );
+        reply.join().expect("child fetch");
+        assert!(!output.status.success(), "{variant}");
+        assert!(output.stdout.is_empty(), "{variant}");
+        let diagnostics = String::from_utf8_lossy(&output.stderr);
+        assert!(!diagnostics.contains("SENTINEL_PRIVATE"));
+        assert!(installation.read_snapshot("parent", &cwd).is_err());
+        assert!(
+            !invoke_pre_tool_raw(
+                id,
+                &cwd,
+                direct_child_tool(&cwd, variant).to_string().as_bytes()
+            )
+            .stdout
+            .is_empty(),
+            "{variant} child mutation must deny"
+        );
+        assert!(!body.is_empty());
+    }
+}
+
+#[test]
+fn child_daemon_outage_retires_only_the_captured_parent_generation() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    publish_v4_parent(&installation, id, &cwd, &listener);
+    let failed = response(
+        listener,
+        b"SENTINEL_PRIVATE_UPSTREAM_BODY_89".to_vec(),
+        "503 Service Unavailable",
+    );
+    let child = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        direct_child_start(&cwd, "outage-child")
+            .to_string()
+            .as_bytes(),
+    );
+    failed.join().expect("failed child fetch");
+    assert!(!child.status.success());
+    assert!(child.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&child.stderr).contains("SENTINEL_PRIVATE"));
+    assert!(installation.read_snapshot("parent", &cwd).is_err());
+    assert!(
+        !invoke_pre_tool_raw(
+            id,
+            &cwd,
+            direct_child_tool(&cwd, "outage-child")
+                .to_string()
+                .as_bytes()
+        )
+        .stdout
+        .is_empty()
+    );
+}
+
+#[test]
+fn parent_refresh_during_child_publication_cannot_emit_stale_context() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let body = publish_v4_parent(&installation, id, &cwd, &listener);
+    let (arrived_tx, arrived_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let delayed = delayed_response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        arrived_tx,
+        release_rx,
+    );
+    let child_cwd = cwd.clone();
+    let started = thread::spawn(move || {
+        invoke_delegated_raw(
+            id,
+            &child_cwd,
+            ClientAdapter::ClaudeV1,
+            direct_child_start(&child_cwd, "racing-child")
+                .to_string()
+                .as_bytes(),
+        )
+    });
+    arrived_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("child fetch arrived");
+    let refreshed = response(listener, body, "200 OK");
+    assert!(
+        invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "resume", "parent")
+            .status
+            .success()
+    );
+    refreshed.join().expect("parent refresh");
+    release_tx.send(()).expect("release old fetch");
+    delayed.join().expect("child fetch");
+    let outcome = started.join().expect("child start");
+    assert!(!outcome.status.success());
+    assert!(outcome.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+    assert!(
+        !invoke_pre_tool_raw(
+            id,
+            &cwd,
+            direct_child_tool(&cwd, "racing-child")
+                .to_string()
+                .as_bytes()
+        )
+        .stdout
+        .is_empty()
+    );
+}
+
+#[test]
+fn concurrent_sibling_starts_publish_independent_child_authority() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let body = publish_v4_parent(&installation, id, &cwd, &listener);
+    let (arrived_tx, arrived_rx) = mpsc::channel();
+    let (release_a_tx, release_a_rx) = mpsc::channel();
+    let (release_b_tx, release_b_rx) = mpsc::channel();
+    let delayed_a = delayed_response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        arrived_tx.clone(),
+        release_a_rx,
+    );
+    let delayed_b = delayed_response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        arrived_tx,
+        release_b_rx,
+    );
+    let starts: Vec<_> = ["child-a", "child-b"]
+        .into_iter()
+        .map(|agent| {
+            let child_cwd = cwd.clone();
+            thread::spawn(move || {
+                invoke_delegated_raw(
+                    id,
+                    &child_cwd,
+                    ClientAdapter::ClaudeV1,
+                    direct_child_start(&child_cwd, agent).to_string().as_bytes(),
+                )
+            })
+        })
+        .collect();
+    for _ in 0..2 {
+        arrived_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("both siblings reached daemon");
+    }
+    release_a_tx.send(()).expect("release sibling A");
+    release_b_tx.send(()).expect("release sibling B");
+    delayed_a.join().expect("sibling fetch A");
+    delayed_b.join().expect("sibling fetch B");
+    for start in starts {
+        let output = start.join().expect("child start");
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert!(!output.stdout.is_empty());
+    }
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+    for agent in ["child-a", "child-b"] {
+        let reply = response(
+            listener.try_clone().expect("listener"),
+            body.clone(),
+            "200 OK",
+        );
+        let checked = invoke_pre_tool_raw(
+            id,
+            &cwd,
+            direct_child_tool(&cwd, agent).to_string().as_bytes(),
+        );
+        assert!(checked.status.success(), "{agent}: {:?}", checked.stderr);
+        assert!(checked.stdout.is_empty(), "{agent} should be neutral");
+        reply.join().expect("child check");
+    }
+    let other = root.path().join("other-scope");
+    fs::create_dir(&other).expect("different cwd");
+    let drifted = invoke_pre_tool_raw(
+        id,
+        &other,
+        direct_child_tool(&other, "child-a").to_string().as_bytes(),
+    );
+    assert!(!drifted.stdout.is_empty(), "changed child cwd must deny");
+}
+
+#[test]
+fn killed_child_start_cannot_authorize_a_later_mutation() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    publish_v4_parent(&installation, id, &cwd, &listener);
+    let (arrived_tx, arrived_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let held = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "child request reached daemon");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("child request: {error}"),
+            }
+        };
+        arrived_tx.send(()).expect("arrival");
+        release_rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("release held request");
+        drop(stream);
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memory-hooks"))
+        .arg("delegated-start")
+        .arg("--installation")
+        .arg(root.path().join("control"))
+        .arg("--installation-id")
+        .arg(id.to_string())
+        .arg("--client")
+        .arg(ClientAdapter::ClaudeV1.name())
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("child helper");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            direct_child_start(&cwd, "killed-child")
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("start input");
+    arrived_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("child fetch arrived");
+    child.kill().expect("kill child helper");
+    let stopped = child.wait_with_output().expect("reap child helper");
+    release_tx.send(()).expect("release request");
+    held.join().expect("held request");
+    assert!(!stopped.status.success());
+    assert!(stopped.stdout.is_empty());
+    assert!(installation.read_snapshot("parent", &cwd).is_ok());
+    let denied = invoke_pre_tool_raw(
+        id,
+        &cwd,
+        direct_child_tool(&cwd, "killed-child")
+            .to_string()
+            .as_bytes(),
+    );
+    assert!(!denied.stdout.is_empty());
+}
+
+#[test]
+fn root_compaction_requires_a_new_child_id_and_fresh_child_delivery() {
+    let root = private_fixture();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let (installation, id, cwd) = configured(root.path(), ClientAdapter::ClaudeV1, port);
+    activate_enforced_claude(&installation, root.path());
+    let body = publish_v4_parent(&installation, id, &cwd, &listener);
+    let first = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let original = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        direct_child_start(&cwd, "before-compact")
+            .to_string()
+            .as_bytes(),
+    );
+    first.join().expect("original child fetch");
+    assert!(original.status.success());
+    let second = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let compacted = invoke_session(id, &cwd, ClientAdapter::ClaudeV1, "compact", "parent");
+    second.join().expect("compact fetch");
+    assert!(compacted.status.success(), "{:?}", compacted.stderr);
+    let stale = invoke_pre_tool_raw(
+        id,
+        &cwd,
+        direct_child_tool(&cwd, "before-compact")
+            .to_string()
+            .as_bytes(),
+    );
+    assert!(!stale.stdout.is_empty(), "old lineage must deny");
+    let repeated = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        direct_child_start(&cwd, "before-compact")
+            .to_string()
+            .as_bytes(),
+    );
+    assert!(!repeated.status.success());
+    assert!(repeated.stdout.is_empty());
+    let third = response(
+        listener.try_clone().expect("listener"),
+        body.clone(),
+        "200 OK",
+    );
+    let replacement = invoke_delegated_raw(
+        id,
+        &cwd,
+        ClientAdapter::ClaudeV1,
+        direct_child_start(&cwd, "after-compact")
+            .to_string()
+            .as_bytes(),
+    );
+    third.join().expect("replacement child fetch");
+    assert!(replacement.status.success(), "{:?}", replacement.stderr);
+    let fourth = response(listener, body, "200 OK");
+    let new_child = invoke_pre_tool_raw(
+        id,
+        &cwd,
+        direct_child_tool(&cwd, "after-compact")
+            .to_string()
+            .as_bytes(),
+    );
+    fourth.join().expect("new child check");
+    assert!(new_child.status.success());
+    assert!(new_child.stdout.is_empty());
     assert!(installation.read_snapshot("parent", &cwd).is_ok());
 }
 

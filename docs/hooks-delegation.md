@@ -27,6 +27,17 @@ describes the same identifiers and warns that a repeated start can retain the
 earlier context. Current [Codex hook documentation](https://learn.chatgpt.com/docs/hooks#subagentstart)
 does not establish child linkage on guarded tool callbacks.
 
+The actual `memory-hooks` binary was also exercised with Claude Code 2.1.92
+against disposable local Claude and guardrail APIs. The root start, parent
+`Agent` check, and child start used the same valid pack; a changed fourth
+guardrail response at the child's `Bash` check produced a redacted
+`policy_changed` audit record. The child request contained the guardrail text,
+and its pending `marker.txt` mutation was absent after the run. Since the root
+received the same text, that request alone cannot distinguish root text from
+child injection; the separate distinct-marker fixture above establishes
+`SubagentStart` consumption. Together these runs cover the pinned same-cwd
+helper and client path within the local mock's tool sequence and registration.
+
 The [v4 example](../memory-hooks-v4.toml.example) selects the Claude pin and
 `mode = "enforced"`. Activation advances the epoch and requires a new root
 `SessionStart` delivery. It does not import v3 session records as child

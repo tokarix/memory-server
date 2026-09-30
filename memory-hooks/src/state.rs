@@ -33,7 +33,7 @@ thread_local! {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReplaceStage {
+pub(crate) enum ReplaceStage {
     Create,
     Write,
     Flush,
@@ -77,7 +77,7 @@ fn fail_at(name: &str, stage: ReplaceStage) -> bool {
 }
 
 #[cfg(test)]
-fn with_replace_fault<T>(
+pub(crate) fn with_replace_fault<T>(
     prefix: &str,
     stage: ReplaceStage,
     occurrence: usize,
