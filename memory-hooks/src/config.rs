@@ -48,6 +48,7 @@ pub struct TrustedHooksConfig {
     pub(crate) delivery: Option<DeliveryConfig>,
     pub(crate) gate: Option<GateConfig>,
     pub(crate) delegation: Option<DelegationConfig>,
+    pub(crate) storage_execution: Option<crate::storage::attestation::StorageExecution>,
 }
 
 /// Exact client version selected for delegated lifecycle handling.
@@ -229,6 +230,7 @@ struct RawConfig {
     client: Option<RawClient>,
     gate: Option<RawGate>,
     delegation: Option<RawDelegation>,
+    storage_execution: Option<crate::storage::attestation::StorageExecution>,
 }
 
 #[derive(Deserialize)]
@@ -640,6 +642,10 @@ fn hash_delegation(hasher: &mut Sha256, delegation: DelegationConfig) {
     hash_part(hasher, b"same-cwd-only");
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit versioned trust fingerprint inputs"
+)]
 fn fingerprint(
     config_path: &Path,
     state: &Path,
@@ -648,6 +654,7 @@ fn fingerprint(
     delivery: Option<&DeliveryConfig>,
     gate: Option<GateConfig>,
     delegation: Option<DelegationConfig>,
+    storage_execution: Option<&crate::storage::attestation::StorageExecution>,
 ) -> Result<String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -673,7 +680,9 @@ fn fingerprint(
     }
     entries.sort();
     let mut hasher = Sha256::new();
-    if delegation.is_some() {
+    if storage_execution.is_some() {
+        hasher.update(b"memory-hooks-config-v5\0");
+    } else if delegation.is_some() {
         hasher.update(b"memory-hooks-config-v4\0");
     } else if gate.is_some() {
         hasher.update(b"memory-hooks-config-v3\0");
@@ -713,9 +722,18 @@ fn fingerprint(
     if let Some(delegation) = delegation {
         hash_delegation(&mut hasher, delegation);
     }
+    if let Some(storage) = storage_execution {
+        let mut storage = storage.clone();
+        storage.mounts.sort_by_key(|mount| mount.id);
+        let bytes = serde_json::to_vec(&storage)
+            .map_err(|_| Error::ConfigInvalid("storage fingerprint"))?;
+        hash_part(&mut hasher, &bytes);
+    }
     Ok(format!(
         "{}:{:x}",
-        if delegation.is_some() {
+        if storage_execution.is_some() {
+            "v5"
+        } else if delegation.is_some() {
             "v4"
         } else if gate.is_some() {
             "v3"
@@ -769,12 +787,12 @@ impl TrustedHooksConfig {
         })?;
         let gate = match raw.schema_version {
             1 | 2 if raw.gate.is_none() => None,
-            3 | 4 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
+            3..=5 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
             _ => return Err(Error::ConfigInvalid("schema_version")),
         };
         let delivery = match raw.schema_version {
             1 if raw.transport.is_none() && raw.client.is_none() => None,
-            2..=4 => {
+            2..=5 => {
                 let client = raw
                     .client
                     .ok_or(Error::ConfigInvalid("client"))?
@@ -789,7 +807,7 @@ impl TrustedHooksConfig {
         };
         let delegation = match raw.schema_version {
             1..=3 if raw.delegation.is_none() => None,
-            4 => Some(
+            4 | 5 => Some(
                 raw.delegation
                     .ok_or(Error::ConfigInvalid("delegation"))?
                     .validate(
@@ -943,6 +961,17 @@ impl TrustedHooksConfig {
                 }
             }
         }
+        let storage_execution = match raw.schema_version {
+            1..=4 if raw.storage_execution.is_none() => None,
+            5 => {
+                let storage = raw
+                    .storage_execution
+                    .ok_or(Error::ConfigInvalid("storage_execution"))?;
+                storage.validate(&bindings)?;
+                Some(storage)
+            }
+            _ => return Err(Error::ConfigInvalid("storage_execution schema")),
+        };
         let fingerprint = fingerprint(
             &config_path,
             &state_root,
@@ -951,6 +980,7 @@ impl TrustedHooksConfig {
             delivery.as_ref(),
             gate,
             delegation,
+            storage_execution.as_ref(),
         )?;
         Ok(Self {
             git,
@@ -962,6 +992,7 @@ impl TrustedHooksConfig {
             delivery,
             gate,
             delegation,
+            storage_execution,
         })
     }
 

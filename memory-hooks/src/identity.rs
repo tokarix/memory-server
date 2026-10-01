@@ -41,6 +41,7 @@ pub struct ResolvedBinding {
     project: String,
     context: ResolutionContext,
     fingerprint: String,
+    storage_execution: Option<crate::storage::attestation::StorageExecution>,
 }
 
 #[derive(Serialize)]
@@ -64,6 +65,16 @@ fn digest_path(domain: &[u8], path: &Path) -> String {
 }
 
 impl ResolvedBinding {
+    pub(crate) fn storage_execution(
+        &self,
+    ) -> Option<&crate::storage::attestation::StorageExecution> {
+        self.storage_execution.as_ref().filter(|storage| {
+            let root = match &self.identity {
+                RepositoryIdentity::Git(root) | RepositoryIdentity::Directory(root) => root,
+            };
+            root == &storage.binding_root && self.project == storage.project
+        })
+    }
     /// Canonical repository or explicit directory identity.
     #[must_use]
     pub const fn identity(&self) -> &RepositoryIdentity {
@@ -486,6 +497,7 @@ impl TrustedHooksConfig {
                 project: binding.project.clone(),
                 context: binding.context.clone(),
                 fingerprint: self.fingerprint.clone(),
+                storage_execution: self.storage_execution.clone(),
             });
         }
         let matches: Vec<_> = self
@@ -512,6 +524,7 @@ impl TrustedHooksConfig {
             project: binding.project.clone(),
             context: binding.context.clone(),
             fingerprint: self.fingerprint.clone(),
+            storage_execution: self.storage_execution.clone(),
         })
     }
 }

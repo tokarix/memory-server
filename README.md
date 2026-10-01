@@ -662,3 +662,7 @@ Useful files:
 - [`src/db.rs`](src/db.rs): SQL access layer
 - [`src/transcript.rs`](src/transcript.rs): JSONL transcript parsing and chunking
 - [`docs/http-api-v1.md`](docs/http-api-v1.md): planned HTTP API split
+
+The standalone Linux [storage evaluator](docs/hooks-storage.md) assesses explicit
+directory candidates against structured storage policy. It is not wired into
+live hooks; issue #90 owns candidate discovery, gate and audit integration.

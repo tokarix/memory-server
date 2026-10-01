@@ -23,6 +23,8 @@ pub mod snapshot;
 #[cfg(target_os = "linux")]
 pub mod state;
 #[cfg(target_os = "linux")]
+pub mod storage;
+#[cfg(target_os = "linux")]
 pub mod supervisor;
 
 #[cfg(not(target_os = "linux"))]

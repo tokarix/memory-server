@@ -1,0 +1,74 @@
+# Non-live v5 storage provisioning template. See docs/hooks-storage.md.
+# Runtime placeholders intentionally fail validation; provision independently.
+# Install outside every workspace with mode 0600. Register SessionStart,
+# SubagentStart and catch-all PreToolUse synchronously as documented.
+schema_version = 5
+state_root = "/var/lib/memory-hooks/snapshots"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "woodpecker-container"
+phase = "implementing"
+language = ["rust"]
+
+[transport]
+memoryd_url = "https://memoryd.example.internal/"
+unauthenticated = true
+credential_revision = "initial"
+
+[client]
+adapter = "claude-v1"
+contract = "managed-session-start-v1"
+async_hook = false
+timeout_seconds = 90
+
+[gate]
+contract = "managed-pre-tool-v1"
+async_hook = false
+audit_location = "installation-anchor-v1"
+audit_max_records = 4096
+audit_max_bytes = 8388608
+audit_record_bytes = 2048
+
+[delegation]
+contract = "managed-delegation-v1"
+client_pin = "claude-code-2.1.92"
+mode = "enforced"
+max_depth = 1
+synchronous_start = true
+synchronous_pre_tool = true
+catch_all_pre_tool = true
+delivery = "subagent-start-context"
+child_identity = "agent-id-on-pre-tool"
+blocking_pre_tool = "pre-tool-deny"
+parent_spawn = "Agent"
+repeat_start = "new-child-required"
+cross_cwd = "same-cwd-only"
+
+[storage_execution]
+contract = "isolated-woodpecker-storage-v1"
+binding_root = "/srv/work/example/.git"
+project = "example"
+boot_id = "PROVISION_BOOT_UUID"
+namespace_device = 0
+namespace_inode = 0
+root_device = 0
+root_inode = 0
+isolated_woodpecker = true
+
+[[storage_execution.mounts]]
+id = 0
+root = "/"
+major = 0
+minor = 0
+mountpoint = "/tmp"
+mountpoint_device = 0
+mountpoint_inode = 0
+filesystem = "tmpfs"
+provenance = "container-local"

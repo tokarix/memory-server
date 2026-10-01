@@ -126,3 +126,9 @@ and [Claude PreToolUse contract](https://code.claude.com/docs/en/hooks#pretoolus
 read 2026-09-28. Local binaries reported Codex CLI 0.158.0 and Claude Code
 2.1.92 during implementation; those version strings and startup observations
 are not live PreToolUse interoperability evidence.
+
+## Storage assessment handoff
+
+The standalone [storage evaluator](hooks-storage.md) is not called by this gate.
+Issue #90 must prove operation locality and complete candidate coverage, persist
+the versioned compact projection, and reject expired or changed evidence.

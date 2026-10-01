@@ -232,3 +232,9 @@ checks, hashes and advisory locks coordinate cooperating callers, not hostile
 same-UID processes. Stronger isolation requires managed installation and OS
 access controls or a separate privileged service. Git metadata is checked
 before return but is not an atomic filesystem snapshot.
+
+## Storage execution provisioning
+
+The standalone [storage evaluator](hooks-storage.md) adds protected v5
+container-execution provisioning while preserving v1-v4 contracts. A selected
+container profile alone does not prove isolation or local mount provenance.
