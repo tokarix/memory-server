@@ -8,6 +8,8 @@ pub mod config;
 pub mod delegated;
 pub mod error;
 #[cfg(target_os = "linux")]
+pub mod execution_input;
+#[cfg(target_os = "linux")]
 pub mod identity;
 #[cfg(target_os = "linux")]
 pub mod installation;

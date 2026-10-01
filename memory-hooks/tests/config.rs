@@ -9,6 +9,95 @@ use std::path::Path;
 use memory_hooks::{TrustedHooksConfig, config::DelegationPin};
 
 #[test]
+fn v6_host_contract_is_required_bounded_and_fingerprinted() {
+    let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+    let fixture = tempfile::tempdir_in(base).expect("fixture");
+    let plain = fixture.path().join("plain");
+    fs::create_dir(&plain).expect("directory");
+    let path = fixture.path().join("hooks.toml");
+    let template = include_str!("../../memory-hooks-v6.toml.example");
+    let mut source = template
+        .replace("kind = \"git\"", "kind = \"directory\"")
+        .replace(
+            "common_dir = \"/srv/work/example/.git\"\nprimary_worktree = \"/srv/work/example\"",
+            &format!("root = {:?}", plain.display().to_string()),
+        )
+        .replace(
+            "state_root = \"/var/lib/memory-hooks/snapshots\"",
+            &format!(
+                "state_root = {:?}",
+                fixture.path().join("state").display().to_string()
+            ),
+        )
+        .replace(
+            "00000000-0000-0000-0000-000000000000",
+            "00000000-0000-4000-8000-000000000001",
+        )
+        .replace("namespace_inode = 0", "namespace_inode = 1")
+        .replace("root_inode = 0", "root_inode = 1");
+    for executable in [
+        "/opt/managed/claude",
+        "/usr/bin/bash",
+        "/usr/bin/env",
+        "/opt/rust/1.94.0/bin/cargo",
+        "/opt/rust/1.94.0/bin/rustc",
+        "/opt/rust/1.94.0/bin/rustdoc",
+        "/opt/managed/rustup",
+        "/opt/rust/1.94.0/bin/cargo-clippy",
+        "/opt/rust/1.94.0/bin/clippy-driver",
+    ] {
+        source = source.replace(&format!("= \"{executable}\""), "= \"/usr/bin/git\"");
+    }
+    let write = |value: &str| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("file");
+        file.write_all(value.as_bytes()).expect("write");
+    };
+    write(&source);
+    let trusted = TrustedHooksConfig::load(&path).expect("host v6 without container attestation");
+    assert!(trusted.fingerprint().starts_with("v6:"));
+    assert_eq!(trusted.rust_execution().expect("execution").version(), 1);
+    for altered in [
+        source.replace("client_ancestor = 3", "client_ancestor = 0"),
+        source.replace("rust-cargo-1.94.0-linux-v1", "nightly"),
+        source.replace("posix-literal-no-startup-v1", "interactive"),
+        source.replace("schema_version = 6", "schema_version = 4"),
+        source.replace("HOME =", "BASH_ENV ="),
+        source.replace("same-mount-namespace-and-root-v1", "remote"),
+    ] {
+        write(&altered);
+        let error = TrustedHooksConfig::load(&path)
+            .err()
+            .expect("invalid contract");
+        assert!(!format!("{error:?}").contains("replace-with-protected-bearer-token"));
+    }
+    write(&source.replace("namespace_inode = 1", "namespace_inode = 2"));
+    assert_ne!(
+        trusted.fingerprint(),
+        TrustedHooksConfig::load(&path)
+            .expect("changed pin")
+            .fingerprint()
+    );
+    write(&source.replace(
+        "TMPDIR = \"/srv/work/example/target/compiler-tmp\"",
+        "TMPDIR = \"/srv/work/example/target/other\"",
+    ));
+    assert_ne!(
+        trusted.fingerprint(),
+        TrustedHooksConfig::load(&path)
+            .expect("changed environment")
+            .fingerprint()
+    );
+}
+
+#[test]
 fn typed_external_config_is_strict_and_normalized() {
     let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
         .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"))

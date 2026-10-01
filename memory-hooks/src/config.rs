@@ -16,6 +16,10 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result, io};
 use crate::limits;
 
+pub mod execution;
+
+use execution::{RawRustExecution, RustExecution};
+
 /// One trusted binding, canonicalized at load time.
 #[derive(Clone)]
 pub(crate) struct Binding {
@@ -49,6 +53,7 @@ pub struct TrustedHooksConfig {
     pub(crate) gate: Option<GateConfig>,
     pub(crate) delegation: Option<DelegationConfig>,
     pub(crate) storage_execution: Option<crate::storage::attestation::StorageExecution>,
+    pub(crate) rust_execution: Option<RustExecution>,
 }
 
 /// Exact client version selected for delegated lifecycle handling.
@@ -231,6 +236,7 @@ struct RawConfig {
     gate: Option<RawGate>,
     delegation: Option<RawDelegation>,
     storage_execution: Option<crate::storage::attestation::StorageExecution>,
+    rust_execution: Option<RawRustExecution>,
 }
 
 #[derive(Deserialize)]
@@ -655,6 +661,7 @@ fn fingerprint(
     gate: Option<GateConfig>,
     delegation: Option<DelegationConfig>,
     storage_execution: Option<&crate::storage::attestation::StorageExecution>,
+    rust_execution: Option<&RustExecution>,
 ) -> Result<String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
@@ -680,7 +687,9 @@ fn fingerprint(
     }
     entries.sort();
     let mut hasher = Sha256::new();
-    if storage_execution.is_some() {
+    if rust_execution.is_some() {
+        hasher.update(b"memory-hooks-config-v6\0");
+    } else if storage_execution.is_some() {
         hasher.update(b"memory-hooks-config-v5\0");
     } else if delegation.is_some() {
         hasher.update(b"memory-hooks-config-v4\0");
@@ -729,9 +738,14 @@ fn fingerprint(
             .map_err(|_| Error::ConfigInvalid("storage fingerprint"))?;
         hash_part(&mut hasher, &bytes);
     }
+    if let Some(execution) = rust_execution {
+        execution.fingerprint(&mut hasher);
+    }
     Ok(format!(
         "{}:{:x}",
-        if storage_execution.is_some() {
+        if rust_execution.is_some() {
+            "v6"
+        } else if storage_execution.is_some() {
             "v5"
         } else if delegation.is_some() {
             "v4"
@@ -787,12 +801,12 @@ impl TrustedHooksConfig {
         })?;
         let gate = match raw.schema_version {
             1 | 2 if raw.gate.is_none() => None,
-            3..=5 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
+            3..=6 => Some(raw.gate.ok_or(Error::ConfigInvalid("gate"))?.validate()?),
             _ => return Err(Error::ConfigInvalid("schema_version")),
         };
         let delivery = match raw.schema_version {
             1 if raw.transport.is_none() && raw.client.is_none() => None,
-            2..=5 => {
+            2..=6 => {
                 let client = raw
                     .client
                     .ok_or(Error::ConfigInvalid("client"))?
@@ -807,7 +821,7 @@ impl TrustedHooksConfig {
         };
         let delegation = match raw.schema_version {
             1..=3 if raw.delegation.is_none() => None,
-            4 | 5 => Some(
+            4..=6 => Some(
                 raw.delegation
                     .ok_or(Error::ConfigInvalid("delegation"))?
                     .validate(
@@ -970,7 +984,30 @@ impl TrustedHooksConfig {
                 storage.validate(&bindings)?;
                 Some(storage)
             }
+            6 => raw
+                .storage_execution
+                .map(|storage| {
+                    storage.validate(&bindings)?;
+                    Ok(storage)
+                })
+                .transpose()?,
             _ => return Err(Error::ConfigInvalid("storage_execution schema")),
+        };
+        let rust_execution = match raw.schema_version {
+            1..=5 if raw.rust_execution.is_none() => None,
+            6 => Some(
+                raw.rust_execution
+                    .ok_or(Error::ConfigInvalid("rust_execution"))?
+                    .validate(
+                        delivery
+                            .as_ref()
+                            .ok_or(Error::ConfigInvalid("client"))?
+                            .client()
+                            .adapter(),
+                        &bindings,
+                    )?,
+            ),
+            _ => return Err(Error::ConfigInvalid("rust_execution schema")),
         };
         let fingerprint = fingerprint(
             &config_path,
@@ -981,6 +1018,7 @@ impl TrustedHooksConfig {
             gate,
             delegation,
             storage_execution.as_ref(),
+            rust_execution.as_ref(),
         )?;
         Ok(Self {
             git,
@@ -993,7 +1031,14 @@ impl TrustedHooksConfig {
             gate,
             delegation,
             storage_execution,
+            rust_execution,
         })
+    }
+
+    /// Managed execution settings are present only in a validated v6 config.
+    #[must_use]
+    pub fn rust_execution(&self) -> Option<&RustExecution> {
+        self.rust_execution.as_ref()
     }
 
     /// Versioned digest of normalized nonsecret trust fields.

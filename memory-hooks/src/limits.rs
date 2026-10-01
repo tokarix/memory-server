@@ -20,3 +20,9 @@ pub const PROBE_BYTES: usize = 64 * 1024;
 pub const SHORT_DEADLINE: Duration = Duration::from_secs(5);
 /// Overall identity resolution deadline.
 pub const RESOLVE_DEADLINE: Duration = Duration::from_secs(20);
+/// Maximum literal execution words; overflow is never truncated.
+pub const EXECUTION_WORDS: usize = 512;
+/// Maximum inherited or explicit environment entries.
+pub const EXECUTION_ENVIRONMENT: usize = 128;
+/// Maximum supported literal wrapper nesting.
+pub const EXECUTION_WRAPPERS: usize = 4;

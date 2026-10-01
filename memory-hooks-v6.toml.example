@@ -1,0 +1,90 @@
+# NON-LIVE TEMPLATE: separately provision and verify every pin below.
+# This file does not install a launcher or establish runtime evidence.
+# Direct same-cwd managed delegation for Claude Code 2.1.92.
+# Install outside every workspace with mode 0600. Register SessionStart,
+# SubagentStart and catch-all PreToolUse synchronously as documented.
+schema_version = 6
+state_root = "/var/lib/memory-hooks/snapshots"
+git_executable = "/usr/bin/git"
+
+[[bindings]]
+kind = "git"
+label = "main-checkout"
+common_dir = "/srv/work/example/.git"
+primary_worktree = "/srv/work/example"
+guardrails_project = "example"
+[bindings.context]
+profile = "workstation-host"
+phase = "implementing"
+language = ["rust"]
+
+[transport]
+memoryd_url = "https://memoryd.example.internal/"
+api_token = "replace-with-protected-bearer-token"
+unauthenticated = false
+credential_revision = "initial"
+
+[client]
+adapter = "claude-v1"
+contract = "managed-session-start-v1"
+async_hook = false
+timeout_seconds = 90
+
+[gate]
+contract = "managed-pre-tool-v1"
+async_hook = false
+audit_location = "installation-anchor-v1"
+audit_max_records = 4096
+audit_max_bytes = 8388608
+audit_record_bytes = 2048
+
+[delegation]
+contract = "managed-delegation-v1"
+client_pin = "claude-code-2.1.92"
+mode = "enforced"
+max_depth = 1
+synchronous_start = true
+synchronous_pre_tool = true
+catch_all_pre_tool = true
+delivery = "subagent-start-context"
+child_identity = "agent-id-on-pre-tool"
+blocking_pre_tool = "pre-tool-deny"
+parent_spawn = "Agent"
+repeat_start = "new-child-required"
+cross_cwd = "same-cwd-only"
+
+# Host execution does not require storage_execution. The isolated container
+# exception additionally requires the separately protected v5 attestation.
+[rust_execution]
+contract = "managed-rust-execution-v1"
+client_pin = "claude-code-2.1.92"
+semantics = "rust-cargo-1.94.0-linux-v1"
+shell_mode = "posix-literal-no-startup-v1"
+locality = "same-mount-namespace-and-root-v1"
+tool_resolution = "sealed-executables-v1"
+inherited_environment = "sealed-environment-v1"
+# Count parents from the supervised worker to the sealed client process.
+client_ancestor = 3
+boot_id = "00000000-0000-0000-0000-000000000000"
+namespace_device = 0
+namespace_inode = 0
+root_device = 0
+root_inode = 0
+toolchain = "1.94.0-x86_64-unknown-linux-gnu"
+[rust_execution.executables]
+client = "/opt/managed/claude"
+shell = "/usr/bin/bash"
+env = "/usr/bin/env"
+cargo = "/opt/rust/1.94.0/bin/cargo"
+rustc = "/opt/rust/1.94.0/bin/rustc"
+rustdoc = "/opt/rust/1.94.0/bin/rustdoc"
+rustup = "/opt/managed/rustup"
+cargo-clippy = "/opt/rust/1.94.0/bin/cargo-clippy"
+clippy-driver = "/opt/rust/1.94.0/bin/clippy-driver"
+[rust_execution.environment]
+HOME = "/srv/managed/home"
+PATH = "/opt/rust/1.94.0/bin:/usr/bin"
+CARGO_HOME = "/srv/managed/cargo"
+RUSTUP_HOME = "/srv/managed/rustup"
+RUSTUP_TOOLCHAIN = "1.94.0-x86_64-unknown-linux-gnu"
+TMPDIR = "/srv/work/example/target/compiler-tmp"

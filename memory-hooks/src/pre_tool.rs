@@ -44,13 +44,14 @@ enum SpawnKind {
     Unsupported,
 }
 
-/// Validated event identity, without retaining tool arguments or freeform metadata.
+/// Validated event identity, retaining only bounded private execution data.
 pub struct PreToolEvent {
     session_id: String,
     child: Option<ChildIdentity>,
     cwd: PathBuf,
     category: ToolCategory,
     spawn: SpawnKind,
+    execution: Option<crate::execution_input::ExecutionInput>,
 }
 
 impl PreToolEvent {
@@ -78,6 +79,12 @@ impl PreToolEvent {
         self.category
     }
 
+    /// Private bounded command data; absence never proves nonexecution.
+    #[must_use]
+    pub const fn execution(&self) -> Option<&crate::execution_input::ExecutionInput> {
+        self.execution.as_ref()
+    }
+
     pub(crate) const fn is_agent_operation(&self) -> bool {
         !matches!(self.spawn, SpawnKind::None)
     }
@@ -94,6 +101,7 @@ struct CodexEvent {
     hook_event_name: String,
     tool_name: String,
     tool_use_id: String,
+    #[serde(deserialize_with = "crate::execution_input::unique_value")]
     tool_input: Value,
     turn_id: String,
     #[serde(default, deserialize_with = "present")]
@@ -113,6 +121,7 @@ struct ClaudeEvent {
     hook_event_name: String,
     tool_name: String,
     tool_use_id: String,
+    #[serde(deserialize_with = "crate::execution_input::unique_value")]
     tool_input: Value,
     #[serde(default, deserialize_with = "present")]
     turn_id: Presence,
@@ -317,6 +326,11 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
             .map(|id| ChildIdentity::from_validated(parts.session_id, id)),
         cwd,
         category: category(adapter, parts.tool_name),
+        execution: if parts.tool_name == "Bash" {
+            crate::execution_input::ExecutionInput::from_value(parts.input).ok()
+        } else {
+            None
+        },
         spawn: match (adapter, parts.tool_name) {
             (ClientAdapter::ClaudeV1, "Agent") => SpawnKind::Supported,
             (_, "Task" | "Agent" | "TaskCreate" | "TaskUpdate") => SpawnKind::Unsupported,
@@ -746,6 +760,23 @@ mod tests {
     #[test]
     fn malformed_and_ambiguous_events_are_rejected() {
         let adapter = ClientAdapter::CodexV1;
+        let duplicate_input = String::from_utf8(event("Bash", &json!({"command":"true"})))
+            .unwrap()
+            .replace(
+                "\"command\":\"true\"",
+                "\"command\":\"true\",\"command\":\"SENTINEL_SECRET\"",
+            );
+        let error = parse_event(adapter, duplicate_input.as_bytes())
+            .err()
+            .unwrap();
+        assert!(!format!("{error:?} {error}").contains("SENTINEL_SECRET"));
+        let duplicate_environment = String::from_utf8(event(
+            "Bash",
+            &json!({"command":"true", "env":{"TMPDIR":"x"}}),
+        ))
+        .unwrap()
+        .replace("\"TMPDIR\":\"x\"", "\"TMPDIR\":\"x\",\"TMPDIR\":\"y\"");
+        assert!(parse_event(adapter, duplicate_environment.as_bytes()).is_err());
         let duplicate = br#"{"session_id":"a","session_id":"b"}"#;
         assert!(parse_event(adapter, duplicate).is_err());
         assert!(parse_event(adapter, &[0xff]).is_err());
