@@ -48,3 +48,51 @@ This contract is an integration prerequisite. The bounded Rust resolver and
 storage gate integration are separate implementation units of #90. Until they
 are connected, the generic gate's behavior is unchanged and this declaration
 alone must not be advertised as Rust storage enforcement.
+
+## Literal command grammar
+
+The library accepts one literal argv, or one shell spelling that produces only
+literal words. Single quotes preserve dollar/backtick characters as data;
+double-quoted and unquoted expansion is rejected. Literal escaping and paths
+with spaces are supported. It consumes the entire input, including trailing
+text, and rejects NUL, oversized words/argv, substitutions, globs, tilde/brace
+expansion, pipelines, redirection, heredocs, backgrounding, general conditions,
+sequences, nested shell interpreters, eval, source, functions and opaque scripts.
+
+One optional leading `cd [--] LITERAL && INVOCATION` is the sole compound form.
+It cannot be combined with the client's cwd/workdir field or another cwd
+transition. Filesystem resolution must subsequently prove that execution stays
+inside the same protected binding/worktree/context and that logical/physical
+cwd semantics agree. Parsing a literal path alone does not prove this.
+
+Leading `NAME=value` assignments apply after the client environment field.
+Literal `env` supports `-i`/`--ignore-environment`, `-u NAME`/`--unset NAME`,
+`--unset=NAME`, `--`, then assignments followed by the pinned executable.
+Options after assignments, env split-string/chdir forms and unknown environment
+keys deny. Clear and unset operations remain explicit in provenance. Bare tool
+names require the protected PATH mapping; changed/missing PATH requires an
+exact approved absolute executable spelling. Maximum wrapper nesting is four.
+
+`rustup run 1.94.0[-x86_64-unknown-linux-gnu] cargo|rustc|rustdoc ...` and Cargo's
+`+1.94.0[-x86_64-unknown-linux-gnu]` selector are parsed only for the protected
+installed pin. Installation/update switches, repeated selectors and conflicting
+environment selectors deny. Filesystem resolution must also account for rustup
+settings and toolchain-file overrides before claiming completeness.
+
+Cargo build/check/test/clippy/run/bench/doc/install and built-in aliases
+`b`, `c`, `t`, `r`, `d` are build-producing. Test/bench `--no-run` and program
+`-- --list` still require build storage checks. Direct rustc/rustdoc are also
+build-producing. Option names use closed per-action tables; unknown flags,
+artifact-dir, Cargo rustc/rustdoc passthrough, browser opening, rustc `-o FILE`,
+response files, explicit emit filenames, compiler wrappers and opaque linker,
+incremental or save-temp flags are unsupported. Build classification is not
+candidate completeness: source/configuration/output resolution is still needed.
+
+The read-only allowlist is exact Cargo/rustc/rustdoc `--version`/`-V` and
+`--help`/`-h`, plus built-in Cargo action `--help`/`-h` without configuration
+overrides. Short-alias help is excluded because repository configuration can
+replace those aliases. Clippy help is excluded because Clippy is an external
+subcommand. `cargo help` is excluded because it can launch another program.
+Metadata/fetch/update/clean/fmt, custom aliases, cargo extensions, make/just/nix,
+trunk/wasm-pack, namespace/remote wrappers and arbitrary interpreters are not
+read-only by default. Rustup itself is accepted only as the explicit wrapper.

@@ -24,6 +24,63 @@ pub struct RustExecution {
     identities: BTreeMap<String, Vec<u8>>,
 }
 
+#[cfg(test)]
+pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
+    let directory = tempfile::tempdir().unwrap();
+    let executables: BTreeMap<_, _> = [
+        "client",
+        "shell",
+        "env",
+        "cargo",
+        "rustc",
+        "rustdoc",
+        "rustup",
+        "cargo-clippy",
+        "clippy-driver",
+    ]
+    .into_iter()
+    .map(|name| {
+        let path = directory.path().join(name);
+        std::fs::write(&path, "NONEXECUTION_SENTINEL").unwrap();
+        (name.to_owned(), path)
+    })
+    .collect();
+    let environment = BTreeMap::from([
+        (
+            "PATH".to_owned(),
+            directory.path().to_str().unwrap().to_owned(),
+        ),
+        ("HOME".to_owned(), "/sealed/home".to_owned()),
+        ("CARGO_HOME".to_owned(), "/sealed/cargo-home".to_owned()),
+        ("RUSTUP_HOME".to_owned(), "/sealed/rustup".to_owned()),
+        ("TMPDIR".to_owned(), "/sealed/tmp".to_owned()),
+    ]);
+    (
+        RustExecution {
+            raw: RawRustExecution {
+                contract: "managed-rust-execution-v1".to_owned(),
+                client_pin: "codex-cli-0.158.0".to_owned(),
+                semantics: "rust-cargo-1.94.0-linux-v1".to_owned(),
+                shell_mode: "posix-literal-no-startup-v1".to_owned(),
+                locality: "same-mount-namespace-and-root-v1".to_owned(),
+                tool_resolution: "sealed-executables-v1".to_owned(),
+                inherited_environment: "sealed-environment-v1".to_owned(),
+                client_ancestor: 3,
+                boot_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                namespace_device: 1,
+                namespace_inode: 1,
+                root_device: 1,
+                root_inode: 1,
+                toolchain: "1.94.0-x86_64-unknown-linux-gnu".to_owned(),
+                executables,
+                environment,
+            },
+            identities: BTreeMap::new(),
+        },
+        directory,
+    )
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRustExecution {
@@ -273,6 +330,15 @@ impl RawRustExecution {
 }
 
 impl RustExecution {
+    /// Whether a client-specified shell is the exact protected executable.
+    #[must_use]
+    pub fn accepts_shell(&self, path: &Path) -> bool {
+        self.raw
+            .executables
+            .get("shell")
+            .is_some_and(|shell| path == shell)
+    }
+
     /// Verify the managed client's observable process identity and locality.
     /// The protected launcher declaration supplies the sealed shell semantics;
     /// ambient hook variables and the event cannot supply that declaration.
