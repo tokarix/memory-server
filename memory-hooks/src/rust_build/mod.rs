@@ -6,6 +6,7 @@ pub mod environment;
 pub mod files;
 pub mod manifest;
 pub mod paths;
+pub mod toolchain;
 
 /// Fixed failure categories. No variant can retain untrusted data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

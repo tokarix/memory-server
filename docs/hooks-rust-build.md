@@ -7,7 +7,7 @@ Host v6 does not require `storage_execution`; a container exception still
 requires the separately protected isolated-container attestation.
 
 The execution declaration pins Codex CLI 0.158.0 or Claude Code 2.1.92,
-Rust/Cargo 1.94.0 on x86_64 Linux, and one already installed toolchain. It
+Rust/Cargo 1.94.0, rustup 1.28.2 on x86_64 Linux, and one already installed toolchain. It
 requires the existing synchronous delivery, gate and delegation declarations.
 This does not expand the delegated lifecycle capabilities of either client.
 Existing v1-v5 parsing and normalized fingerprints remain unchanged.
@@ -213,3 +213,62 @@ build outputs or execution locality, and remains disconnected from the gate.
 The [Cargo workspace reference](https://doc.rust-lang.org/cargo/reference/workspaces.html)
 and [dependency reference](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html)
 describe the source semantics underlying the tested Cargo 1.94 subset.
+
+## Rustup selector evidence library
+
+The standalone selector stage uses the parsed invocation, proven physical
+execution cwd, and Cargo's separately computed child environment. It reads
+`RUSTUP_HOME/settings.toml` (or `HOME/.rustup/settings.toml`) without invoking
+rustup. Missing settings deny rather than initializing a file. Settings must
+use metadata version `12`, the pinned host triple if specified, and
+`auto_install = "disable"`. Explicit self-update settings must be `disable`.
+Unknown settings and custom/path toolchains deny. This first subset requires
+confirmed absence of `/etc/rustup/settings.toml`; operator fallback configuration
+remains unsupported. The v6 declaration's required `rustup_semantics` pin enters
+its normalized fingerprint alongside the existing executable content identities.
+
+| Selector | Precedence and agreement |
+| --- | --- |
+| Explicit Cargo `+TOOLCHAIN` or `rustup run` | Highest; the grammar has already checked the protected release |
+| Effective `RUSTUP_TOOLCHAIN` | Next; Cargo child selectors must also agree with the protected release |
+| Directory settings override or toolchain file | Search cwd ancestors from nearest to farthest; the directory override wins a file at the same level |
+| `rust-toolchain` versus `rust-toolchain.toml` | Read both and retain both observations; extensionless wins when present |
+| Default toolchain | Used only when no higher selector exists; it must identify the protected release |
+
+The nearest directory/file selector must agree even when an explicit or
+environment selector shadows it. This stricter agreement rule deliberately
+denies conflicting repository pins. Farther shadowed files are observed without
+interpreting them. Toolchain files accept the legacy one-line ASCII name only
+for `rust-toolchain`, or a TOML `[toolchain]` with `channel` and optional empty
+`components`/`targets`. Nonempty component/target lists, toolchain profiles and
+custom paths deny because they can request installation or introduce unpinned
+tools. Only `1.94.0` and its exact protected host-qualified spelling are accepted.
+
+Selector inputs and both missing filename alternatives join the existing shared
+read set. Physical spelling, regular-file rules, directory evidence, the
+64-input/byte/depth budgets and the operation deadline apply. Rechecks detect new
+nearer files, changed settings and installed-directory replacement. Cargo child
+`HOME` or `RUSTUP_HOME` changes deny rather than silently selecting a second
+compiler context. A read-provider fixture cannot supply execution authority.
+
+The installed tree must contain real `bin` and `lib` directories. Its existence
+is only selector evidence: a separate trusted-path check hashes installed
+Cargo/rustc/rustdoc/Clippy executables and compares their identities with the
+protected executable inventory. Missing, substituted, proxy or differently
+installed executables fail that check. This unit has no separate proxy-to-real
+inventory and does not yet establish a supported proxy execution contract;
+grammar recognition of `+TOOLCHAIN` alone cannot authorize it. The later gate
+must combine installed identity checks with process locality, exact binding,
+complete candidates, final read-set/deadline rechecks and locked audit completion.
+No live storage-enforcement claim follows from this library stage.
+
+Hand-authored tests cover selector order/proximity, filename preference,
+conflicting pins, additions, settings/fallback exclusions, child changes, missing
+installation, read-set replacement/bounds/deadlines, fixed redacted failures and
+nonexecution sentinels. Trusted regular executable fixtures prove matching
+secondary identities pass, replacement denies and no executable is launched.
+These rules follow the
+[rustup 1.28.2 selector implementation](https://github.com/rust-lang/rustup/blob/1.28.2/src/config.rs)
+and [settings format](https://github.com/rust-lang/rustup/blob/1.28.2/src/settings.rs),
+with the conservative exclusions described above. They do not remove the
+same-UID limitations or the race after the final point-in-time check.

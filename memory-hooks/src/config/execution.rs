@@ -25,6 +25,57 @@ pub struct RustExecution {
 }
 
 #[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use super::{executable_stamp, literal_fixture};
+
+    #[test]
+    fn installed_secondary_identity_rechecks_never_execute_tools() {
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, PathBuf::from);
+        let directory = tempfile::tempdir_in(base).unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let (mut contract, _parser_directory) = literal_fixture();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for name in ["cargo", "rustc", "rustdoc", "cargo-clippy", "clippy-driver"] {
+            let path = bin.join(name);
+            fs::write(&path, "#!/bin/sh\nexit 99\nNONEXECUTION_SENTINEL\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            contract
+                .raw
+                .executables
+                .insert(name.to_owned(), path.clone());
+            contract
+                .identities
+                .insert(name.to_owned(), executable_stamp(&path, deadline).unwrap());
+        }
+        contract
+            .verify_installed_toolchain(directory.path(), deadline)
+            .unwrap();
+        assert!(
+            contract
+                .verify_installed_toolchain(
+                    directory.path(),
+                    Instant::now().checked_sub(Duration::from_secs(1)).unwrap()
+                )
+                .is_err()
+        );
+        fs::write(bin.join("rustc"), "REPLACED_SECRET_SENTINEL").unwrap();
+        let error = contract
+            .verify_installed_toolchain(directory.path(), deadline)
+            .unwrap_err();
+        assert!(!format!("{error:?}").contains("REPLACED_SECRET_SENTINEL"));
+        assert!(!directory.path().join("marker").exists());
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let executables: BTreeMap<_, _> = [
@@ -61,6 +112,7 @@ pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
                 contract: "managed-rust-execution-v1".to_owned(),
                 client_pin: "codex-cli-0.158.0".to_owned(),
                 semantics: "rust-cargo-1.94.0-linux-v1".to_owned(),
+                rustup_semantics: "rustup-1.28.2-linux-v1".to_owned(),
                 shell_mode: "posix-literal-no-startup-v1".to_owned(),
                 locality: "same-mount-namespace-and-root-v1".to_owned(),
                 tool_resolution: "sealed-executables-v1".to_owned(),
@@ -87,6 +139,7 @@ pub(super) struct RawRustExecution {
     contract: String,
     client_pin: String,
     semantics: String,
+    rustup_semantics: String,
     shell_mode: String,
     locality: String,
     tool_resolution: String,
@@ -276,6 +329,7 @@ impl RawRustExecution {
         if self.contract != "managed-rust-execution-v1"
             || self.client_pin != client
             || self.semantics != "rust-cargo-1.94.0-linux-v1"
+            || self.rustup_semantics != "rustup-1.28.2-linux-v1"
             || self.shell_mode != "posix-literal-no-startup-v1"
             || self.locality != "same-mount-namespace-and-root-v1"
             || self.tool_resolution != "sealed-executables-v1"
@@ -450,6 +504,23 @@ impl RustExecution {
         Ok(())
     }
 
+    /// Verify that rustup's installed secondary tools have the protected identities.
+    /// This reads trusted regular files; no proxy or compiler is executed.
+    ///
+    /// # Errors
+    /// Missing tools, proxy/replacement identities and late evidence deny.
+    pub fn verify_installed_toolchain(&self, directory: &Path, deadline: Instant) -> Result<()> {
+        valid_path(directory)?;
+        for name in ["cargo", "rustc", "rustdoc", "cargo-clippy", "clippy-driver"] {
+            let path = directory.join("bin").join(name);
+            valid_path(&path)?;
+            if self.identities.get(name) != Some(&executable_stamp(&path, deadline)?) {
+                return Err(Error::ConfigUntrusted("Rust installed executable mismatch"));
+            }
+        }
+        Ok(())
+    }
+
     /// Fixed grammar/semantic version, suitable for safe audit metadata.
     #[must_use]
     pub const fn version(&self) -> u8 {
@@ -495,6 +566,7 @@ impl RustExecution {
         for value in [
             &self.raw.client_pin,
             &self.raw.semantics,
+            &self.raw.rustup_semantics,
             &self.raw.shell_mode,
             &self.raw.locality,
             &self.raw.tool_resolution,

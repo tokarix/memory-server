@@ -67,6 +67,7 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
     for altered in [
         source.replace("client_ancestor = 3", "client_ancestor = 0"),
         source.replace("rust-cargo-1.94.0-linux-v1", "nightly"),
+        source.replace("rustup-1.28.2-linux-v1", "rustup-unknown"),
         source.replace("posix-literal-no-startup-v1", "interactive"),
         source.replace("schema_version = 6", "schema_version = 4"),
         source.replace("HOME =", "BASH_ENV ="),
