@@ -5,7 +5,7 @@ use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +42,129 @@ pub struct ResolvedBinding {
     context: ResolutionContext,
     fingerprint: String,
     storage_execution: Option<crate::storage::attestation::StorageExecution>,
+}
+
+/// Decision-local handoff for one literal execution cwd in the callback scope.
+/// It retains private directory evidence and its original operation deadline.
+/// Constructing it never changes process cwd or launches the proposed command.
+pub struct CheckedExecution {
+    callback: ResolvedBinding,
+    execution: ResolvedBinding,
+    literal: Option<PathBuf>,
+    callback_directory: (u64, u64),
+    execution_directory: (u64, u64),
+    worktree_directory: (u64, u64),
+    deadline: Instant,
+}
+
+fn execution_tick(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(Error::IdentityInvalid("execution deadline"));
+    }
+    Ok(())
+}
+
+fn directory_identity(path: &Path, deadline: Instant) -> Result<(u64, u64)> {
+    execution_tick(deadline)?;
+    let metadata = fs::metadata(path).map_err(|_| Error::IdentityInvalid("execution directory"))?;
+    if !metadata.is_dir() {
+        return Err(Error::IdentityInvalid("execution directory"));
+    }
+    execution_tick(deadline)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn same_scope(left: &ResolvedBinding, right: &ResolvedBinding) -> bool {
+    left.identity == right.identity
+        && left.worktree_root == right.worktree_root
+        && left.project == right.project
+        && left.context == right.context
+        && left.fingerprint == right.fingerprint
+}
+
+fn execution_cwd(callback: &Path, literal: Option<&Path>, deadline: Instant) -> Result<PathBuf> {
+    execution_tick(deadline)?;
+    let Some(literal) = literal else {
+        return Ok(callback.to_owned());
+    };
+    let value = literal
+        .to_str()
+        .ok_or(Error::IdentityInvalid("execution cwd encoding"))?;
+    if value.is_empty() || value.len() > limits::PATH_BYTES || value.contains('\0') {
+        return Err(Error::IdentityInvalid("execution cwd bounds"));
+    }
+    let physical_spelling = callback.join(literal);
+    if !physical_spelling.is_absolute() || path_bytes(&physical_spelling).len() > limits::PATH_BYTES
+    {
+        return Err(Error::IdentityInvalid("execution cwd bounds"));
+    }
+    // The managed shell's logical cd and the client's physical workdir must
+    // agree. Never silently select one interpretation of symlink/.. paths.
+    // This normalization is only an agreement check, never an output-path join.
+    let mut logical = PathBuf::new();
+    let mut inspected = PathBuf::new();
+    for component in physical_spelling.components() {
+        execution_tick(deadline)?;
+        inspected.push(component.as_os_str());
+        if matches!(component, Component::Normal(_)) {
+            let metadata = fs::symlink_metadata(&inspected)
+                .map_err(|_| Error::IdentityInvalid("execution cwd component"))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(Error::IdentityInvalid("execution cwd semantics"));
+            }
+        }
+        match component {
+            Component::RootDir => logical.push("/"),
+            Component::Normal(part) => logical.push(part),
+            Component::ParentDir => {
+                logical.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) => return Err(Error::IdentityInvalid("execution cwd prefix")),
+        }
+    }
+    let physical = fs::canonicalize(&physical_spelling)
+        .map_err(|_| Error::IdentityInvalid("execution cwd"))?;
+    execution_tick(deadline)?;
+    if physical != logical || !physical.is_dir() {
+        return Err(Error::IdentityInvalid("execution cwd semantics"));
+    }
+    Ok(physical)
+}
+
+impl CheckedExecution {
+    /// Original callback binding; session and claim identity remain anchored here.
+    #[must_use]
+    pub const fn callback(&self) -> &ResolvedBinding {
+        &self.callback
+    }
+
+    /// Checked effective execution binding, with exactly the callback's scope.
+    #[must_use]
+    pub const fn binding(&self) -> &ResolvedBinding {
+        &self.execution
+    }
+
+    /// Recheck cwd semantics, exact scope and directory identities before finish.
+    /// The supplied config must still have the callback's protected fingerprint.
+    /// No deadline extension, policy selection or process cwd mutation occurs.
+    ///
+    /// # Errors
+    /// Changed binding, replacement, new nested repository, failed or late reads
+    /// and changed literal-cwd resolution deny using fixed safe reasons.
+    pub fn recheck(&self, config: &TrustedHooksConfig) -> Result<()> {
+        let current =
+            config.resolve_execution(&self.callback, self.literal.as_deref(), self.deadline)?;
+        if !same_scope(&self.execution, &current.execution)
+            || self.execution.effective_cwd != current.execution.effective_cwd
+            || self.callback_directory != current.callback_directory
+            || self.execution_directory != current.execution_directory
+            || self.worktree_directory != current.worktree_directory
+        {
+            return Err(Error::IdentityChanged);
+        }
+        execution_tick(self.deadline)
+    }
 }
 
 #[derive(Serialize)]
@@ -450,12 +573,21 @@ impl TrustedHooksConfig {
     /// # Errors
     /// Returns a stable reason when the location is unmapped, unsafe, or changed.
     pub fn resolve(&self, cwd: &Path) -> Result<ResolvedBinding> {
+        self.resolve_before(cwd, Instant::now() + limits::RESOLVE_DEADLINE)
+    }
+
+    fn resolve_before(&self, cwd: &Path, deadline: Instant) -> Result<ResolvedBinding> {
+        execution_tick(deadline)?;
         valid_path(cwd).map_err(|_| Error::IdentityInvalid("cwd"))?;
         let cwd = fs::canonicalize(cwd).map_err(|_| Error::IdentityInvalid("cwd"))?;
         if !cwd.is_dir() {
             return Err(Error::IdentityInvalid("cwd directory"));
         }
-        let overall = Instant::now();
+        execution_tick(deadline)?;
+        let deadline = deadline.min(Instant::now() + limits::RESOLVE_DEADLINE);
+        let overall = deadline
+            .checked_sub(limits::RESOLVE_DEADLINE)
+            .ok_or(Error::IdentityInvalid("execution deadline"))?;
         if let Some(nearest) = marker_root(&cwd)? {
             let first = facts(self, &cwd, overall)?;
             if first.top != nearest {
@@ -490,6 +622,7 @@ impl TrustedHooksConfig {
             {
                 return Err(Error::IdentityChanged);
             }
+            execution_tick(deadline)?;
             return Ok(ResolvedBinding {
                 identity: RepositoryIdentity::Git(first.common),
                 worktree_root: first.top,
@@ -517,6 +650,7 @@ impl TrustedHooksConfig {
         let BindingIdentity::Directory { root, .. } = &binding.identity else {
             return Err(Error::IdentityInvalid("binding kind"));
         };
+        execution_tick(deadline)?;
         Ok(ResolvedBinding {
             identity: RepositoryIdentity::Directory(root.clone()),
             worktree_root: root.clone(),
@@ -525,6 +659,57 @@ impl TrustedHooksConfig {
             context: binding.context.clone(),
             fingerprint: self.fingerprint.clone(),
             storage_execution: self.storage_execution.clone(),
+        })
+    }
+
+    /// Resolve one literal execution cwd without changing callback authority.
+    /// Only the established hardened Git identity probes may execute; the Rust
+    /// analyzer and proposed invocation are never executed by this handoff.
+    ///
+    /// # Errors
+    /// Cross-binding/worktree/context movement, logical/physical disagreement,
+    /// directory replacement and the shared operation deadline deny.
+    pub fn resolve_execution(
+        &self,
+        callback: &ResolvedBinding,
+        literal: Option<&Path>,
+        deadline: Instant,
+    ) -> Result<CheckedExecution> {
+        execution_tick(deadline)?;
+        if self.fingerprint != callback.fingerprint {
+            return Err(Error::IdentityChanged);
+        }
+        let callback_directory = directory_identity(&callback.effective_cwd, deadline)?;
+        let worktree_directory = directory_identity(&callback.worktree_root, deadline)?;
+        let current_callback = self.resolve_before(&callback.effective_cwd, deadline)?;
+        if !same_scope(callback, &current_callback)
+            || callback.effective_cwd != current_callback.effective_cwd
+        {
+            return Err(Error::IdentityChanged);
+        }
+        let cwd = execution_cwd(&callback.effective_cwd, literal, deadline)?;
+        let execution_directory = directory_identity(&cwd, deadline)?;
+        let execution = if cwd == callback.effective_cwd {
+            current_callback
+        } else {
+            self.resolve_before(&cwd, deadline)?
+        };
+        if !same_scope(callback, &execution)
+            || callback_directory != directory_identity(&callback.effective_cwd, deadline)?
+            || execution_directory != directory_identity(&execution.effective_cwd, deadline)?
+            || worktree_directory != directory_identity(&callback.worktree_root, deadline)?
+        {
+            return Err(Error::IdentityChanged);
+        }
+        execution_tick(deadline)?;
+        Ok(CheckedExecution {
+            callback: callback.clone(),
+            execution,
+            literal: literal.map(Path::to_owned),
+            callback_directory,
+            execution_directory,
+            worktree_directory,
+            deadline,
         })
     }
 }

@@ -272,3 +272,40 @@ These rules follow the
 and [settings format](https://github.com/rust-lang/rustup/blob/1.28.2/src/settings.rs),
 with the conservative exclusions described above. They do not remove the
 same-UID limitations or the race after the final point-in-time check.
+
+## Checked execution cwd handoff
+
+`TrustedHooksConfig::resolve_execution` retains the original callback binding
+and resolves a supported literal cwd independently. Its result supplies a
+private checked execution binding for the later analyzer/storage handoff. It
+never changes the hook process cwd, adopts another project/profile or rewrites
+session identity. Without a literal transition, execution uses the callback's
+canonical cwd.
+Relative and absolute paths with spaces and agreeing parent components are
+accepted only within the exact same repository, checkout/worktree, project,
+context and protected configuration fingerprint. Another linked worktree
+sharing a Git common directory still denies.
+
+The handoff rejects symlink components, missing/non-directory locations,
+logical/physical cwd disagreement, oversized or invalid paths, unmapped or
+newly nested repositories and movement into another approved binding. It
+compares physical canonicalization with the managed shell's logical path only
+for cwd agreement; build-output joins still retain filesystem components for
+the storage evaluator. The established hardened Git identity probes remain
+the sole executable identity-resolution helper. Proposed tools, compilers and
+repository programs are never launched by the handoff or the Rust analyzer.
+
+Callback, execution and worktree directory device/inode evidence is retained
+privately and checked immediately after resolution and during the final
+handoff recheck. Directory replacement, changed literal resolution or a new
+nested repository denies. Every identity probe now respects the remaining
+shared deadline; rechecks cannot reset that deadline. Integration still must
+combine these observations with the exact claim, pack, execution contract,
+input read set, storage report and locked audit completion. The live gate has
+not yet been wired to this API, and same-UID/post-check race limits remain.
+
+Real identity fixtures cover same-cwd/nested/parent transitions, literal spaces,
+unchanged callback cwd, linked-worktree and cross-binding rejection, symlinks,
+new nested repositories, directory/root replacement, changed protected
+fingerprints, input bounds and deadline expiry. These fixture setup commands
+are distinct from analyzed build proposals.
