@@ -638,6 +638,23 @@ fn compiler_option(
     Err(Failure::Unsupported)
 }
 
+/// Validate extra compiler flags without allowing an output destination override.
+pub(super) fn validate_extra_flags(action: BuildAction, flags: &[String]) -> Result<(), Failure> {
+    if flags.len() > limits::EXECUTION_WORDS {
+        return Err(Failure::Limit);
+    }
+    let mut position = 0;
+    while let Some(word) = flags.get(position) {
+        let flag = word.split_once('=').map_or(word.as_str(), |(key, _)| key);
+        if matches!(flag, "--out-dir" | "--emit" | "--output" | "-o") {
+            return Err(Failure::Unsupported);
+        }
+        compiler_option(action, word, flags, &mut position)?;
+        position += 1;
+    }
+    Ok(())
+}
+
 fn validate_options(action: BuildAction, arguments: &[String]) -> Result<(), Failure> {
     let compiler = matches!(action, BuildAction::Rustc | BuildAction::Rustdoc);
     let mut seen_action = compiler;

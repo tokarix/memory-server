@@ -1,7 +1,10 @@
 //! Non-executing, bounded analysis of the protected static Rust build contract.
 
 pub mod command;
+pub mod config;
 pub mod environment;
+pub mod files;
+pub mod paths;
 
 /// Fixed failure categories. No variant can retain untrusted data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,6 +23,14 @@ pub enum Failure {
     Cwd,
     /// Toolchain selectors disagree with the installed protected pin.
     Toolchain,
+    /// A required regular input cannot be read safely.
+    Read,
+    /// Cargo configuration is invalid or outside the modeled contract.
+    Configuration,
+    /// An observed input or absence changed before completion.
+    Changed,
+    /// Cooperative analysis completed after its operation deadline.
+    Deadline,
 }
 
 /// Build-producing actions, including diagnostic forms that still compile.

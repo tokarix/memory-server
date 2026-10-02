@@ -25,6 +25,8 @@ pub enum Origin {
     Assignment,
     /// Literal env wrapper assignment, unset or clear.
     Wrapper,
+    /// Cargo child-process [env], distinct from Cargo's own process inputs.
+    CargoConfig,
 }
 
 /// Validate one literal environment name before treating it as assignment data.
