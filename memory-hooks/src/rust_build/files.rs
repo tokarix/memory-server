@@ -62,6 +62,62 @@ pub trait ReadProvider {
     /// # Errors
     /// Inaccessibility, nonregular inputs and unsupported indirections deny.
     fn observe(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure>;
+
+    /// Observe a bounded directory listing for deterministic member globs.
+    /// The default denies; read-only providers never implicitly gain listing.
+    ///
+    /// # Errors
+    /// Unsupported, changed, inaccessible or ambiguous directory inputs deny.
+    fn directory(&self, _path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
+        Err(Failure::Read)
+    }
+}
+
+/// A private basename and file kind from a retained directory observation.
+pub struct DirectoryEntry {
+    name: String,
+    directory: bool,
+}
+
+impl DirectoryEntry {
+    /// Literal UTF-8 basename; no separators or control characters are accepted.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the entry is an actual directory, rather than a symlink.
+    #[must_use]
+    pub const fn is_directory(&self) -> bool {
+        self.directory
+    }
+}
+
+fn directory_bytes(entries: &[(String, bool)]) -> Result<Vec<u8>, Failure> {
+    if entries.len() > 512 {
+        return Err(Failure::Limit);
+    }
+    let mut bytes = Vec::new();
+    let mut previous = None;
+    for (name, directory) in entries {
+        if name.is_empty()
+            || name.len() > 4096
+            || name.contains('/')
+            || name.chars().any(char::is_control)
+            || matches!(name.as_str(), "." | "..")
+            || previous.is_some_and(|previous: &str| previous >= name.as_str())
+        {
+            return Err(Failure::Read);
+        }
+        bytes.push(if *directory { b'd' } else { b'f' });
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(b'\n');
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(Failure::Limit);
+        }
+        previous = Some(name.as_str());
+    }
+    Ok(bytes)
 }
 
 /// Real Linux provider. Symlink components and pseudo-filesystems are denied.
@@ -87,6 +143,15 @@ fn stamp(stat: &Stat, hash: &mut Sha256) {
         stat.st_ctime.cast_unsigned(),
         stat.st_ctime_nsec,
     ] {
+        hash.update(value.to_be_bytes());
+    }
+}
+
+fn stamp_directory_identity(stat: &Stat, hash: &mut Sha256) {
+    // Path-prefix identity does not include unrelated sibling timestamps.
+    // Relevant absence changes are detected by walking the exact path again;
+    // glob directories additionally retain their full listing and final stamp.
+    for value in [stat.st_dev, stat.st_ino, u64::from(stat.st_mode)] {
         hash.update(value.to_be_bytes());
     }
 }
@@ -127,7 +192,7 @@ impl ReadProvider for Filesystem {
         for _ in 0..128 {
             tick(deadline)?;
             check_filesystem(&current)?;
-            stamp(&fstat(&current).map_err(|_| Failure::Read)?, &mut hash);
+            stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut hash);
             let Some(part) = parts.next() else {
                 return Err(Failure::Read);
             };
@@ -148,6 +213,71 @@ impl ReadProvider for Filesystem {
             }
         }
         Err(Failure::Limit)
+    }
+
+    fn directory(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+        paths::validate(path)?;
+        if !path.is_absolute() {
+            return Err(Failure::Read);
+        }
+        let mut current = File::from(
+            openat(
+                rustix::fs::CWD,
+                "/",
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| Failure::Read)?,
+        );
+        let mut identity = Sha256::new();
+        identity.update(b"memory-hooks-rust-directory-v1\0");
+        for (index, part) in path.components().enumerate() {
+            tick(deadline)?;
+            if index >= 128 {
+                return Err(Failure::Limit);
+            }
+            check_filesystem(&current)?;
+            stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut identity);
+            if matches!(part, Component::RootDir) {
+                continue;
+            }
+            current = File::from(
+                openat(
+                    &current,
+                    part.as_os_str(),
+                    OFlags::PATH | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| Failure::Read)?,
+            );
+        }
+        check_filesystem(&current)?;
+        let before = fstat(&current).map_err(|_| Failure::Read)?;
+        let mut entries = Vec::new();
+        // This kernel fd link refers only to the checked directory descriptor.
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", current.as_raw_fd()))
+            .map_err(|_| Failure::Read)?
+        {
+            tick(deadline)?;
+            let entry = entry.map_err(|_| Failure::Read)?;
+            let name = entry.file_name().into_string().map_err(|_| Failure::Read)?;
+            let directory = entry.file_type().map_err(|_| Failure::Read)?.is_dir();
+            entries.push((name, directory));
+            if entries.len() > 512 {
+                return Err(Failure::Limit);
+            }
+        }
+        entries.sort_unstable();
+        let mut original = Sha256::new();
+        stamp(&before, &mut original);
+        let mut after = Sha256::new();
+        stamp(&fstat(&current).map_err(|_| Failure::Read)?, &mut after);
+        if original.finalize() != after.finalize() {
+            return Err(Failure::Changed);
+        }
+        stamp(&before, &mut identity);
+        tick(deadline)?;
+        Observation::present(directory_bytes(&entries)?, identity.finalize().into())
     }
 }
 
@@ -200,7 +330,7 @@ fn read_regular(
 pub struct ReadSet<'a, P: ReadProvider> {
     provider: &'a P,
     deadline: Instant,
-    files: BTreeMap<PathBuf, Observation>,
+    files: BTreeMap<PathBuf, (bool, Observation)>,
     total_bytes: usize,
 }
 
@@ -221,22 +351,68 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Any read failure, overflow or late completion denies without truncation.
     pub fn read(&mut self, path: &Path) -> Result<Option<&[u8]>, Failure> {
+        self.retain(path, false)
+    }
+
+    /// Retain a directory listing in the same file/byte/deadline budget.
+    /// Directory replacements and new glob matches enter the final recheck.
+    ///
+    /// # Errors
+    /// Missing, nonregular, malformed, unsorted or oversized listings deny.
+    pub fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, Failure> {
+        let bytes = self.retain(path, true)?.ok_or(Failure::Read)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| Failure::Read)?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err(Failure::Read);
+        }
+        if text.lines().count() > 512 {
+            return Err(Failure::Limit);
+        }
+        let entries: Vec<_> = text
+            .lines()
+            .map(|line| {
+                let kind = line.as_bytes().first().ok_or(Failure::Read)?;
+                if !matches!(kind, b'd' | b'f') {
+                    return Err(Failure::Read);
+                }
+                Ok((
+                    line.get(1..).ok_or(Failure::Read)?.to_owned(),
+                    *kind == b'd',
+                ))
+            })
+            .collect::<Result<_, Failure>>()?;
+        directory_bytes(&entries)?;
+        Ok(entries
+            .into_iter()
+            .map(|(name, directory)| DirectoryEntry { name, directory })
+            .collect())
+    }
+
+    fn retain(&mut self, path: &Path, directory: bool) -> Result<Option<&[u8]>, Failure> {
         paths::validate(path)?;
         tick(self.deadline)?;
         if !self.files.contains_key(path) {
             if self.files.len() >= MAX_FILES {
                 return Err(Failure::Limit);
             }
-            let observation = self.provider.observe(path, self.deadline)?;
+            let observation = if directory {
+                self.provider.directory(path, self.deadline)?
+            } else {
+                self.provider.observe(path, self.deadline)?
+            };
             tick(self.deadline)?;
             let count = observation.bytes.as_ref().map_or(0, Vec::len);
             if count > MAX_FILE_BYTES || self.total_bytes + count > MAX_TOTAL_BYTES {
                 return Err(Failure::Limit);
             }
             self.total_bytes += count;
-            self.files.insert(path.to_owned(), observation);
+            self.files.insert(path.to_owned(), (directory, observation));
         }
-        Ok(self.files.get(path).and_then(|item| item.bytes.as_deref()))
+        let (kind, item) = self.files.get(path).ok_or(Failure::Read)?;
+        if *kind != directory {
+            return Err(Failure::Read);
+        }
+        Ok(item.bytes.as_deref())
     }
 
     /// Check the shared deadline during non-I/O configuration processing.
@@ -253,9 +429,14 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Changes, newly created files, replacement, failed reads and lateness deny.
     pub fn recheck(&self) -> Result<(), Failure> {
-        for (path, expected) in &self.files {
+        for (path, (directory, expected)) in &self.files {
             tick(self.deadline)?;
-            if self.provider.observe(path, self.deadline)? != *expected {
+            let observed = if *directory {
+                self.provider.directory(path, self.deadline)?
+            } else {
+                self.provider.observe(path, self.deadline)?
+            };
+            if observed != *expected {
                 return Err(Failure::Changed);
             }
         }
@@ -267,11 +448,12 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(b"memory-hooks-rust-read-set-v1\0");
-        for (path, item) in &self.files {
+        hash.update(b"memory-hooks-rust-read-set-v2\0");
+        for (path, (directory, item)) in &self.files {
             let bytes = path.as_os_str().as_encoded_bytes();
             hash.update(bytes.len().to_be_bytes());
             hash.update(bytes);
+            hash.update([u8::from(*directory)]);
             hash.update(item.identity);
             hash.update([u8::from(item.bytes.is_some())]);
             if let Some(bytes) = &item.bytes {
@@ -296,9 +478,21 @@ pub(super) mod fixtures {
     pub struct Scripted {
         pub files: RefCell<BTreeMap<PathBuf, Observation>>,
         pub calls: RefCell<Vec<PathBuf>>,
+        pub directories: RefCell<BTreeMap<PathBuf, Observation>>,
     }
 
     impl Scripted {
+        pub fn list(&self, path: &str, entries: &[(&str, bool)]) {
+            let mut entries: Vec<_> = entries
+                .iter()
+                .map(|(name, directory)| ((*name).to_owned(), *directory))
+                .collect();
+            entries.sort_unstable();
+            self.directories.borrow_mut().insert(
+                PathBuf::from(path),
+                Observation::present(super::directory_bytes(&entries).unwrap(), [1; 32]).unwrap(),
+            );
+        }
         pub fn put(&self, path: &str, text: &str) {
             self.files.borrow_mut().insert(
                 PathBuf::from(path),
@@ -308,6 +502,14 @@ pub(super) mod fixtures {
     }
 
     impl ReadProvider for Scripted {
+        fn directory(&self, path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
+            self.calls.borrow_mut().push(path.to_owned());
+            self.directories
+                .borrow()
+                .get(path)
+                .cloned()
+                .ok_or(Failure::Read)
+        }
         fn observe(&self, path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
             self.calls.borrow_mut().push(path.to_owned());
             Ok(self
@@ -336,6 +538,75 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn directory_inputs_share_bounds_and_recheck_new_or_replaced_members() {
+        let provider = Scripted::default();
+        provider.list("/work/crates", &[("a", true), ("sentinel", false)]);
+        let mut reads = ReadSet::new(&provider, deadline());
+        let entries = reads.directory(Path::new("/work/crates")).unwrap();
+        assert_eq!(entries[0].name(), "a");
+        assert!(entries[0].is_directory());
+        assert!(!entries[1].is_directory());
+        assert_eq!(reads.read(Path::new("/work/crates")), Err(Failure::Read));
+        reads.recheck().unwrap();
+        provider.list(
+            "/work/crates",
+            &[("a", true), ("new", true), ("sentinel", false)],
+        );
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
+        let mut reads = ReadSet::new(&provider, deadline());
+        for index in 0..MAX_FILES {
+            reads.read(Path::new(&format!("/work/{index}"))).unwrap();
+        }
+        assert!(matches!(
+            reads.directory(Path::new("/work/crates")),
+            Err(Failure::Limit)
+        ));
+        for bytes in [
+            b"db\nda\n".as_slice(),
+            b"da/escape\n",
+            b"sa\n",
+            b"da",
+            b"d..\n",
+        ] {
+            provider.directories.borrow_mut().insert(
+                Path::new("/work/crates").to_owned(),
+                Observation::present(bytes.to_vec(), [0; 32]).unwrap(),
+            );
+            let mut reads = ReadSet::new(&provider, deadline());
+            assert!(matches!(
+                reads.directory(Path::new("/work/crates")),
+                Err(Failure::Read)
+            ));
+        }
+    }
+
+    #[test]
+    fn real_directory_listing_is_bounded_and_never_follows_a_member_symlink() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir(fixture.path().join("a")).unwrap();
+        symlink(fixture.path().join("a"), fixture.path().join("b")).unwrap();
+        let provider = Filesystem;
+        let mut reads = ReadSet::new(&provider, deadline());
+        let entries = reads.directory(fixture.path()).unwrap();
+        assert_eq!(entries[0].name(), "a");
+        assert!(entries[0].is_directory());
+        assert_eq!(entries[1].name(), "b");
+        assert!(!entries[1].is_directory());
+        reads.recheck().unwrap();
+        fs::create_dir(fixture.path().join("new")).unwrap();
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
+        assert!(matches!(
+            provider.directory(&fixture.path().join("b"), deadline()),
+            Err(Failure::Read)
+        ));
+        assert!(matches!(
+            provider.directory(Path::new("/proc/self"), deadline()),
+            Err(Failure::Read)
+        ));
+        assert!(!fixture.path().join("marker").exists());
     }
 
     #[test]
@@ -413,6 +684,8 @@ mod tests {
             Some(b"secret-sentinel".as_slice())
         );
         reads.read(&fixture.path().join("missing/config")).unwrap();
+        reads.recheck().unwrap();
+        fs::write(fixture.path().join("unrelated"), b"unrelated sibling").unwrap();
         reads.recheck().unwrap();
         fs::create_dir(fixture.path().join("missing")).unwrap();
         assert_eq!(reads.recheck(), Err(Failure::Changed));

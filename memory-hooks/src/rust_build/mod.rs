@@ -4,6 +4,7 @@ pub mod command;
 pub mod config;
 pub mod environment;
 pub mod files;
+pub mod manifest;
 pub mod paths;
 
 /// Fixed failure categories. No variant can retain untrusted data.
@@ -27,6 +28,8 @@ pub enum Failure {
     Read,
     /// Cargo configuration is invalid or outside the modeled contract.
     Configuration,
+    /// Source/workspace semantics cannot be resolved with the bounded grammar.
+    Manifest,
     /// An observed input or absence changed before completion.
     Changed,
     /// Cooperative analysis completed after its operation deadline.

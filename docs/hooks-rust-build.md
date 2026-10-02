@@ -165,3 +165,51 @@ workspace/dependency completeness, toolchain selector agreement, locality or a
 complete output inventory. It cannot enforce storage until those checks and
 the evaluator/audit handoff are connected. Rechecks are point-in-time evidence;
 same-UID tampering and the race after the final check remain.
+
+## Local source selection library
+
+The standalone source stage searches execution-cwd ancestors for the selected
+`Cargo.toml`, or reads a literal `--manifest-path` relative to execution cwd.
+That selection does not move ordinary Cargo configuration discovery. Workspace
+roots come from the manifest's `[workspace]`, explicit `package.workspace`, or
+the nearest ancestor workspace. Standalone packages and nested workspaces use
+their own roots; a nested workspace cannot also be an ordinary member of its
+outer workspace in this subset. Policy and callback identity remain external
+prerequisites: source selection cannot change either one.
+
+Root packages, virtual workspaces, `members`, `default-members`, `exclude`,
+implicit in-workspace path-dependency members, exact `--package` names and
+`--workspace` selection are modeled separately. The supported member glob has
+exactly one whole path component `*`, for example `crates/*`. A bounded, sorted
+directory listing provides the matches. Symlink/non-directory matches,
+recursive globs, partial-component patterns, wildcard package selectors and
+package-ID specifications deny. Literal member/dependency path joins preserve
+parent components; physically equivalent aliases that cannot be established
+from retained input evidence remain unsupported.
+
+Normal, build, development, optional and target-specific local dependencies
+form a conservative union of source roots, including external local packages.
+Workspace dependency inheritance uses the workspace root as its path base.
+Missing manifests, cyclic dependencies, duplicate member names, invalid
+defaults, source replacements and unknown execution-related manifest keys
+deny. Registry/git dependencies and artifact dependencies remain unsupported
+in this local-only library; no future downloaded source tree is assumed safe.
+Every workspace member must fit this local-only subset, even if package
+selection excludes it, so automatic membership cannot hide a source path.
+
+Directory observations share the same 64-input, 256-KiB-per-input, 1-MiB-total
+budget and deadline as file observations. Listings contain at most 512 UTF-8
+basenames; unrepresentable or ambiguous names deny. Rechecks cover contents,
+directory identities, new glob matches and newly created nearer manifests.
+The read-set digest is now domain-separated as version 2 and includes the
+input kind so a directory observation cannot substitute for a file read.
+The real provider reads only descriptors for checked directories; it never
+follows glob-member symlinks or launches Cargo, scripts or compiler programs.
+
+The source inventory is stable and private. It supplies the workspace default
+target base and selected package metadata for later output-layout resolution.
+It does not resolve toolchain selectors, profiles, remote caches, concrete
+build outputs or execution locality, and remains disconnected from the gate.
+The [Cargo workspace reference](https://doc.rust-lang.org/cargo/reference/workspaces.html)
+and [dependency reference](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html)
+describe the source semantics underlying the tested Cargo 1.94 subset.
