@@ -1,5 +1,6 @@
 //! Administrative inspection and installation control CLI for managed hooks.
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::path::Path;
 

@@ -136,6 +136,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Convert an I/O error without retaining its potentially path-bearing message.
+#[cfg(target_os = "linux")]
 pub(crate) fn io(operation: &'static str, error: &std::io::Error) -> Error {
     Error::Io(operation, error.raw_os_error())
 }
