@@ -198,6 +198,9 @@ pub struct Selection {
 }
 
 impl Selection {
+    pub(super) fn directory(&self) -> &Path {
+        &self.directory
+    }
     /// Resolve the pinned selector from proven physical execution cwd.
     /// Cargo child environment is checked separately from Cargo's own inputs.
     /// No manifest relocation, rustup discovery or tool execution takes place.

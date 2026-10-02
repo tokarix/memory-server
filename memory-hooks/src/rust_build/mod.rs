@@ -3,6 +3,7 @@
 pub mod command;
 pub mod config;
 pub mod environment;
+pub mod execution;
 pub mod files;
 pub mod manifest;
 pub mod paths;

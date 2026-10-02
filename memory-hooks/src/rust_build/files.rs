@@ -71,6 +71,17 @@ pub trait ReadProvider {
     fn directory(&self, _path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
         Err(Failure::Read)
     }
+
+    /// Probe an exact executable search path without reading or executing it.
+    /// Present evidence means a regular executable file; checked trust/content
+    /// identity remains the protected contract's responsibility. Unsupported
+    /// providers deny, and devices/FIFOs/symlinks are never treated as absence.
+    ///
+    /// # Errors
+    /// Unknown path components, inaccessibility and unsupported file kinds deny.
+    fn executable(&self, _path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
+        Err(Failure::Read)
+    }
 }
 
 /// A private basename and file kind from a retained directory observation.
@@ -169,116 +180,138 @@ fn check_filesystem(file: &File) -> Result<(), Failure> {
 
 impl ReadProvider for Filesystem {
     fn observe(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
-        paths::validate(path)?;
-        if !path.is_absolute() || path.file_name().is_none() {
-            return Err(Failure::Read);
-        }
-        tick(deadline)?;
-        let mut current = File::from(
-            openat(
-                rustix::fs::CWD,
-                "/",
-                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| Failure::Read)?,
-        );
-        let mut hash = Sha256::new();
-        hash.update(b"memory-hooks-rust-input-identity-v1\0");
-        let mut parts = path
-            .components()
-            .filter(|part| !matches!(part, Component::RootDir))
-            .peekable();
-        for _ in 0..128 {
-            tick(deadline)?;
-            check_filesystem(&current)?;
-            stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut hash);
-            let Some(part) = parts.next() else {
-                return Err(Failure::Read);
-            };
-            let final_file = parts.peek().is_none();
-            let mut flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-            if !final_file {
-                flags |= OFlags::DIRECTORY;
-            }
-            current = match openat(&current, part.as_os_str(), flags, Mode::empty()) {
-                Ok(descriptor) => File::from(descriptor),
-                Err(rustix::io::Errno::NOENT) => {
-                    return Ok(Observation::missing(hash.finalize().into()));
-                }
-                Err(_) => return Err(Failure::Read),
-            };
-            if final_file {
-                return read_regular(&current, hash, deadline);
-            }
-        }
-        Err(Failure::Limit)
+        observe_file(path, deadline, false)
+    }
+
+    fn executable(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+        observe_file(path, deadline, true)
     }
 
     fn directory(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
-        paths::validate(path)?;
-        if !path.is_absolute() {
+        observe_directory(path, deadline)
+    }
+}
+
+fn observe_file(path: &Path, deadline: Instant, executable: bool) -> Result<Observation, Failure> {
+    paths::validate(path)?;
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(Failure::Read);
+    }
+    tick(deadline)?;
+    let mut current = File::from(
+        openat(
+            rustix::fs::CWD,
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| Failure::Read)?,
+    );
+    let mut hash = Sha256::new();
+    hash.update(b"memory-hooks-rust-input-identity-v1\0");
+    let mut parts = path
+        .components()
+        .filter(|part| !matches!(part, Component::RootDir))
+        .peekable();
+    for _ in 0..128 {
+        tick(deadline)?;
+        check_filesystem(&current)?;
+        stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut hash);
+        let Some(part) = parts.next() else {
             return Err(Failure::Read);
+        };
+        let final_file = parts.peek().is_none();
+        let mut flags = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        if !final_file {
+            flags |= OFlags::DIRECTORY;
         }
-        let mut current = File::from(
+        current = match openat(&current, part.as_os_str(), flags, Mode::empty()) {
+            Ok(descriptor) => File::from(descriptor),
+            Err(rustix::io::Errno::NOENT) => {
+                return Ok(Observation::missing(hash.finalize().into()));
+            }
+            Err(_) => return Err(Failure::Read),
+        };
+        if final_file {
+            if executable {
+                check_filesystem(&current)?;
+                let stat = fstat(&current).map_err(|_| Failure::Read)?;
+                if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_mode & 0o111 == 0 {
+                    return Err(Failure::Executable);
+                }
+                stamp(&stat, &mut hash);
+                tick(deadline)?;
+                return Observation::present(Vec::new(), hash.finalize().into());
+            }
+            return read_regular(&current, hash, deadline);
+        }
+    }
+    Err(Failure::Limit)
+}
+
+fn observe_directory(path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+    paths::validate(path)?;
+    if !path.is_absolute() {
+        return Err(Failure::Read);
+    }
+    let mut current = File::from(
+        openat(
+            rustix::fs::CWD,
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| Failure::Read)?,
+    );
+    let mut identity = Sha256::new();
+    identity.update(b"memory-hooks-rust-directory-v1\0");
+    for (index, part) in path.components().enumerate() {
+        tick(deadline)?;
+        if index >= 128 {
+            return Err(Failure::Limit);
+        }
+        check_filesystem(&current)?;
+        stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut identity);
+        if matches!(part, Component::RootDir) {
+            continue;
+        }
+        current = File::from(
             openat(
-                rustix::fs::CWD,
-                "/",
-                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                &current,
+                part.as_os_str(),
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
                 Mode::empty(),
             )
             .map_err(|_| Failure::Read)?,
         );
-        let mut identity = Sha256::new();
-        identity.update(b"memory-hooks-rust-directory-v1\0");
-        for (index, part) in path.components().enumerate() {
-            tick(deadline)?;
-            if index >= 128 {
-                return Err(Failure::Limit);
-            }
-            check_filesystem(&current)?;
-            stamp_directory_identity(&fstat(&current).map_err(|_| Failure::Read)?, &mut identity);
-            if matches!(part, Component::RootDir) {
-                continue;
-            }
-            current = File::from(
-                openat(
-                    &current,
-                    part.as_os_str(),
-                    OFlags::PATH | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| Failure::Read)?,
-            );
-        }
-        check_filesystem(&current)?;
-        let before = fstat(&current).map_err(|_| Failure::Read)?;
-        let mut entries = Vec::new();
-        // This kernel fd link refers only to the checked directory descriptor.
-        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", current.as_raw_fd()))
-            .map_err(|_| Failure::Read)?
-        {
-            tick(deadline)?;
-            let entry = entry.map_err(|_| Failure::Read)?;
-            let name = entry.file_name().into_string().map_err(|_| Failure::Read)?;
-            let directory = entry.file_type().map_err(|_| Failure::Read)?.is_dir();
-            entries.push((name, directory));
-            if entries.len() > 512 {
-                return Err(Failure::Limit);
-            }
-        }
-        entries.sort_unstable();
-        let mut original = Sha256::new();
-        stamp(&before, &mut original);
-        let mut after = Sha256::new();
-        stamp(&fstat(&current).map_err(|_| Failure::Read)?, &mut after);
-        if original.finalize() != after.finalize() {
-            return Err(Failure::Changed);
-        }
-        stamp(&before, &mut identity);
-        tick(deadline)?;
-        Observation::present(directory_bytes(&entries)?, identity.finalize().into())
     }
+    check_filesystem(&current)?;
+    let before = fstat(&current).map_err(|_| Failure::Read)?;
+    let mut entries = Vec::new();
+    // This kernel fd link refers only to the checked directory descriptor.
+    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", current.as_raw_fd()))
+        .map_err(|_| Failure::Read)?
+    {
+        tick(deadline)?;
+        let entry = entry.map_err(|_| Failure::Read)?;
+        let name = entry.file_name().into_string().map_err(|_| Failure::Read)?;
+        let directory = entry.file_type().map_err(|_| Failure::Read)?.is_dir();
+        entries.push((name, directory));
+        if entries.len() > 512 {
+            return Err(Failure::Limit);
+        }
+    }
+    entries.sort_unstable();
+    let mut original = Sha256::new();
+    stamp(&before, &mut original);
+    let mut after = Sha256::new();
+    stamp(&fstat(&current).map_err(|_| Failure::Read)?, &mut after);
+    if original.finalize() != after.finalize() {
+        return Err(Failure::Changed);
+    }
+    stamp(&before, &mut identity);
+    tick(deadline)?;
+    Observation::present(directory_bytes(&entries)?, identity.finalize().into())
 }
 
 fn read_regular(
@@ -330,8 +363,15 @@ fn read_regular(
 pub struct ReadSet<'a, P: ReadProvider> {
     provider: &'a P,
     deadline: Instant,
-    files: BTreeMap<PathBuf, (bool, Observation)>,
+    files: BTreeMap<PathBuf, (ReadKind, Observation)>,
     total_bytes: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReadKind {
+    File,
+    Directory,
+    Executable,
 }
 
 impl<'a, P: ReadProvider> ReadSet<'a, P> {
@@ -351,7 +391,7 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Any read failure, overflow or late completion denies without truncation.
     pub fn read(&mut self, path: &Path) -> Result<Option<&[u8]>, Failure> {
-        self.retain(path, false)
+        self.retain(path, ReadKind::File)
     }
 
     /// Retain a directory listing in the same file/byte/deadline budget.
@@ -360,7 +400,9 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Missing, nonregular, malformed, unsorted or oversized listings deny.
     pub fn directory(&mut self, path: &Path) -> Result<Vec<DirectoryEntry>, Failure> {
-        let bytes = self.retain(path, true)?.ok_or(Failure::Read)?;
+        let bytes = self
+            .retain(path, ReadKind::Directory)?
+            .ok_or(Failure::Read)?;
         let text = std::str::from_utf8(bytes).map_err(|_| Failure::Read)?;
         if !text.is_empty() && !text.ends_with('\n') {
             return Err(Failure::Read);
@@ -388,17 +430,25 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
             .collect())
     }
 
-    fn retain(&mut self, path: &Path, directory: bool) -> Result<Option<&[u8]>, Failure> {
+    /// Retain present/absent executable search evidence in the shared budget.
+    ///
+    /// # Errors
+    /// Failed probes, changed read kinds, overflow and late completion deny.
+    pub fn executable(&mut self, path: &Path) -> Result<bool, Failure> {
+        Ok(self.retain(path, ReadKind::Executable)?.is_some())
+    }
+
+    fn retain(&mut self, path: &Path, kind: ReadKind) -> Result<Option<&[u8]>, Failure> {
         paths::validate(path)?;
         tick(self.deadline)?;
         if !self.files.contains_key(path) {
             if self.files.len() >= MAX_FILES {
                 return Err(Failure::Limit);
             }
-            let observation = if directory {
-                self.provider.directory(path, self.deadline)?
-            } else {
-                self.provider.observe(path, self.deadline)?
+            let observation = match kind {
+                ReadKind::Directory => self.provider.directory(path, self.deadline)?,
+                ReadKind::File => self.provider.observe(path, self.deadline)?,
+                ReadKind::Executable => self.provider.executable(path, self.deadline)?,
             };
             tick(self.deadline)?;
             let count = observation.bytes.as_ref().map_or(0, Vec::len);
@@ -406,10 +456,10 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
                 return Err(Failure::Limit);
             }
             self.total_bytes += count;
-            self.files.insert(path.to_owned(), (directory, observation));
+            self.files.insert(path.to_owned(), (kind, observation));
         }
-        let (kind, item) = self.files.get(path).ok_or(Failure::Read)?;
-        if *kind != directory {
+        let (observed_kind, item) = self.files.get(path).ok_or(Failure::Read)?;
+        if *observed_kind != kind {
             return Err(Failure::Read);
         }
         Ok(item.bytes.as_deref())
@@ -429,12 +479,12 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Changes, newly created files, replacement, failed reads and lateness deny.
     pub fn recheck(&self) -> Result<(), Failure> {
-        for (path, (directory, expected)) in &self.files {
+        for (path, (kind, expected)) in &self.files {
             tick(self.deadline)?;
-            let observed = if *directory {
-                self.provider.directory(path, self.deadline)?
-            } else {
-                self.provider.observe(path, self.deadline)?
+            let observed = match kind {
+                ReadKind::Directory => self.provider.directory(path, self.deadline)?,
+                ReadKind::File => self.provider.observe(path, self.deadline)?,
+                ReadKind::Executable => self.provider.executable(path, self.deadline)?,
             };
             if observed != *expected {
                 return Err(Failure::Changed);
@@ -448,12 +498,16 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(b"memory-hooks-rust-read-set-v2\0");
-        for (path, (directory, item)) in &self.files {
+        hash.update(b"memory-hooks-rust-read-set-v3\0");
+        for (path, (kind, item)) in &self.files {
             let bytes = path.as_os_str().as_encoded_bytes();
             hash.update(bytes.len().to_be_bytes());
             hash.update(bytes);
-            hash.update([u8::from(*directory)]);
+            hash.update([match kind {
+                ReadKind::File => 0,
+                ReadKind::Directory => 1,
+                ReadKind::Executable => 2,
+            }]);
             hash.update(item.identity);
             hash.update([u8::from(item.bytes.is_some())]);
             if let Some(bytes) = &item.bytes {
@@ -502,6 +556,9 @@ pub(super) mod fixtures {
     }
 
     impl ReadProvider for Scripted {
+        fn executable(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+            self.observe(path, deadline)
+        }
         fn directory(&self, path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
             self.calls.borrow_mut().push(path.to_owned());
             self.directories
@@ -538,6 +595,49 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn executable_probe_is_metadata_only_bounded_and_rechecks_absence() {
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        let directory = tempfile::tempdir_in(base).unwrap();
+        let executable = directory.path().join("compiler");
+        fs::write(&executable, vec![b'X'; MAX_FILE_BYTES + 1]).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut reads = ReadSet::new(&Filesystem, deadline());
+        assert!(reads.executable(&executable).unwrap());
+        reads.recheck().unwrap();
+        // Probe never reads the oversized file as config or launches it.
+        assert_eq!(
+            Filesystem.observe(&executable, deadline()).err(),
+            Some(Failure::Limit)
+        );
+        assert!(!directory.path().join("marker").exists());
+        let absent = directory.path().join("earlier-compiler");
+        assert!(!reads.executable(&absent).unwrap());
+        fs::write(&absent, "SECRET_SENTINEL").unwrap();
+        fs::set_permissions(&absent, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
+        for (name, mode) in [("plain", 0o600), ("fifo", 0o700)] {
+            let path = directory.path().join(name);
+            if name == "fifo" {
+                mkfifoat(rustix::fs::CWD, &path, Mode::from_bits_truncate(mode)).unwrap();
+            } else {
+                fs::write(&path, "SECRET_SENTINEL").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            }
+            assert!(Filesystem.executable(&path, deadline()).is_err());
+        }
+        let alias = directory.path().join("alias");
+        symlink(&executable, &alias).unwrap();
+        assert!(Filesystem.executable(&alias, deadline()).is_err());
+        assert!(
+            Filesystem
+                .executable(&directory.path().join("alias/../compiler"), deadline())
+                .is_err()
+        );
     }
 
     #[test]

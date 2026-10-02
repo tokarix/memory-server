@@ -32,6 +32,15 @@ pub struct Invocation {
     cwd: Option<PathBuf>,
     environment: Environment,
     explicit_toolchain: bool,
+    entries: Vec<Entry>,
+    rustup_run: bool,
+}
+
+/// Private entrypoint spelling and process environment at its wrapper level.
+pub(super) struct Entry {
+    pub name: String,
+    pub word: String,
+    pub environment: Environment,
 }
 
 impl Invocation {
@@ -64,6 +73,12 @@ impl Invocation {
     #[must_use]
     pub const fn explicit_toolchain(&self) -> bool {
         self.explicit_toolchain
+    }
+    pub(super) fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+    pub(super) const fn rustup_run(&self) -> bool {
+        self.rustup_run
     }
 }
 
@@ -290,19 +305,11 @@ fn toolchain(contract: &RustExecution, word: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Parse one fully consumed literal invocation without executing any program.
-/// This classifies actions only; it never claims candidate completeness.
-///
-/// # Errors
-/// Unsupported syntax, wrappers, tool selectors and actions fail conservatively.
-pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocation, Failure> {
-    let (words, cwd) = literal_words(input)?;
-    if input
-        .shell()
-        .is_some_and(|shell| !contract.accepts_shell(shell))
-    {
-        return Err(Failure::Executable);
-    }
+fn initial_environment(
+    input: &ExecutionInput,
+    words: &[Word],
+    contract: &RustExecution,
+) -> Result<(Environment, usize), Failure> {
     let mut environment = Environment::inherited(contract.environment())?;
     for (key, value) in input.environment() {
         environment.set(key, value.as_deref(), Origin::Client)?;
@@ -316,11 +323,45 @@ pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocat
             break;
         }
     }
+    Ok((environment, position))
+}
+
+/// Parse one fully consumed literal invocation without executing any program.
+/// This classifies actions only; it never claims candidate completeness.
+///
+/// # Errors
+/// Unsupported syntax, wrappers, tool selectors and actions fail conservatively.
+pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocation, Failure> {
+    let (words, cwd) = literal_words(input)?;
+    if input
+        .shell()
+        .is_some_and(|shell| !contract.accepts_shell(shell))
+    {
+        return Err(Failure::Executable);
+    }
+    let (mut environment, mut position) = initial_environment(input, &words, contract)?;
     let mut wrappers = 0;
     let mut explicit_toolchain = false;
+    let mut entries = Vec::new();
+    let mut rustup_run = false;
     let tool = loop {
         let word = words.get(position).ok_or(Failure::Syntax)?;
+        if rustup_run {
+            let tool = match word.value.as_str() {
+                "cargo" => "cargo",
+                "rustc" => "rustc",
+                "rustdoc" => "rustdoc",
+                _ => return Err(Failure::Unsupported),
+            };
+            position += 1;
+            break tool;
+        }
         let tool = selected_tool(contract, &word.value, &environment)?;
+        entries.push(Entry {
+            name: tool.to_owned(),
+            word: word.value.clone(),
+            environment: environment.clone(),
+        });
         if !matches!(tool, "env" | "rustup") {
             position += 1;
             break tool;
@@ -345,11 +386,9 @@ pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocat
             )?;
             position += 3;
             explicit_toolchain = true;
+            rustup_run = true;
             let selected = words.get(position).ok_or(Failure::Syntax)?;
-            if !matches!(
-                selected_tool(contract, &selected.value, &environment)?,
-                "cargo" | "rustc" | "rustdoc"
-            ) {
+            if !matches!(selected.value.as_str(), "cargo" | "rustc" | "rustdoc") {
                 return Err(Failure::Unsupported);
             }
         }
@@ -388,6 +427,8 @@ pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocat
         cwd,
         environment,
         explicit_toolchain,
+        entries,
+        rustup_run,
     })
 }
 

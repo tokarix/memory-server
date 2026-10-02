@@ -3,12 +3,16 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use memory_hooks::{TrustedHooksConfig, config::DelegationPin};
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "v6 protected inventory and fingerprint matrix shares one fixture"
+)]
 fn v6_host_contract_is_required_bounded_and_fingerprinted() {
     let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
         .or_else(|| std::env::var_os("HOME"))
@@ -37,18 +41,30 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
         )
         .replace("namespace_inode = 0", "namespace_inode = 1")
         .replace("root_inode = 0", "root_inode = 1");
-    for executable in [
-        "/opt/managed/claude",
-        "/usr/bin/bash",
-        "/usr/bin/env",
-        "/opt/rust/1.94.0/bin/cargo",
-        "/opt/rust/1.94.0/bin/rustc",
-        "/opt/rust/1.94.0/bin/rustdoc",
-        "/opt/managed/rustup",
-        "/opt/rust/1.94.0/bin/cargo-clippy",
-        "/opt/rust/1.94.0/bin/clippy-driver",
+    source = source.replace(
+        "/srv/managed",
+        &fixture.path().join("managed").display().to_string(),
+    );
+    for (original, name) in [
+        ("/opt/managed/claude", "client"),
+        ("/usr/bin/bash", "shell"),
+        ("/usr/bin/env", "env"),
+        ("/opt/managed/rustup", "rustup"),
     ] {
-        source = source.replace(&format!("= \"{executable}\""), "= \"/usr/bin/git\"");
+        source = source.replace(original, &fixture.path().join(name).display().to_string());
+    }
+    let document: toml::Value = toml::from_str(&source).expect("template");
+    for inventory in ["executables", "installed_executables"] {
+        for value in document["rust_execution"][inventory]
+            .as_table()
+            .expect("inventory")
+            .values()
+        {
+            let executable = Path::new(value.as_str().expect("path"));
+            fs::create_dir_all(executable.parent().expect("parent")).expect("directories");
+            fs::write(executable, "NONEXECUTION_SENTINEL").expect("sentinel");
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
     }
     let write = |value: &str| {
         let mut file = OpenOptions::new()
@@ -63,11 +79,34 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
     write(&source);
     let trusted = TrustedHooksConfig::load(&path).expect("host v6 without container attestation");
     assert!(trusted.fingerprint().starts_with("v6:"));
-    assert_eq!(trusted.rust_execution().expect("execution").version(), 1);
+    assert_eq!(trusted.rust_execution().expect("execution").version(), 2);
     for altered in [
         source.replace("client_ancestor = 3", "client_ancestor = 0"),
         source.replace("rust-cargo-1.94.0-linux-v1", "nightly"),
         source.replace("rustup-1.28.2-linux-v1", "rustup-unknown"),
+        source.replace("sealed-executables-v2", "sealed-executables-v1"),
+        source.replace(
+            "[rust_execution.installed_executables]",
+            "[rust_execution.unknown]",
+        ),
+        source.replace(
+            &format!(
+                "rustc = {:?}",
+                fixture
+                    .path()
+                    .join("managed/cargo/bin/rustc")
+                    .display()
+                    .to_string()
+            ),
+            &format!(
+                "rustc = {:?}",
+                fixture
+                    .path()
+                    .join("managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/rustc")
+                    .display()
+                    .to_string()
+            ),
+        ),
         source.replace("posix-literal-no-startup-v1", "interactive"),
         source.replace("schema_version = 6", "schema_version = 4"),
         source.replace("HOME =", "BASH_ENV ="),
@@ -94,6 +133,19 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
         trusted.fingerprint(),
         TrustedHooksConfig::load(&path)
             .expect("changed environment")
+            .fingerprint()
+    );
+    write(&source);
+    let installed = Path::new(
+        document["rust_execution"]["installed_executables"]["rustc"]
+            .as_str()
+            .expect("installed"),
+    );
+    fs::write(installed, "REPLACED_INSTALLED_SENTINEL").expect("replacement");
+    assert_ne!(
+        trusted.fingerprint(),
+        TrustedHooksConfig::load(&path)
+            .expect("replaced installed pin")
             .fingerprint()
     );
 }

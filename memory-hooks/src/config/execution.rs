@@ -22,6 +22,7 @@ use crate::limits;
 pub struct RustExecution {
     raw: RawRustExecution,
     identities: BTreeMap<String, Vec<u8>>,
+    installed_identities: BTreeMap<String, Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -31,7 +32,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use super::{executable_stamp, literal_fixture};
+    use super::{executable_stamp, literal_fixture, unsupported_environment_mechanism};
 
     #[test]
     fn installed_secondary_identity_rechecks_never_execute_tools() {
@@ -49,10 +50,10 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
             contract
                 .raw
-                .executables
+                .installed_executables
                 .insert(name.to_owned(), path.clone());
             contract
-                .identities
+                .installed_identities
                 .insert(name.to_owned(), executable_stamp(&path, deadline).unwrap());
         }
         contract
@@ -73,11 +74,59 @@ mod tests {
         assert!(!format!("{error:?}").contains("REPLACED_SECRET_SENTINEL"));
         assert!(!directory.path().join("marker").exists());
     }
+
+    #[test]
+    fn protected_executable_hash_rejects_fifo_device_and_symlink_before_read_open() {
+        use std::os::unix::fs::symlink;
+
+        use rustix::fs::{Mode, mkfifoat};
+
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, PathBuf::from);
+        let directory = tempfile::tempdir_in(base).unwrap();
+        let fifo = directory.path().join("compiler-secret-sentinel");
+        mkfifoat(rustix::fs::CWD, &fifo, Mode::from_bits_truncate(0o700)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for path in [&fifo, &PathBuf::from("/dev/null")] {
+            let error = executable_stamp(path, deadline).unwrap_err();
+            assert!(!format!("{error:?}").contains("compiler-secret-sentinel"));
+        }
+        let alias = directory.path().join("alias");
+        symlink(&fifo, &alias).unwrap();
+        assert!(executable_stamp(&alias, deadline).is_err());
+        assert!(Instant::now() < deadline);
+    }
+
+    #[test]
+    fn ambient_secondary_and_shell_mechanisms_cannot_hide_outside_inventory() {
+        for key in [
+            "CARGO",
+            "CARGO_ALIAS_B",
+            "RUSTFLAGS",
+            "RUSTUP_TOOLCHAIN",
+            "CLIPPY_ARGS",
+            "CLIPPY_CONF_DIR",
+            "SYSROOT",
+            "LD_PRELOAD",
+            "BASH_FUNC_cargo%%",
+            "BASH_ENV",
+            "ENV",
+        ] {
+            assert!(unsupported_environment_mechanism(key));
+        }
+        for key in ["SSH_AUTH_SOCK", "DISPLAY", "USER"] {
+            assert!(!unsupported_environment_mechanism(key));
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
-    let directory = tempfile::tempdir().unwrap();
+    let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(std::env::temp_dir, PathBuf::from);
+    let directory = tempfile::tempdir_in(base).unwrap();
     let executables: BTreeMap<_, _> = [
         "client",
         "shell",
@@ -115,7 +164,7 @@ pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
                 rustup_semantics: "rustup-1.28.2-linux-v1".to_owned(),
                 shell_mode: "posix-literal-no-startup-v1".to_owned(),
                 locality: "same-mount-namespace-and-root-v1".to_owned(),
-                tool_resolution: "sealed-executables-v1".to_owned(),
+                tool_resolution: "sealed-executables-v2".to_owned(),
                 inherited_environment: "sealed-environment-v1".to_owned(),
                 client_ancestor: 3,
                 boot_id: "00000000-0000-4000-8000-000000000001".to_owned(),
@@ -125,12 +174,123 @@ pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
                 root_inode: 1,
                 toolchain: "1.94.0-x86_64-unknown-linux-gnu".to_owned(),
                 executables,
+                installed_executables: [
+                    "cargo",
+                    "rustc",
+                    "rustdoc",
+                    "cargo-clippy",
+                    "clippy-driver",
+                ]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        PathBuf::from(
+                            "/sealed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin",
+                        )
+                        .join(name),
+                    )
+                })
+                .collect(),
                 environment,
             },
             identities: BTreeMap::new(),
+            installed_identities: BTreeMap::new(),
         },
         directory,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn execution_fixture(proxy: bool) -> (RustExecution, tempfile::TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (mut contract, directory) = literal_fixture();
+    let home = directory.path().join("cargo-home");
+    let rustup = directory.path().join("rustup-home");
+    let installed = rustup.join("toolchains").join(contract.toolchain());
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::create_dir_all(installed.join("bin")).unwrap();
+    std::fs::create_dir(installed.join("lib")).unwrap();
+    for name in ["cargo", "rustc", "rustdoc", "cargo-clippy", "clippy-driver"] {
+        let path = installed.join("bin").join(name);
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nexit 99\nINSTALLED_NONEXECUTION_SENTINEL\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        contract
+            .raw
+            .installed_executables
+            .insert(name.to_owned(), path.clone());
+        let primary = if proxy {
+            let primary = home.join("bin").join(name);
+            std::fs::write(
+                &primary,
+                "#!/bin/sh\nexit 99\nPROXY_NONEXECUTION_SENTINEL\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            primary
+        } else {
+            path
+        };
+        contract.raw.executables.insert(name.to_owned(), primary);
+    }
+    contract
+        .raw
+        .environment
+        .insert("CARGO_HOME".to_owned(), home.to_str().unwrap().to_owned());
+    contract.raw.environment.insert(
+        "RUSTUP_HOME".to_owned(),
+        rustup.to_str().unwrap().to_owned(),
+    );
+    let empty = directory.path().join("search-empty");
+    std::fs::create_dir(&empty).unwrap();
+    contract.raw.environment.insert(
+        "PATH".to_owned(),
+        format!(
+            "{}:{}:{}",
+            empty.display(),
+            if proxy {
+                home.join("bin")
+            } else {
+                installed.join("bin")
+            }
+            .display(),
+            directory.path().display()
+        ),
+    );
+    let deadline = Instant::now() + limits::RESOLVE_DEADLINE;
+    let marker = directory
+        .path()
+        .join("marker")
+        .to_str()
+        .unwrap()
+        .replace('\'', "'\\''");
+    let script = format!("#!/bin/sh\n: > '{marker}'\nexit 99\n# NONEXECUTION_SENTINEL\n");
+    for path in contract
+        .raw
+        .executables
+        .values()
+        .chain(contract.raw.installed_executables.values())
+    {
+        std::fs::write(path, &script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for (inventory, identities) in [
+        (&contract.raw.executables, &mut contract.identities),
+        (
+            &contract.raw.installed_executables,
+            &mut contract.installed_identities,
+        ),
+    ] {
+        for (name, path) in inventory {
+            identities.insert(name.clone(), executable_stamp(path, deadline).unwrap());
+        }
+    }
+    (contract, directory)
 }
 
 #[derive(Clone, Deserialize)]
@@ -152,6 +312,7 @@ pub(super) struct RawRustExecution {
     root_inode: u64,
     toolchain: String,
     executables: BTreeMap<String, PathBuf>,
+    installed_executables: BTreeMap<String, PathBuf>,
     environment: BTreeMap<String, String>,
 }
 
@@ -189,6 +350,32 @@ pub fn supported_environment_key(key: &str) -> bool {
     )
 }
 
+fn unsupported_environment_mechanism(key: &str) -> bool {
+    ["CARGO_", "RUST", "CLIPPY_", "LD_", "DYLD_"]
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+        || matches!(
+            key,
+            "CARGO" | "SYSROOT" | "BASH_ENV" | "ENV" | "SHELLOPTS" | "BASHOPTS"
+        )
+        || key.starts_with("BASH_FUNC_")
+}
+
+fn metadata_stamp(meta: &std::fs::Metadata) -> [u64; 10] {
+    [
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime().cast_unsigned(),
+        meta.mtime_nsec().cast_unsigned(),
+        meta.ctime().cast_unsigned(),
+        meta.ctime_nsec().cast_unsigned(),
+        u64::from(meta.mode()),
+        u64::from(meta.uid()),
+        u64::from(meta.gid()),
+    ]
+}
+
 fn executable_stamp(path: &Path, deadline: Instant) -> Result<Vec<u8>> {
     let mut file = open_trusted_path(path, true)?;
     let meta = file
@@ -198,18 +385,11 @@ fn executable_stamp(path: &Path, deadline: Instant) -> Result<Vec<u8>> {
         return Err(Error::ConfigInvalid("Rust executable size"));
     }
     let mut hash = Sha256::new();
-    for value in [
-        meta.dev(),
-        meta.ino(),
-        meta.len(),
-        meta.mtime().cast_unsigned(),
-        meta.mtime_nsec().cast_unsigned(),
-        meta.ctime().cast_unsigned(),
-        meta.ctime_nsec().cast_unsigned(),
-    ] {
+    for value in metadata_stamp(&meta) {
         hash.update(value.to_be_bytes());
     }
     let mut block = vec![0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
     loop {
         if Instant::now() >= deadline {
             return Err(Error::ConfigUntrusted("Rust executable deadline"));
@@ -220,7 +400,24 @@ fn executable_stamp(path: &Path, deadline: Instant) -> Result<Vec<u8>> {
         if count == 0 {
             break;
         }
+        bytes_read +=
+            u64::try_from(count).map_err(|_| Error::ConfigUntrusted("Rust executable size"))?;
+        if bytes_read > meta.len() {
+            return Err(Error::ConfigUntrusted("Rust executable grew during read"));
+        }
         hash.update(&block[..count]);
+    }
+    if bytes_read != meta.len()
+        || metadata_stamp(
+            &file
+                .metadata()
+                .map_err(|_| Error::ConfigUntrusted("Rust executable recheck"))?,
+        ) != metadata_stamp(&meta)
+        || Instant::now() >= deadline
+    {
+        return Err(Error::ConfigUntrusted(
+            "Rust executable changed during read",
+        ));
     }
     Ok(hash.finalize().to_vec())
 }
@@ -315,6 +512,41 @@ impl RawRustExecution {
         Ok(())
     }
 
+    fn validate_mappings(&self) -> Result<()> {
+        let installed = Path::new(
+            self.environment
+                .get("RUSTUP_HOME")
+                .ok_or(Error::ConfigInvalid("Rust installed home"))?,
+        )
+        .join("toolchains")
+        .join(&self.toolchain)
+        .join("bin");
+        let proxies = Path::new(
+            self.environment
+                .get("CARGO_HOME")
+                .ok_or(Error::ConfigInvalid("Rust proxy home"))?,
+        )
+        .join("bin");
+        let proxy = self.executables.get("cargo") != self.installed_executables.get("cargo");
+        for name in ["cargo", "rustc", "rustdoc", "cargo-clippy", "clippy-driver"] {
+            let path = self
+                .installed_executables
+                .get(name)
+                .ok_or(Error::ConfigInvalid("Rust installed inventory"))?;
+            if *path != installed.join(name)
+                || self.executables.get(name)
+                    != Some(&if proxy {
+                        proxies.join(name)
+                    } else {
+                        path.clone()
+                    })
+            {
+                return Err(Error::ConfigInvalid("Rust installed mapping"));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn validate(
         self,
         adapter: ClientAdapter,
@@ -332,7 +564,7 @@ impl RawRustExecution {
             || self.rustup_semantics != "rustup-1.28.2-linux-v1"
             || self.shell_mode != "posix-literal-no-startup-v1"
             || self.locality != "same-mount-namespace-and-root-v1"
-            || self.tool_resolution != "sealed-executables-v1"
+            || self.tool_resolution != "sealed-executables-v2"
             || self.inherited_environment != "sealed-environment-v1"
             || !(1..=4).contains(&self.client_ancestor)
             || boot.is_nil()
@@ -342,6 +574,7 @@ impl RawRustExecution {
             || self.toolchain != "1.94.0-x86_64-unknown-linux-gnu"
             || self.environment.len() > limits::EXECUTION_ENVIRONMENT
             || self.executables.len() != 9
+            || self.installed_executables.len() != 5
         {
             return Err(Error::ConfigInvalid("Rust execution contract"));
         }
@@ -361,24 +594,34 @@ impl RawRustExecution {
             }
         }
         self.validate_environment()?;
+        self.validate_mappings()?;
         let deadline = Instant::now() + limits::RESOLVE_DEADLINE;
         let mut identities = BTreeMap::new();
-        for (name, path) in &self.executables {
-            valid_path(path)?;
-            for binding in bindings {
-                let scope = match &binding.identity {
-                    BindingIdentity::Git { common, primary } => primary.as_ref().unwrap_or(common),
-                    BindingIdentity::Directory { root, .. } => root,
-                };
-                if within(path, scope) {
-                    return Err(Error::ConfigUntrusted("Rust executable inside workspace"));
+        let mut installed_identities = BTreeMap::new();
+        for (inventory, stamps) in [
+            (&self.executables, &mut identities),
+            (&self.installed_executables, &mut installed_identities),
+        ] {
+            for (name, path) in inventory {
+                valid_path(path)?;
+                for binding in bindings {
+                    let scope = match &binding.identity {
+                        BindingIdentity::Git { common, primary } => {
+                            primary.as_ref().unwrap_or(common)
+                        }
+                        BindingIdentity::Directory { root, .. } => root,
+                    };
+                    if within(path, scope) {
+                        return Err(Error::ConfigUntrusted("Rust executable inside workspace"));
+                    }
                 }
+                stamps.insert(name.clone(), executable_stamp(path, deadline)?);
             }
-            identities.insert(name.clone(), executable_stamp(path, deadline)?);
         }
         Ok(RustExecution {
             raw: self,
             identities,
+            installed_identities,
         })
     }
 }
@@ -474,12 +717,7 @@ impl RustExecution {
                 {
                     return Err(Error::ConfigUntrusted("Rust environment duplicate"));
                 }
-            } else if ["CARGO_", "RUST", "LD_", "DYLD_"]
-                .iter()
-                .any(|prefix| key.starts_with(prefix))
-                || matches!(key, "BASH_ENV" | "ENV" | "SHELLOPTS" | "BASHOPTS")
-                || key.starts_with("BASH_FUNC_")
-            {
+            } else if unsupported_environment_mechanism(key) {
                 return Err(Error::ConfigUntrusted("Rust environment mechanism"));
             }
         }
@@ -514,7 +752,9 @@ impl RustExecution {
         for name in ["cargo", "rustc", "rustdoc", "cargo-clippy", "clippy-driver"] {
             let path = directory.join("bin").join(name);
             valid_path(&path)?;
-            if self.identities.get(name) != Some(&executable_stamp(&path, deadline)?) {
+            if self.raw.installed_executables.get(name) != Some(&path)
+                || self.installed_identities.get(name) != Some(&executable_stamp(&path, deadline)?)
+            {
                 return Err(Error::ConfigUntrusted("Rust installed executable mismatch"));
             }
         }
@@ -524,7 +764,37 @@ impl RustExecution {
     /// Fixed grammar/semantic version, suitable for safe audit metadata.
     #[must_use]
     pub const fn version(&self) -> u8 {
-        1
+        2
+    }
+
+    /// Private exact entrypoint path, separate from rustup's installed tools.
+    #[must_use]
+    pub fn executable(&self, name: &str) -> Option<&Path> {
+        self.raw.executables.get(name).map(PathBuf::as_path)
+    }
+
+    /// Private installed secondary path; it never participates in bare-name
+    /// primary resolution unless explicitly declared as that entrypoint.
+    #[must_use]
+    pub fn installed_executable(&self, name: &str) -> Option<&Path> {
+        self.raw
+            .installed_executables
+            .get(name)
+            .map(PathBuf::as_path)
+    }
+
+    /// Whether a protected primary entrypoint is a rustup proxy.
+    #[must_use]
+    pub fn is_proxy(&self, name: &str) -> bool {
+        self.raw
+            .installed_executables
+            .get(name)
+            .is_some_and(|installed| {
+                self.raw
+                    .executables
+                    .get(name)
+                    .is_some_and(|entry| entry != installed)
+            })
     }
 
     /// Resolve a literal bare tool name or exact protected absolute spelling.
@@ -590,6 +860,15 @@ impl RustExecution {
             hash_part(hash, super::path_bytes(path));
         }
         for (name, identity) in &self.identities {
+            hash_part(hash, name.as_bytes());
+            hash_part(hash, identity);
+        }
+        hash_part(hash, b"installed-executables-v1");
+        for (name, path) in &self.raw.installed_executables {
+            hash_part(hash, name.as_bytes());
+            hash_part(hash, super::path_bytes(path));
+        }
+        for (name, identity) in &self.installed_identities {
             hash_part(hash, name.as_bytes());
             hash_part(hash, identity);
         }

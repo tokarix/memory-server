@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -572,10 +573,39 @@ fn open_trusted_path(path: &Path, executable: bool) -> Result<File> {
         if !final_file {
             flags |= OFlags::DIRECTORY;
         }
-        let next = File::from(
-            openat(&current, part, flags, Mode::empty())
-                .map_err(|_| Error::ConfigUntrusted("path component"))?,
-        );
+        let next = if final_file && executable {
+            // Check the file kind using a metadata-only descriptor before any
+            // read open. A substituted FIFO/device must never block or execute
+            // its open handler while executable identity is being established.
+            let probe = File::from(
+                openat(
+                    &current,
+                    part,
+                    OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| Error::ConfigUntrusted("executable component"))?,
+            );
+            let expected = fstat(&probe).map_err(|_| Error::ConfigUntrusted("executable stat"))?;
+            if expected.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Err(Error::ConfigUntrusted("executable file kind"));
+            }
+            let opened = File::open(format!("/proc/self/fd/{}", probe.as_raw_fd()))
+                .map_err(|_| Error::ConfigUntrusted("executable read"))?;
+            let observed = fstat(&opened).map_err(|_| Error::ConfigUntrusted("executable stat"))?;
+            if expected.st_dev != observed.st_dev
+                || expected.st_ino != observed.st_ino
+                || expected.st_mode != observed.st_mode
+            {
+                return Err(Error::ConfigUntrusted("executable replaced"));
+            }
+            opened
+        } else {
+            File::from(
+                openat(&current, part, flags, Mode::empty())
+                    .map_err(|_| Error::ConfigUntrusted("path component"))?,
+            )
+        };
         check_component(&next, final_file, executable)?;
         current = next;
     }

@@ -254,10 +254,10 @@ compiler context. A read-provider fixture cannot supply execution authority.
 The installed tree must contain real `bin` and `lib` directories. Its existence
 is only selector evidence: a separate trusted-path check hashes installed
 Cargo/rustc/rustdoc/Clippy executables and compares their identities with the
-protected executable inventory. Missing, substituted, proxy or differently
-installed executables fail that check. This unit has no separate proxy-to-real
-inventory and does not yet establish a supported proxy execution contract;
-grammar recognition of `+TOOLCHAIN` alone cannot authorize it. The later gate
+protected `installed_executables` inventory. Missing, substituted or differently
+installed executables fail that check. The v6 `sealed-executables-v2` contract
+has distinct entrypoint and installed inventories, described below. Grammar
+recognition of `+TOOLCHAIN` alone cannot authorize it. The later gate
 must combine installed identity checks with process locality, exact binding,
 complete candidates, final read-set/deadline rechecks and locked audit completion.
 No live storage-enforcement claim follows from this library stage.
@@ -272,6 +272,86 @@ These rules follow the
 and [settings format](https://github.com/rust-lang/rustup/blob/1.28.2/src/settings.rs),
 with the conservative exclusions described above. They do not remove the
 same-UID limitations or the race after the final point-in-time check.
+
+## Entrypoints and generated environments
+
+The required `installed_executables` map pins real `cargo`, `rustc`, `rustdoc`,
+`cargo-clippy` and `clippy-driver` under the declared Rustup home and toolchain.
+The existing `executables` map pins the client, shell, env and rustup plus the
+five primary Rust entrypoints. Those five must all name either the installed
+tools or the corresponding Cargo-home `bin` proxies. Mixed entrypoint modes,
+missing inventories and unknown mapping versions deny. These paths and both
+inventories' content/metadata identities enter the v6 fingerprint; versions
+1-5 keep their previous parsing and fingerprints. This is a non-live v6
+declaration change, with execution evidence version 2.
+
+The execution-model library retains each wrapper's exact spelling and effective
+environment. For a bare entrypoint it checks every earlier PATH candidate and
+the selected protected file; absolute entrypoints must match the protected
+path. Search has at most 32 directories, and probes share the 64-input deadline
+budget with manifests/configuration/selectors. Relative/empty search entries,
+logical traversal, inaccessible inputs, non-executable files, symlinks and
+special files deny. Executable probes read metadata only, including for large
+binaries. The separate protected identity check reads content without executing
+it and checks metadata again after reading. A new shadowing file, replacement
+or changed observation invalidates the shared read set.
+
+Rustup `run` accepts a literal bare `cargo`, `rustc` or `rustdoc` and chooses the
+installed binary, rather than resolving that inner word through inherited PATH.
+An installed direct Cargo entrypoint does not accept the proxy's `+TOOLCHAIN`
+syntax. The managed grammar excludes absolute inner `rustup run` program paths
+and Rustup's PATH fallback for missing installed tools.
+
+The Linux Rustup 1.28.2 model applies its generated values before Cargo reads
+configuration. It handles a secondary compiler proxy hop separately:
+
+| Input layer | Modeled effects |
+| --- | --- |
+| Protected/client/assignment/env wrapper | Literal inputs with their original origins; loader and recursion mechanisms are forbidden |
+| Primary rustup proxy or `rustup run` | Absolute Cargo home; Cargo-home `bin` PATH insertion; installed `lib` loader path; exact Rustup home/toolchain; recursion count 1 |
+| Cargo `[env]` | Child inputs only, including force/relative temporary values; cannot replace PATH, home, selector, loader or recursion evidence |
+| Secondary compiler proxy | The same home/toolchain values and loader insertion; recursion count 2 after a primary hop, otherwise 1 |
+| Direct installed executable | Preserves inputs without manufacturing rustup-generated values |
+
+Clippy additionally searches Cargo-home `bin` with Cargo's own unique insertion
+rule. Its protected extension receives the installed Cargo path in generated
+`CARGO`, selects the installed sibling `clippy-driver`, and invokes that Cargo
+directly with generated workspace-wrapper and empty Clippy-argument values.
+With proxies, the extension adds a second rustup hop; external dependency rustc
+proxies can add a third. Workspace-driver and dependency-compiler environments
+are retained separately. Global options before `clippy`, passthrough/fix forms,
+and configuration that replaces the generated wrapper are excluded. Ambient
+`CARGO`, `CLIPPY_*` and `SYSROOT` mechanisms cannot be hidden outside the sealed
+declaration. The static model still precedes Cargo's layout-derived loader
+additions, which require the later complete output stage. These rules follow
+the pinned [Cargo external launcher](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/bin/cargo/main.rs)
+and [Clippy launcher](https://github.com/rust-lang/rust/blob/1.94.0/src/tools/clippy/src/main.rs).
+
+Rustup's unique PATH insertion preserves an existing entry's position. It does
+not move Cargo-home `bin` ahead of an earlier entry. The resolver models that
+rule and checks the resulting search, rather than assuming insertion proves
+tool identity. Generated loader/recursion values cannot be supplied through
+client, wrapper or Cargo configuration input. Cargo's process, child and compiler
+environments remain separate; child target-directory variables do not select
+Cargo's own output directory. Private digests cover invocation spellings,
+arguments, environment origins and explicit removals. Digests have the same
+guessability limits as other audit hashes.
+
+Generated PATH/loader entries containing a literal colon are unsupported:
+Unix path-list encoding cannot represent that directory as one entry. The
+resolver denies instead of modeling an insertion Rustup would not perform.
+
+The execution fixtures prove separate proxy/installed replacement checks,
+absence invalidation, primary versus secondary generation, direct versus rustup
+entrypoints, force/relative child inputs, fixed failures, shared limits and
+nonexecution. The metadata probe fixture rejects FIFOs, symlinks and non-executable
+files without reading or running them. These rules follow
+[Rustup 1.28.2 process construction](https://github.com/rust-lang/rustup/blob/1.28.2/src/toolchain.rs)
+and its [unique path insertion](https://github.com/rust-lang/rustup/blob/1.28.2/src/env_var.rs).
+This library still supplies no locality, claim or policy authority. The worker
+must combine it with decision-time locality, exact binding/pack linkage,
+complete output inventories, storage evaluation and locked audited completion.
+Storage enforcement remains disconnected until that integration is complete.
 
 ## Checked execution cwd handoff
 
