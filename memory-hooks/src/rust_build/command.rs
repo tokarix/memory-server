@@ -432,7 +432,7 @@ pub fn parse(input: &ExecutionInput, contract: &RustExecution) -> Result<Invocat
     })
 }
 
-fn cargo_action(word: &str) -> Option<BuildAction> {
+pub(super) fn cargo_action(word: &str) -> Option<BuildAction> {
     match word {
         "build" | "b" => Some(BuildAction::Build),
         "check" | "c" => Some(BuildAction::Check),

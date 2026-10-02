@@ -67,6 +67,18 @@ enum Kind {
 }
 
 impl Node {
+    fn literal_value(&self) -> Value {
+        match &self.value {
+            Kind::Table(table) => Value::Table(
+                table
+                    .iter()
+                    .map(|(key, node)| (key.clone(), node.literal_value()))
+                    .collect(),
+            ),
+            Kind::Array(array) => Value::Array(array.iter().map(Self::literal_value).collect()),
+            Kind::Scalar(value) => value.clone(),
+        }
+    }
     fn from_value(
         value: Value,
         base: &Path,
@@ -343,6 +355,57 @@ impl Configuration {
         &self.cargo_home
     }
 
+    /// Literal target selectors with CLI-config/environment/discovery precedence.
+    /// Local install ignores build.target, matching the pinned command contract.
+    /// This only selects layout names; custom JSON targets remain unsupported.
+    ///
+    /// # Errors
+    /// Ambiguous array/environment merging or invalid types deny.
+    pub fn targets(
+        &self,
+        install: bool,
+        options: &[String],
+        environment: &Environment,
+    ) -> Result<Vec<String>, Failure> {
+        if !options.is_empty() {
+            return Ok(options.to_vec());
+        }
+        if install {
+            return Ok(Vec::new());
+        }
+        let node = self.node(&["build", "target"])?;
+        if environment.get("CARGO_BUILD_TARGET").is_some()
+            && node.is_some_and(|node| matches!(node.value, Kind::Array(_)))
+        {
+            return Err(Failure::Configuration);
+        }
+        if !node
+            .is_some_and(|node| matches!(node.origin, Origin::CommandFile | Origin::CommandValue))
+            && let Some(value) = environment.get("CARGO_BUILD_TARGET")
+        {
+            return Ok(vec![value.to_owned()]);
+        }
+        node.map(|node| match &node.value {
+            Kind::Array(array) => array
+                .iter()
+                .map(|node| node.string().map(str::to_owned))
+                .collect(),
+            _ => node.string().map(|value| vec![value.to_owned()]),
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+    }
+
+    /// Bounded private profile fields after configuration merging. Repository
+    /// profile data is execution input, never protected storage policy authority.
+    ///
+    /// # Errors
+    /// Invalid profile namespaces deny before the layout stage.
+    pub fn profiles(&self) -> Result<Option<Value>, Failure> {
+        self.node(&["profile"])
+            .map(|value| value.map(Node::literal_value))
+    }
+
     /// Target precedence: flag, `CARGO_TARGET_DIR`, CLI config, configuration env,
     /// discovered configuration, then the selected workspace's target directory.
     ///
@@ -600,6 +663,7 @@ fn env_entry(node: &Node) -> Result<(&Node, bool, bool), Failure> {
 fn classify(root: &Node, complete: bool) -> Result<(), Failure> {
     for (key, node) in root.table()? {
         match key.as_str() {
+            "profile" => super::cargo::validate_profiles(&node.literal_value())?,
             "build" => classify_build(node)?,
             "install" => {
                 for (key, node) in node.table()? {
@@ -674,7 +738,7 @@ fn classify(root: &Node, complete: bool) -> Result<(), Failure> {
                 }
             }
             // Source replacement, credentials, target cfg/linkers/runners,
-            // profile layout, includes and unknown relevant keys are opaque.
+            // includes and unknown relevant keys are opaque.
             _ => return Err(Failure::Configuration),
         }
     }
@@ -690,10 +754,19 @@ fn classify_build(build: &Node) -> Result<(), Failure> {
             | "rustdoc"
             | "rustc-wrapper"
             | "rustc-workspace-wrapper"
-            | "target"
             | "dep-info-basedir" => {
                 node.string()?;
             }
+            "target" => match &node.value {
+                Kind::Array(array) => {
+                    for node in array {
+                        node.string()?;
+                    }
+                }
+                _ => {
+                    node.string()?;
+                }
+            },
             "rustflags" => {
                 validate_extra_flags(BuildAction::Rustc, &flags_value(node)?)?;
             }

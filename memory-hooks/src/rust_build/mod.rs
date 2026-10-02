@@ -1,5 +1,6 @@
 //! Non-executing, bounded analysis of the protected static Rust build contract.
 
+pub mod cargo;
 pub mod command;
 pub mod config;
 pub mod environment;

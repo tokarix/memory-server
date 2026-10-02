@@ -116,6 +116,8 @@ retains its own provenance; output paths are not lexically simplified.
 | Intermediate build | Ordered `--config build.build-dir`, `CARGO_BUILD_BUILD_DIR`, discovered `build.build-dir`, effective target | Same source bases; default preserves the effective target |
 | Install root | `--root`, `CARGO_INSTALL_ROOT`, ordered/discovered `install.root`, Cargo home | Same source bases |
 | Cargo home | `CARGO_HOME`, then `HOME/.cargo` | Process cwd for relative environment paths; ambiguous home aliases deny |
+| Target selectors | Literal `--target` values, ordered `--config build.target`, `CARGO_BUILD_TARGET`, discovered `build.target`, host | Only the documented built-in triples; install ignores `build.target` and its environment form |
+| Profile | Literal `--profile` or the command's release/debug selector, command default | Workspace profile fields, then merged Cargo configuration fields; no profile field selects protected policy |
 | Compiler flags | Encoded flag variable, ordinary flag variable, supported build configuration | Encoded flags split on unit separator; ordinary strings split on whitespace; configuration arrays concatenate in precedence order |
 | Cargo child environment | Process value unless `[env]` is forced or the variable is absent | `relative=true` uses the defining value's file base; it does not reconfigure Cargo itself |
 
@@ -148,6 +150,61 @@ in this grammar. Only the documented keys of these unrelated namespaces are
 ignored; future unknown keys deny. Definitions replacing `b`, `c`, `t`, `r`,
 `d` or `clippy` deny, even when the current command does not use that alias.
 Other custom alias invocations and browser opening are excluded by the grammar.
+
+## Cargo selection and layout library
+
+`rust_build::cargo` extracts configuration, package, manifest, target, profile
+and local-install selections from the already validated literal invocation.
+It consumes option values separately from command names and stops Cargo
+selection at a run/test/bench `--` separator. Repeated configuration overrides
+retain their order. Duplicate scalar path/profile selectors and conflicting
+release/debug versus explicit profiles deny. Remote installs stay build
+producing but have no resolvable local layout.
+
+Normal configuration discovery stays at the effective execution cwd even when
+`--manifest-path` selects another package. Local `install --path` discovers
+configuration at that source, selects its manifest/workspace separately and
+uses the local workspace target default. Install root and its `bin` directory
+are separate output roots; install compilation uses release by default or dev
+with `--debug`. Explicit target selections still apply to install.
+
+Built-in dev/test profiles use `debug`, while release/bench use `release`.
+Supported custom profiles retain their own name regardless of which profile
+they inherit. Workspace fields are overlaid by configuration fields, including
+package/build overrides. Inheritance cycles, missing parents, root inheritance,
+unknown fields, unstable directory names/backends and unsafe profile names
+deny. Stable compilation settings cannot change these layout names. Profile
+environment mechanisms outside the protected variable registry remain denied.
+The explicit built-in target subset is the pinned host plus
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
+`wasm32-unknown-unknown`; `host-tuple` resolves to the pin's host triple.
+JSON/future targets and ambiguous configuration-array/environment combinations
+deny. No target list or profile is discovered by invoking a compiler.
+
+The layout retains source, target, intermediate build, compiler temporary,
+Cargo cache and install roles separately, including when paths coincide.
+Host layout roots are included alongside explicit target roots for host units.
+Artifact/profile/example roots and intermediate deps, artifact, example,
+incremental, fingerprint, build-script and temporary roots are distinct.
+Documentation and requested timing roots are added independently. Cargo home,
+registry index/cache/source and git database/checkout roots are included even
+for local-only sources because cache tracking/automatic cleanup can write there.
+Compiler temporary selection uses the modeled child TMPDIR, with the pinned
+Linux default `/tmp` when absent; it never invents a safer destination.
+
+These are required static roots, **not CompleteBuild evidence**. Existing
+descendants, dynamic package/build output names, direct compiler output trees,
+layout-derived child loader environment and final backing/identity checks still
+require resolution before the gate can use them. A parent root cannot cover an
+existing nested mount or symlink. The library retains actual `..` components,
+assigns stable candidate indices and rejects more than 64 directories or a
+path beyond 4096 bytes. No layout or configuration read creates a directory.
+Hand-authored fixtures cover all named Cargo actions, config/cwd/install
+differences, child TMPDIR precedence, profiles, targets, duplicate-role paths,
+bounds, replacements and unsupported forms without executing a proposal.
+The layout and profile rules follow the pinned
+[Cargo 1.94 layout source](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/cargo/core/compiler/layout.rs)
+and [profile source](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/cargo/core/profiles.rs).
 
 One shared read set permits 64 distinct paths, including absences, with
 256 KiB per file, 1 MiB total, 16 TOML levels and the operation deadline.

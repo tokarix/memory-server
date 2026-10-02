@@ -329,6 +329,7 @@ pub fn supported_environment_key(key: &str) -> bool {
             | "RUSTUP_TOOLCHAIN"
             | "CARGO_TARGET_DIR"
             | "CARGO_BUILD_TARGET_DIR"
+            | "CARGO_BUILD_TARGET"
             | "CARGO_BUILD_BUILD_DIR"
             | "TMPDIR"
             | "TMP"
