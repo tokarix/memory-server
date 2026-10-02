@@ -7,12 +7,13 @@ use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use rustix::fs::{Mode, OFlags, Stat, fstat, fstatfs, openat};
+use rustix::fs::{AtFlags, Mode, OFlags, Stat, StatxFlags, fstat, fstatfs, openat, statx};
 use sha2::{Digest, Sha256};
 
 use super::{Failure, paths};
 
-/// Maximum number of distinct config/manifest/selector input paths.
+/// Maximum retained file/executable/directory input observations. Different
+/// directory protocols at one path each consume an observation slot.
 pub const MAX_FILES: usize = 64;
 /// Maximum bytes in one regular input file.
 pub const MAX_FILE_BYTES: usize = 256 * 1024;
@@ -69,6 +70,17 @@ pub trait ReadProvider {
     /// # Errors
     /// Unsupported, changed, inaccessible or ambiguous directory inputs deny.
     fn directory(&self, _path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
+        Err(Failure::Read)
+    }
+
+    /// Observe an output directory, including confirmed absence. Present entries
+    /// must be real directories or regular files on the directory's own mount.
+    /// Symlinks, special files and mounted individual output files deny: storage
+    /// v1 assesses directories and cannot certify their individual file backing.
+    ///
+    /// # Errors
+    /// Unsupported providers, indirections, missing mount IDs or failed reads deny.
+    fn output_directory(&self, _path: &Path, _deadline: Instant) -> Result<Observation, Failure> {
         Err(Failure::Read)
     }
 
@@ -188,7 +200,11 @@ impl ReadProvider for Filesystem {
     }
 
     fn directory(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
-        observe_directory(path, deadline)
+        observe_directory(path, deadline, false)
+    }
+
+    fn output_directory(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+        observe_directory(path, deadline, true)
     }
 }
 
@@ -249,7 +265,55 @@ fn observe_file(path: &Path, deadline: Instant, executable: bool) -> Result<Obse
     Err(Failure::Limit)
 }
 
-fn observe_directory(path: &Path, deadline: Instant) -> Result<Observation, Failure> {
+fn mount_id(file: &File) -> Result<u64, Failure> {
+    let stat =
+        statx(file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).map_err(|_| Failure::Read)?;
+    if stat.stx_mask & StatxFlags::MNT_ID.bits() == 0 || stat.stx_mnt_id == 0 {
+        return Err(Failure::Read);
+    }
+    Ok(stat.stx_mnt_id)
+}
+
+fn output_kind(mode: u32, mount: u64, parent_mount: u64) -> Result<bool, Failure> {
+    match mode & libc::S_IFMT {
+        libc::S_IFDIR => Ok(true),
+        libc::S_IFREG if mount == parent_mount => Ok(false),
+        _ => Err(Failure::Read),
+    }
+}
+
+fn output_entry(
+    parent: &File,
+    name: &str,
+    parent_mount: u64,
+    deadline: Instant,
+    identity: &mut Sha256,
+) -> Result<bool, Failure> {
+    tick(deadline)?;
+    let file = File::from(
+        openat(
+            parent,
+            name,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| Failure::Read)?,
+    );
+    let stat = fstat(&file).map_err(|_| Failure::Read)?;
+    let mount = mount_id(&file)?;
+    let directory = output_kind(stat.st_mode, mount, parent_mount)?;
+    if directory {
+        stamp_directory_identity(&stat, identity);
+    } else {
+        stamp(&stat, identity);
+    }
+    identity.update(name.len().to_be_bytes());
+    identity.update(name.as_bytes());
+    identity.update(mount.to_be_bytes());
+    Ok(directory)
+}
+
+fn observe_directory(path: &Path, deadline: Instant, output: bool) -> Result<Observation, Failure> {
     paths::validate(path)?;
     if !path.is_absolute() {
         return Err(Failure::Read);
@@ -264,7 +328,11 @@ fn observe_directory(path: &Path, deadline: Instant) -> Result<Observation, Fail
         .map_err(|_| Failure::Read)?,
     );
     let mut identity = Sha256::new();
-    identity.update(b"memory-hooks-rust-directory-v1\0");
+    identity.update(if output {
+        b"memory-hooks-rust-output-directory-v1\0".as_slice()
+    } else {
+        b"memory-hooks-rust-directory-v1\0"
+    });
     for (index, part) in path.components().enumerate() {
         tick(deadline)?;
         if index >= 128 {
@@ -275,19 +343,25 @@ fn observe_directory(path: &Path, deadline: Instant) -> Result<Observation, Fail
         if matches!(part, Component::RootDir) {
             continue;
         }
-        current = File::from(
-            openat(
-                &current,
-                part.as_os_str(),
-                OFlags::PATH | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| Failure::Read)?,
-        );
+        current = match openat(
+            &current,
+            part.as_os_str(),
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => File::from(file),
+            Err(rustix::io::Errno::NOENT) => {
+                return Ok(Observation::missing(identity.finalize().into()));
+            }
+            Err(_) => return Err(Failure::Read),
+        };
     }
     check_filesystem(&current)?;
     let before = fstat(&current).map_err(|_| Failure::Read)?;
     let mut entries = Vec::new();
+    if output {
+        identity.update(mount_id(&current)?.to_be_bytes());
+    }
     // This kernel fd link refers only to the checked directory descriptor.
     for entry in std::fs::read_dir(format!("/proc/self/fd/{}", current.as_raw_fd()))
         .map_err(|_| Failure::Read)?
@@ -302,6 +376,12 @@ fn observe_directory(path: &Path, deadline: Instant) -> Result<Observation, Fail
         }
     }
     entries.sort_unstable();
+    if output {
+        let mount = mount_id(&current)?;
+        for (name, directory) in &mut entries {
+            *directory = output_entry(&current, name, mount, deadline, &mut identity)?;
+        }
+    }
     let mut original = Sha256::new();
     stamp(&before, &mut original);
     let mut after = Sha256::new();
@@ -363,15 +443,44 @@ fn read_regular(
 pub struct ReadSet<'a, P: ReadProvider> {
     provider: &'a P,
     deadline: Instant,
-    files: BTreeMap<PathBuf, (ReadKind, Observation)>,
+    files: BTreeMap<(PathBuf, ReadKind), Observation>,
     total_bytes: usize,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum ReadKind {
     File,
     Directory,
     Executable,
+    OutputDirectory,
+}
+
+fn decode_directory(bytes: &[u8]) -> Result<Vec<DirectoryEntry>, Failure> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Failure::Read)?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        return Err(Failure::Read);
+    }
+    if text.lines().count() > 512 {
+        return Err(Failure::Limit);
+    }
+    let entries: Vec<_> = text
+        .lines()
+        .map(|line| {
+            let kind = line.as_bytes().first().ok_or(Failure::Read)?;
+            if !matches!(kind, b'd' | b'f') {
+                return Err(Failure::Read);
+            }
+            Ok((
+                line.get(1..).ok_or(Failure::Read)?.to_owned(),
+                *kind == b'd',
+            ))
+        })
+        .collect::<Result<_, Failure>>()?;
+    directory_bytes(&entries)?;
+    Ok(entries
+        .into_iter()
+        .map(|(name, directory)| DirectoryEntry { name, directory })
+        .collect())
 }
 
 impl<'a, P: ReadProvider> ReadSet<'a, P> {
@@ -403,31 +512,20 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
         let bytes = self
             .retain(path, ReadKind::Directory)?
             .ok_or(Failure::Read)?;
-        let text = std::str::from_utf8(bytes).map_err(|_| Failure::Read)?;
-        if !text.is_empty() && !text.ends_with('\n') {
-            return Err(Failure::Read);
-        }
-        if text.lines().count() > 512 {
-            return Err(Failure::Limit);
-        }
-        let entries: Vec<_> = text
-            .lines()
-            .map(|line| {
-                let kind = line.as_bytes().first().ok_or(Failure::Read)?;
-                if !matches!(kind, b'd' | b'f') {
-                    return Err(Failure::Read);
-                }
-                Ok((
-                    line.get(1..).ok_or(Failure::Read)?.to_owned(),
-                    *kind == b'd',
-                ))
-            })
-            .collect::<Result<_, Failure>>()?;
-        directory_bytes(&entries)?;
-        Ok(entries
-            .into_iter()
-            .map(|(name, directory)| DirectoryEntry { name, directory })
-            .collect())
+        decode_directory(bytes)
+    }
+
+    /// Retain a safe output listing or complete absence in the shared budget.
+    ///
+    /// # Errors
+    /// Unsupported file backing/kinds, failed probes, ambiguity and overflow deny.
+    pub fn output_directory(
+        &mut self,
+        path: &Path,
+    ) -> Result<Option<Vec<DirectoryEntry>>, Failure> {
+        self.retain(path, ReadKind::OutputDirectory)?
+            .map(decode_directory)
+            .transpose()
     }
 
     /// Retain present/absent executable search evidence in the shared budget.
@@ -441,7 +539,19 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     fn retain(&mut self, path: &Path, kind: ReadKind) -> Result<Option<&[u8]>, Failure> {
         paths::validate(path)?;
         tick(self.deadline)?;
-        if !self.files.contains_key(path) {
+        let key = (path.to_owned(), kind);
+        if self.files.keys().any(|(observed_path, observed_kind)| {
+            observed_path == path
+                && *observed_kind != kind
+                && !matches!(
+                    (*observed_kind, kind),
+                    (ReadKind::Directory, ReadKind::OutputDirectory)
+                        | (ReadKind::OutputDirectory, ReadKind::Directory)
+                )
+        }) {
+            return Err(Failure::Read);
+        }
+        if !self.files.contains_key(&key) {
             if self.files.len() >= MAX_FILES {
                 return Err(Failure::Limit);
             }
@@ -449,6 +559,7 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
                 ReadKind::Directory => self.provider.directory(path, self.deadline)?,
                 ReadKind::File => self.provider.observe(path, self.deadline)?,
                 ReadKind::Executable => self.provider.executable(path, self.deadline)?,
+                ReadKind::OutputDirectory => self.provider.output_directory(path, self.deadline)?,
             };
             tick(self.deadline)?;
             let count = observation.bytes.as_ref().map_or(0, Vec::len);
@@ -456,12 +567,9 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
                 return Err(Failure::Limit);
             }
             self.total_bytes += count;
-            self.files.insert(path.to_owned(), (kind, observation));
+            self.files.insert(key.clone(), observation);
         }
-        let (observed_kind, item) = self.files.get(path).ok_or(Failure::Read)?;
-        if *observed_kind != kind {
-            return Err(Failure::Read);
-        }
+        let item = self.files.get(&key).ok_or(Failure::Read)?;
         Ok(item.bytes.as_deref())
     }
 
@@ -479,12 +587,13 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     /// # Errors
     /// Changes, newly created files, replacement, failed reads and lateness deny.
     pub fn recheck(&self) -> Result<(), Failure> {
-        for (path, (kind, expected)) in &self.files {
+        for ((path, kind), expected) in &self.files {
             tick(self.deadline)?;
             let observed = match kind {
                 ReadKind::Directory => self.provider.directory(path, self.deadline)?,
                 ReadKind::File => self.provider.observe(path, self.deadline)?,
                 ReadKind::Executable => self.provider.executable(path, self.deadline)?,
+                ReadKind::OutputDirectory => self.provider.output_directory(path, self.deadline)?,
             };
             if observed != *expected {
                 return Err(Failure::Changed);
@@ -498,8 +607,8 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hash = Sha256::new();
-        hash.update(b"memory-hooks-rust-read-set-v3\0");
-        for (path, (kind, item)) in &self.files {
+        hash.update(b"memory-hooks-rust-read-set-v4\0");
+        for ((path, kind), item) in &self.files {
             let bytes = path.as_os_str().as_encoded_bytes();
             hash.update(bytes.len().to_be_bytes());
             hash.update(bytes);
@@ -507,6 +616,7 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
                 ReadKind::File => 0,
                 ReadKind::Directory => 1,
                 ReadKind::Executable => 2,
+                ReadKind::OutputDirectory => 3,
             }]);
             hash.update(item.identity);
             hash.update([u8::from(item.bytes.is_some())]);
@@ -556,6 +666,19 @@ pub(super) mod fixtures {
     }
 
     impl ReadProvider for Scripted {
+        fn output_directory(
+            &self,
+            path: &Path,
+            _deadline: Instant,
+        ) -> Result<Observation, Failure> {
+            self.calls.borrow_mut().push(path.to_owned());
+            Ok(self
+                .directories
+                .borrow()
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| Observation::missing([0; 32])))
+        }
         fn executable(&self, path: &Path, deadline: Instant) -> Result<Observation, Failure> {
             self.observe(path, deadline)
         }
@@ -595,6 +718,103 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn output_file_kind_and_mount_proofs_do_not_inherit_directory_backing() {
+        assert_eq!(super::output_kind(libc::S_IFDIR | 0o700, 2, 1), Ok(true));
+        assert_eq!(super::output_kind(libc::S_IFREG | 0o600, 1, 1), Ok(false));
+        assert_eq!(
+            super::output_kind(libc::S_IFREG | 0o600, 2, 1),
+            Err(Failure::Read)
+        );
+        for kind in [
+            libc::S_IFLNK,
+            libc::S_IFIFO,
+            libc::S_IFCHR,
+            libc::S_IFBLK,
+            libc::S_IFSOCK,
+        ] {
+            assert_eq!(super::output_kind(kind | 0o600, 1, 1), Err(Failure::Read));
+        }
+    }
+
+    #[test]
+    fn output_probes_do_not_read_large_files_follow_symlinks_or_open_fifos() {
+        let end = deadline();
+        let base = std::env::var_os("MEMORY_HOOKS_TEST_ROOT")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from);
+        let directory = tempfile::tempdir_in(base).unwrap();
+        fs::write(
+            directory.path().join("large"),
+            vec![b'X'; MAX_FILE_BYTES + 1],
+        )
+        .unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        let mut reads = ReadSet::new(&Filesystem, deadline());
+        let entries = reads.output_directory(directory.path()).unwrap().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name() == "nested" && entry.is_directory())
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name() == "large" && !entry.is_directory())
+        );
+        reads.recheck().unwrap();
+        let missing = directory.path().join("future").join("output");
+        assert!(reads.output_directory(&missing).unwrap().is_none());
+        fs::create_dir_all(&missing).unwrap();
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
+        symlink(
+            directory.path().join("nested"),
+            directory.path().join("alias"),
+        )
+        .unwrap();
+        assert_eq!(
+            Filesystem
+                .output_directory(directory.path(), deadline())
+                .err(),
+            Some(Failure::Read)
+        );
+        fs::remove_file(directory.path().join("alias")).unwrap();
+        mkfifoat(
+            rustix::fs::CWD,
+            directory.path().join("fifo"),
+            Mode::from_bits_truncate(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            Filesystem
+                .output_directory(directory.path(), deadline())
+                .err(),
+            Some(Failure::Read)
+        );
+        assert!(Instant::now() < end);
+    }
+
+    #[test]
+    fn source_and_output_directory_observations_coexist_without_kind_substitution() {
+        let provider = Scripted::default();
+        provider.list("/work", &[("package", true)]);
+        let mut reads = ReadSet::new(&provider, deadline());
+        assert_eq!(reads.directory(Path::new("/work")).unwrap().len(), 1);
+        assert_eq!(
+            reads
+                .output_directory(Path::new("/work"))
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(reads.read(Path::new("/work")), Err(Failure::Read));
+        reads.recheck().unwrap();
+        provider.list("/work", &[("package", true), ("new", true)]);
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
     }
 
     #[test]

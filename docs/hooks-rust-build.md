@@ -193,9 +193,10 @@ Compiler temporary selection uses the modeled child TMPDIR, with the pinned
 Linux default `/tmp` when absent; it never invents a safer destination.
 
 These are required static roots, **not CompleteBuild evidence**. Existing
-descendants, dynamic package/build output names, direct compiler output trees,
-layout-derived child loader environment and final backing/identity checks still
-require resolution before the gate can use them. A parent root cannot cover an
+descendants and direct compiler output trees are resolved by the following
+inventory stage. Layout-derived child loader environment and final
+backing/identity checks still require resolution before the gate can use them.
+A parent root cannot cover an
 existing nested mount or symlink. The library retains actual `..` components,
 assigns stable candidate indices and rejects more than 64 directories or a
 path beyond 4096 bytes. No layout or configuration read creates a directory.
@@ -205,6 +206,49 @@ bounds, replacements and unsupported forms without executing a proposal.
 The layout and profile rules follow the pinned
 [Cargo 1.94 layout source](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/cargo/core/compiler/layout.rs)
 and [profile source](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/cargo/core/profiles.rs).
+
+## Directory inventory library
+
+`rust_build::inventory` expands the Cargo layout roots through every existing
+output descendant, including unknown package/build-script/incremental hashes,
+documentation crate directories, caches and install directories. Each existing
+directory receives its own output candidate so a nested mount gets its own
+backing assessment. Missing roots retain absence evidence. A directory listed
+as existing but missing when visited is a changed input. The shared read-set,
+64-directory ceiling, 512-entry listings, 16 recursive levels, path/byte bounds
+and original operation deadline apply throughout; no overflow is truncated.
+
+Output listings use metadata-only no-follow descriptors. Regular files must
+have the directory's mount ID; directory mount transitions are retained for
+separate assessment. Symlink files/directories, FIFOs, devices, sockets,
+individual file mounts and missing kernel mount-ID evidence deny. File contents
+are not opened, so oversized artifacts cannot turn a metadata probe into an
+unbounded read or block on a FIFO. Ordered names, file kind/identity, regular
+file metadata and mount IDs enter private recheck evidence. New entries,
+replacement, failed reads and late completion invalidate the analysis.
+Source-glob and stronger output listings at a coincident path are retained
+separately and both rechecked; each consumes one of the 64 observation slots.
+An output observation cannot substitute for a regular input file or executable.
+
+Direct rustc initially requires a literal `--out-dir DIRECTORY`; rustdoc
+requires `-o DIRECTORY` or `--output DIRECTORY`. The source must be an existing
+bounded regular file and its contents/identity are retained privately. Source,
+primary output, nested output and modeled compiler temporary roles stay
+separate. Directory output and ordinary `--test`/filename-free `--emit` forms
+are supported; default outputs, repeated output selectors, individual files,
+response files, short `-o=...` spelling, unknown editions/types and unsafe crate
+names deny. The generic command grammar continues to reject opaque compiler
+and linker flags before inventory resolution.
+
+The inventory covers the documented static directory contract at the check
+instant. Normal future directories inherit an assessed existing prefix;
+post-check creation/replacement/mount races and arbitrary user-code writes
+remain outside this proof. It does not assert execution locality, authorize a
+command or substitute for authoritative storage evaluation. The claimed-worker
+and audit handoff remain pending. Fixtures cover direct compiler/test/doc/emit
+forms, spaces, unknown existing output hashes, coincident roles, creation and
+replacement, metadata-only large artifacts, mounted-file rejection and
+FIFO/symlink denial without privileged mounts or executing a proposal.
 
 One shared read set permits 64 distinct paths, including absences, with
 256 KiB per file, 1 MiB total, 16 TOML levels and the operation deadline.
