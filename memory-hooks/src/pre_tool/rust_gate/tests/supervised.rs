@@ -1,5 +1,8 @@
 //! Real event, fresh-pack, worker and supervisor protocol with private providers.
 
+mod recovery;
+mod worktrees;
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -12,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{FixtureRuntime, Rig, isolated};
+use super::{FixtureReads, FixtureRuntime, Rig, isolated};
 use crate::config::ClientAdapter;
 use crate::installation::Installation;
 use crate::pre_tool::{self, DenyReason};
@@ -32,6 +35,10 @@ fn supervised_worker_fixture() {
     let installation = Installation::open(&std::path::PathBuf::from(control), id, client).unwrap();
     let mode = std::env::var("MEMORY_HOOKS_FIXTURE_MODE").unwrap();
     let runtime = FixtureRuntime {
+        reads: FixtureReads {
+            inaccessible: (mode == "unreadable")
+                .then(|| std::env::current_dir().unwrap().join(".cargo/config")),
+        },
         volatile: match mode.as_str() {
             "temp" => Some(CandidateRole::CompilerTemporary),
             "source" => Some(CandidateRole::SourceWorktree),

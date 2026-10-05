@@ -61,6 +61,14 @@ without executing it. Missing, inaccessible, replaced or late evidence denies.
 The operator is responsible for verifying the installed executable versions
 before provisioning; a version string does not discover or install a toolchain.
 
+Linux's [`/proc/pid/environ`](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html)
+describes the initial process environment; it does not track later userspace
+`setenv` changes. The sealed launcher/client agreement must therefore establish
+that execution inherits the declared build variables and tool resolution after
+all client processing. The observable check alone cannot establish that
+agreement. If internal environment changes or remote execution cannot be
+excluded for the pinned client, its execution capability remains unsupported.
+
 Executables must be outside protected workspaces, on trusted ownership/mode/ACL
 paths. All new declarations and executable identities enter the v6 fingerprint,
 including a domain-separated hash of inherited environment values. Activation
@@ -589,6 +597,15 @@ retirement mechanism, preserving unrelated parents and newer sessions.
 
 ## Supported operation and fixture matrix
 
+Source roots also receive a bounded no-follow metadata scan. Existing symlinks,
+special files and individually mounted regular files cannot inherit a source
+directory's backing under storage v1, so these forms deny. Cargo's
+[in-place lockfile writer](https://github.com/rust-lang/cargo/blob/rust-1.94.0/src/cargo/ops/lockfile.rs)
+makes this necessary at workspace/package roots as well as declared Rust source
+directories. A newly created lockfile or changed root entry invalidates retained
+analysis inputs. This conservative scan shares the existing read and deadline
+budgets and never reads arbitrary sidecar contents or executes user code.
+
 | Static operation | Supported subset | Conservative exclusions |
 | --- | --- | --- |
 | Cargo build/check/test/clippy/run/bench/doc | Literal built-in action, selected manifest/workspace/local dependencies, known profile/target, complete directory inventory, pinned compiler/linker and generated environment | Active scripts, native links, proc-macro packages, unknown aliases/extensions, opaque flag/config mechanisms, future source trees |
@@ -607,10 +624,42 @@ actual adapter events through the real fresh-pack fetch, claim, worker protocol,
 bounded collection and locked completion; their locality/backing injection exists
 only in test binaries. Required disk, volatile temp/source, unknown backing and
 isolated-container positive cases do not depend on development-host backing.
+The exact `/tmp/target` container fixture uses a private virtual empty output
+tree, shared by host and container cases, so CI's compiler cache at that path
+cannot affect its input inventory. `fixture_output_observations_cannot_read_ci_compiler_caches`
+checks this read-provider boundary. Production always uses the real filesystem
+reader; no client field, environment switch or public hook option selects it.
 Separate live probes report unavailable proof; virtiofs alone proves neither
 volatile nor persistent backing to the runtime evaluator. Executable/script and
 substitution sentinels establish nonexecution. Running the hook's test binaries
 is distinct from running proposed Rust commands.
+
+The issue #90 acceptance criteria map to these independently executable fixture
+groups. All positive backing decisions use deterministic providers; their
+existence does not assert that a live workstation's filesystem has been proven.
+
+| Issue acceptance | Evidence |
+| --- | --- |
+| Every named Cargo action and selected toolchain produces complete static directory candidates without execution | `rust_build::operation::tests::every_action_combines_complete_roles_and_retains_nonexecution_evidence`, `rust_build::inventory` tests, and `pre_tool::rust_gate::tests::supervised::supervised_named_actions_native_permission_and_child_storage_matrix` |
+| Literal cwd, environment, configuration, manifest, output and toolchain precedence is accounted for | `rust_build::{command,config,manifest,toolchain,execution,cargo}` tests; `supervised_static_contract_matrix_and_nonexecution_sentinels`, `supervised_environment_config_workspace_and_input_bounds`; `supervised::worktrees::linked_callback_builds_but_cross_worktree_execution_cannot_rebind` |
+| Host volatile storage denies; positively proven disk proceeds to native permissions | `storage::tests::host_role_and_backing_matrix`, `temp_source_unknown_and_execution_races_deny_even_with_disk_target`, and the supervised named-action/native-permission matrix |
+| Exact protected isolated-container policy permits its configured local output; the same request on a host denies | `storage::tests::container_exception_requires_exact_proof_and_location`, `literal_cwd_and_exact_container_outputs_have_complete_positive_cases`, and `supervised_static_contract_matrix_and_nonexecution_sentinels` |
+| Dynamic, ambiguous, unknown-path, spoofed-profile and cross-namespace requests deny | Parser/environment/read-bound tests, `supervised_replacements_namespace_deadline_and_worker_death_invalidate_exact_child`, missing-v6/unknown-tool integration fixtures in `memory-hooks/tests/pre_tool.rs`, and linked-worktree rejection |
+| Analysis never launches proposed commands or scripts; race and sandbox limitations are documented | Executable/build-script/substitution marker sentinels, read-provider assertions, `rust_build::files` tests, and `supervised::recovery::nonregular_inaccessible_scripts_and_late_storage_are_safe_denials`; the trust and rollout sections below |
+
+Additional recovery fixtures prove that a superseding SessionStart survives an
+old claim, a changed mandatory pack retains stronger parent invalidation, and
+v3 audit capacity/corruption cannot complete a claim. The audit fixtures validate
+legacy v1/v2 compatibility, closed v3 fields and worst-case delegated records
+below 2 KiB. `late_durable_audit_cannot_complete_original_deadline` checks the
+deadline again after persistence. Existing session/delegation fixtures cover
+partial output, worker termination, concurrent attempts and native-denial output.
+
+Local validation uses separate workspace formatting, all-feature/all-target
+build and test runs, and strict pedantic Clippy. Hook compilation is also checked
+with MSRV 1.88 and the Windows GNU target; production execution-contract support
+remains the documented pinned Linux subset. PostgreSQL/pgvector tests require
+their database prerequisite. A missing prerequisite is an incomplete check.
 
 Rollout remains operator-controlled: finish implementation and exact-head checks,
 obtain independent review and merge, then separately provision protected v6

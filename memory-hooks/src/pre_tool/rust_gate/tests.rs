@@ -391,7 +391,10 @@ impl Rig {
 // Virtual empty output tree at the registry's exact container target. CI uses
 // that same path for real compiler caches; fixture observations must never
 // read those unrelated artifacts. This provider exists only in test binaries.
-struct FixtureReads;
+#[derive(Default)]
+struct FixtureReads {
+    inaccessible: Option<PathBuf>,
+}
 
 impl FixtureReads {
     fn virtual_output(
@@ -421,6 +424,9 @@ impl ReadProvider for FixtureReads {
         path: &Path,
         deadline: Instant,
     ) -> std::result::Result<Observation, AnalysisFailure> {
+        if self.inaccessible.as_deref() == Some(path) {
+            return Err(AnalysisFailure::Read);
+        }
         if Self::virtual_output(path, deadline)? {
             Ok(Observation::missing([0; 32]))
         } else {
@@ -471,21 +477,26 @@ fn fixture_output_observations_cannot_read_ci_compiler_caches() {
         "/tmp/target/cargo-home/config",
     ] {
         assert!(
-            FixtureReads.observe(Path::new(path), end).unwrap() == Observation::missing([0; 32])
+            FixtureReads::default()
+                .observe(Path::new(path), end)
+                .unwrap()
+                == Observation::missing([0; 32])
         );
         assert!(
-            FixtureReads.output_directory(Path::new(path), end).unwrap()
+            FixtureReads::default()
+                .output_directory(Path::new(path), end)
+                .unwrap()
                 == Observation::missing([0; 32])
         );
     }
     assert!(!FixtureReads::virtual_output(Path::new("/tmp/target-other"), end).unwrap());
     assert!(
-        FixtureReads
+        FixtureReads::default()
             .observe(Path::new("/tmp/target/../outside"), end)
             .is_err()
     );
     assert!(
-        FixtureReads
+        FixtureReads::default()
             .observe(Path::new("/tmp/target"), Instant::now())
             .is_err()
     );
@@ -506,7 +517,7 @@ struct FixtureRuntime {
 impl Default for FixtureRuntime {
     fn default() -> Self {
         Self {
-            reads: FixtureReads,
+            reads: FixtureReads::default(),
             volatile: None,
             backing: storage::FixtureBacking::Disk,
             missing_locality: false,

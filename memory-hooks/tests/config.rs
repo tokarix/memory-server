@@ -22,6 +22,15 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
     fs::create_dir(&plain).expect("directory");
     let path = fixture.path().join("hooks.toml");
     let template = include_str!("../../memory-hooks-v6.toml.example");
+    // Preserve the inspection-only baseline without its optional native pin;
+    // the complete template and protected linker are exercised below.
+    let (prefix, native) = template
+        .split_once("[rust_execution.native_linker]\n")
+        .expect("native template");
+    let (_, environment) = native
+        .split_once("[rust_execution.environment]\n")
+        .expect("environment template");
+    let template = format!("{prefix}[rust_execution.environment]\n{environment}");
     let mut source = template
         .replace("kind = \"git\"", "kind = \"directory\"")
         .replace(

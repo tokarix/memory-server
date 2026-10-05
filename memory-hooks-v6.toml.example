@@ -1,5 +1,7 @@
 # NON-LIVE TEMPLATE: separately provision and verify every pin below.
 # This file does not install a launcher or establish runtime evidence.
+# Provision a clean managed client environment without CDPATH, PWD, OLDPWD,
+# shell startup/function variables or native compiler/loader overrides.
 # Direct same-cwd managed delegation for Claude Code 2.1.92.
 # Install outside every workspace with mode 0600. Register SessionStart,
 # SubagentStart and catch-all PreToolUse synchronously as documented.
@@ -89,6 +91,12 @@ rustc = "/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/rust
 rustdoc = "/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/rustdoc"
 cargo-clippy = "/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo-clippy"
 clippy-driver = "/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/clippy-driver"
+# Build-producing Cargo/rustc requests need this separately verified native pin.
+# Omitting it permits inspection/delivery and supported readonly/rustdoc forms;
+# it cannot establish a complete native build. No discovery or install occurs.
+[rust_execution.native_linker]
+semantics = "rust-lld-1.94.0-linux-v1"
+path = "/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
 [rust_execution.environment]
 HOME = "/srv/managed/home"
 PATH = "/srv/managed/cargo/bin:/usr/bin"
@@ -96,3 +104,6 @@ CARGO_HOME = "/srv/managed/cargo"
 RUSTUP_HOME = "/srv/managed/rustup"
 RUSTUP_TOOLCHAIN = "1.94.0-x86_64-unknown-linux-gnu"
 TMPDIR = "/srv/work/example/target/compiler-tmp"
+# Stable Rust 1.94 spelling; update the absolute path with the protected pin.
+# Compiler drivers and arbitrary linker arguments are outside this subset.
+RUSTFLAGS = "-C linker=/srv/managed/rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld -C linker-flavor=ld.lld"
