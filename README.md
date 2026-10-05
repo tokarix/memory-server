@@ -663,6 +663,7 @@ Useful files:
 - [`src/transcript.rs`](src/transcript.rs): JSONL transcript parsing and chunking
 - [`docs/http-api-v1.md`](docs/http-api-v1.md): planned HTTP API split
 
-The standalone Linux [storage evaluator](docs/hooks-storage.md) assesses explicit
-directory candidates against structured storage policy. It is not wired into
-live hooks; issue #90 owns candidate discovery, gate and audit integration.
+The [managed Rust gate](docs/hooks-rust-build.md) resolves bounded static build
+paths and calls the Linux [storage evaluator](docs/hooks-storage.md) against
+structured mandatory policy. Protected v6 execution/locality proof and durable
+audit v3 are required before a neutral result reaches native client permissions.

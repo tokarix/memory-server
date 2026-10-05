@@ -1,11 +1,11 @@
 //! Bounded, allowlisted storage evidence and audit handoff.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Point-in-time result; only Pass satisfies an applicable requirement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// Every applicable requirement has positive evidence.
@@ -30,7 +30,7 @@ impl Outcome {
 }
 
 /// Safe diagnostic codes; no peer or operating-system messages are retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// Positive backing evidence satisfies the requirement.
@@ -196,7 +196,8 @@ pub struct Report {
 }
 
 /// Compact version-one projection for #90; this module never appends it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditProjection {
     /// Projection version.
     pub(super) version: u8,
@@ -446,6 +447,64 @@ impl Report {
 }
 
 impl AuditProjection {
+    /// Validate every decoded field before accepting persisted compact evidence.
+    /// This does not reconstruct filesystem observations or authorize execution.
+    ///
+    /// # Errors
+    /// Rejects inconsistent outcomes, unsupported versions and invalid bounds.
+    pub fn validate(&self) -> Result<(), Reason> {
+        let valid_hash = |hash: &str| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        let count = self
+            .counts
+            .iter()
+            .try_fold(0_u32, |total, count| total.checked_add(*count));
+        let rank = self
+            .counts
+            .iter()
+            .rposition(|count| *count != 0)
+            .unwrap_or(0);
+        let identity = self.policy_id.is_some();
+        let reason_matches = match self.outcome {
+            Outcome::Pass => self.reason == Reason::Verified,
+            Outcome::NotApplicable => self.reason == Reason::Unconstrained,
+            Outcome::Deny => matches!(
+                self.reason,
+                Reason::VolatileBacking | Reason::AttestationMismatch | Reason::ForbiddenTarget
+            ),
+            Outcome::Indeterminate => !matches!(
+                self.reason,
+                Reason::Verified | Reason::Unconstrained | Reason::VolatileBacking
+            ),
+        };
+        if self.version != 1
+            || count.is_none_or(|value| value > 4096)
+            || (usize::from(self.outcome.rank()) != rank && self.reason != Reason::ReportOverflow)
+            || !reason_matches
+            || !valid_hash(&self.assessment_hash)
+            || !valid_hash(&self.evidence_hash)
+            || self
+                .candidate_index
+                .is_some_and(|index| usize::from(index) >= super::MAX_CANDIDATES)
+            || self.policy_id.is_some_and(|id| id.is_nil())
+            || self.policy_revision.is_some_and(|revision| revision < 1)
+            || identity != self.policy_revision.is_some()
+            || identity != self.policy_hash.is_some()
+            || self
+                .policy_hash
+                .as_deref()
+                .is_some_and(|hash| !valid_hash(hash))
+            || (self.outcome == Outcome::NotApplicable && identity)
+        {
+            return Err(Reason::InvalidPack);
+        }
+        Ok(())
+    }
+
     /// Projection version.
     #[must_use]
     pub fn version(&self) -> u8 {

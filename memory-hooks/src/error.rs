@@ -53,6 +53,14 @@ pub enum Error {
     OutputTooLarge,
     /// Required local audit evidence could not be made durable.
     AuditFailed,
+    /// Managed Rust execution or locality proof is absent or changed.
+    RustExecutionUnsupported,
+    /// Static Rust operation inputs are incomplete, unsupported or changed.
+    RustAnalysisIndeterminate,
+    /// Positive storage evidence violates an authoritative Rust requirement.
+    RustStorageDenied,
+    /// Complete passing Rust storage evidence is unavailable.
+    RustStorageIndeterminate,
     /// An operation failed; the OS code is safe to disclose.
     Io(&'static str, Option<i32>),
     /// A write may have been renamed but not durably synced.
@@ -92,6 +100,10 @@ impl Error {
             Self::SnapshotInvalid(_) => "snapshot_invalid",
             Self::OutputTooLarge => "output_too_large",
             Self::AuditFailed => "audit_failed",
+            Self::RustExecutionUnsupported => "rust_execution_unsupported",
+            Self::RustAnalysisIndeterminate => "rust_analysis_indeterminate",
+            Self::RustStorageDenied => "rust_storage_denied",
+            Self::RustStorageIndeterminate => "rust_storage_indeterminate",
             Self::Io(_, _) | Self::DurabilityUncertain => "io",
             Self::UnsupportedPlatform => "unsupported_platform",
         }

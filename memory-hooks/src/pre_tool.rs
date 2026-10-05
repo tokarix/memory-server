@@ -18,6 +18,8 @@ use crate::limits;
 use crate::session_identity::ChildIdentity;
 use crate::session_start::read_event_bytes;
 
+mod rust_gate;
+
 /// Maximum UTF-8 bytes in a single client event.
 pub const EVENT_BYTES: usize = 64 * 1024;
 
@@ -29,6 +31,8 @@ pub enum ToolCategory {
     Shell,
     /// An edit, write, or patch tool.
     Write,
+    /// An explicitly pinned non-executing inspection tool.
+    Read,
     /// A model context protocol tool.
     Mcp,
     /// A parent agent or spawn tool.
@@ -234,6 +238,7 @@ fn checked_path(raw: &str) -> Result<PathBuf> {
 fn category(adapter: ClientAdapter, tool: &str) -> ToolCategory {
     match (adapter, tool) {
         (_, "Bash") => ToolCategory::Shell,
+        (_, "Read" | "Glob" | "Grep") => ToolCategory::Read,
         (ClientAdapter::CodexV1, "apply_patch")
         | (ClientAdapter::ClaudeV1, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
             ToolCategory::Write
@@ -273,7 +278,7 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
         .input
         .as_object()
         .ok_or(Error::EventInvalid("tool_input"))?;
-    if matches!(parts.tool_name, "Bash" | "apply_patch")
+    if parts.tool_name == "apply_patch"
         && input
             .get("command")
             .and_then(Value::as_str)
@@ -311,13 +316,13 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
     if parts.tool_name == "Bash" && explicit.len() > 1 {
         return Err(Error::EventInvalid("ambiguous tool cwd"));
     }
-    if parts.tool_name == "Bash"
-        && let Some(location) = explicit.first()
-    {
-        let location = location.as_str().ok_or(Error::EventInvalid("tool cwd"))?;
-        if checked_path(location)? != actual {
-            return Err(Error::EventInvalid("tool cwd mismatch"));
-        }
+    let execution = if parts.tool_name == "Bash" {
+        crate::execution_input::ExecutionInput::from_value(parts.input).ok()
+    } else {
+        None
+    };
+    if parts.tool_name == "Bash" && execution.is_none() && !explicit.is_empty() {
+        return Err(Error::EventInvalid("unsupported execution cwd"));
     }
     Ok(PreToolEvent {
         session_id: parts.session_id.to_owned(),
@@ -326,11 +331,7 @@ fn checked(adapter: ClientAdapter, parts: EventParts<'_>) -> Result<PreToolEvent
             .map(|id| ChildIdentity::from_validated(parts.session_id, id)),
         cwd,
         category: category(adapter, parts.tool_name),
-        execution: if parts.tool_name == "Bash" {
-            crate::execution_input::ExecutionInput::from_value(parts.input).ok()
-        } else {
-            None
-        },
+        execution,
         spawn: match (adapter, parts.tool_name) {
             (ClientAdapter::ClaudeV1, "Agent") => SpawnKind::Supported,
             (_, "Task" | "Agent" | "TaskCreate" | "TaskUpdate") => SpawnKind::Unsupported,
@@ -438,6 +439,10 @@ pub fn deny_json(reason: &'static str) -> Result<Vec<u8>> {
             | "gate_contract_required"
             | "missing_child_linkage"
             | "parent_invalid"
+            | "rust_analysis_indeterminate"
+            | "rust_execution_unsupported"
+            | "rust_storage_denied"
+            | "rust_storage_indeterminate"
     ) {
         return Err(Error::EventInvalid("denial reason"));
     }
@@ -477,6 +482,10 @@ pub(crate) enum DenyReason {
     GateContractRequired,
     MissingChildLinkage,
     ParentInvalid,
+    RustAnalysisIndeterminate,
+    RustExecutionUnsupported,
+    RustStorageDenied,
+    RustStorageIndeterminate,
 }
 
 impl DenyReason {
@@ -493,6 +502,10 @@ impl DenyReason {
             Self::GateContractRequired => "gate_contract_required",
             Self::MissingChildLinkage => "missing_child_linkage",
             Self::ParentInvalid => "parent_invalid",
+            Self::RustAnalysisIndeterminate => "rust_analysis_indeterminate",
+            Self::RustExecutionUnsupported => "rust_execution_unsupported",
+            Self::RustStorageDenied => "rust_storage_denied",
+            Self::RustStorageIndeterminate => "rust_storage_indeterminate",
         }
     }
 }
@@ -611,8 +624,21 @@ fn claim_event(
 /// # Errors
 /// The supervisor treats any error, incomplete output, or worker crash as deny.
 pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -> Result<()> {
-    let bytes = read_event_bytes(Instant::now() + Duration::from_secs(60))?;
-    let event = parse_event(installation.client(), &bytes)?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let bytes = read_event_bytes(deadline)?;
+    run_worker_with(installation, writer, &bytes, deadline, |check| {
+        check.finish()
+    })
+}
+
+fn run_worker_with(
+    installation: &Installation,
+    writer: &mut impl Write,
+    bytes: &[u8],
+    deadline: Instant,
+    finish: impl FnOnce(&rust_gate::Check<'_>) -> std::result::Result<(), rust_gate::Failure>,
+) -> Result<()> {
+    let event = parse_event(installation.client(), bytes)?;
     let active = installation.active()?;
     let gate = active
         .config
@@ -665,26 +691,22 @@ pub(crate) fn run_worker(installation: &Installation, writer: &mut impl Write) -
         };
         return write_message(writer, &WorkerMessage::Denied { reason });
     }
-    if let Err(error) = installation.finish_check(&claim, || {
-        audit::append(
-            installation,
-            &claim,
-            event.category(),
-            enforced && event.supported_spawn(),
-            "neutral",
-            "checked",
-            gate,
-        )
-    }) {
+    let check = rust_gate::Check {
+        installation,
+        config: &active.config,
+        claim: &claim,
+        event: &event,
+        input: bytes,
+        deadline,
+        gate,
+        spawn: enforced && event.supported_spawn(),
+    };
+    if let Err(failure) = finish(&check) {
         installation.fail_check(&claim)?;
         return write_message(
             writer,
             &WorkerMessage::Denied {
-                reason: if error == Error::AuditFailed {
-                    DenyReason::AuditFailed
-                } else {
-                    DenyReason::SnapshotInvalid
-                },
+                reason: failure.reason,
             },
         );
     }
@@ -789,12 +811,14 @@ mod tests {
         assert!(parse_event(adapter, &serde_json::to_vec(&delegated).unwrap()).is_err());
         let input = json!({"command":"true", "cwd": std::env::current_dir().unwrap(), "workdir": std::env::current_dir().unwrap()});
         assert!(parse_event(adapter, &event("Bash", &input)).is_err());
+        // Execution cwd is data here; only the checked worker binding resolver
+        // can decide whether this literal transition remains within authority.
         assert!(
             parse_event(
                 adapter,
                 &event("Bash", &json!({"command":"true", "workdir":"/"}))
             )
-            .is_err()
+            .is_ok()
         );
         let mut duplicate = event("Bash", &json!({"command":"true"}));
         duplicate.pop();

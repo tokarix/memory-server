@@ -15,6 +15,9 @@ values enter private provenance; relative compiler TMPDIR is resolved for
 every selected/local dependency package cwd. Generated values never grant
 authority. Local-install compilation, cache and installation/staging directory
 roots retain distinct coverage through the existing descendant inventory.
+Cargo process staging/temp destinations are BuildOutput candidates independently
+of compiler TMPDIR; primary and nested Cargo environments are both retained.
+A forced compiler `[env]` value cannot conceal Cargo's inherited temp directory.
 The stage does not launch Cargo or discover unit hashes by compilation.
 
 Build scripts, native links declarations and unknown target metadata remain
@@ -23,9 +26,9 @@ environment, loader/linker flags and destinations. Cached script output cannot
 prove its next execution. Explicitly disabled scripts and local packages
 without a default script are supported. This conservative exclusion does not
 turn the hook into a sandbox for procedural macros or arbitrary run/test/bench
-code. The consumer must still prove execution locality, exact binding and
-claim/pack linkage, evaluate storage and complete mandatory audit under locks.
-The library alone does not authorize a command or connect live enforcement.
+code. The managed pre-tool consumer proves execution locality, exact binding and
+claim/pack linkage, evaluates storage and completes mandatory audit under locks.
+A neutral result continues to the client's native permission decision.
 
 Schema v6 adds `rust_execution` to the protected operator configuration.
 The non-live [v6 example](../memory-hooks-v6.toml.example) deliberately has
@@ -43,7 +46,9 @@ An operator must provision a sealed launcher whose execution tools and hook
 worker share a mount namespace and filesystem root. Its inherited build
 environment must equal the protected declaration. Tool resolution must use the
 listed executables; shells must exclude functions, aliases, startup files and
-login/interactive operation. Merely assigning a profile supplies none of this
+login/interactive operation. Exclude `CDPATH`, `PWD` and `OLDPWD` from the
+managed client environment so literal `cd` uses the checked physical cwd
+and cannot inherit a search path or logical alias. Merely assigning a profile supplies none of this
 evidence. Do not declare these capabilities for hosted, remote or interactive
 continuations whose actual behavior has not been established.
 
@@ -71,10 +76,12 @@ execution fields cannot establish a supported execution request. The event
 limit remains 64 KiB; argv has at most 512 words of 4096 bytes, environment at
 most 128 entries, with no NUL or prefix truncation.
 
-This contract is an integration prerequisite. The bounded Rust resolver and
-storage gate integration are separate implementation units of #90. Until they
-are connected, the generic gate's behavior is unchanged and this declaration
-alone must not be advertised as Rust storage enforcement.
+The protected declaration is required when the validated storage registry
+finds an enforced Rust constraint for an execution request. Existing v1-v5
+configurations can deliver and inspect rules, and known file edits and reads
+retain the generic gate. Rust execution without v6 proof denies with
+`rust_execution_unsupported`; unknown execution tools also deny in that scope.
+No profile, repository file or inline environment can supply this authority.
 
 ## Literal command grammar
 
@@ -272,7 +279,7 @@ instant. Normal future directories inherit an assessed existing prefix;
 post-check creation/replacement/mount races and arbitrary user-code writes
 remain outside this proof. It does not assert execution locality, authorize a
 command or substitute for authoritative storage evaluation. The claimed-worker
-and audit handoff remain pending. Fixtures cover direct compiler/test/doc/emit
+and audit handoff are implemented by the managed gate. Fixtures cover direct compiler/test/doc/emit
 forms, spaces, unknown existing output hashes, coincident roles, creation and
 replacement, metadata-only large artifacts, mounted-file rejection and
 FIFO/symlink denial without privileged mounts or executing a proposal.
@@ -288,10 +295,10 @@ observation catches replacement and newly created higher-precedence configs;
 late reads fail. A domain-separated read-set digest reveals no raw contents,
 but low-entropy values can still be guessed.
 
-This library remains separate from the live gate. It does not establish
-workspace/dependency completeness, toolchain selector agreement, locality or a
-complete output inventory. It cannot enforce storage until those checks and
-the evaluator/audit handoff are connected. Rechecks are point-in-time evidence;
+The read-set library itself does not establish workspace/dependency completeness,
+toolchain selector agreement, locality or a complete output inventory. The
+complete operation resolver and claimed gate supply those checks and the
+evaluator/audit handoff. Rechecks are point-in-time evidence;
 same-UID tampering and the race after the final check remain.
 
 ## Local source selection library
@@ -337,7 +344,8 @@ follows glob-member symlinks or launches Cargo, scripts or compiler programs.
 The source inventory is stable and private. It supplies the workspace default
 target base and selected package metadata for later output-layout resolution.
 It does not resolve toolchain selectors, profiles, remote caches, concrete
-build outputs or execution locality, and remains disconnected from the gate.
+build outputs or execution locality by itself; the complete operation and gate
+combine these proofs.
 The [Cargo workspace reference](https://doc.rust-lang.org/cargo/reference/workspaces.html)
 and [dependency reference](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html)
 describe the source semantics underlying the tested Cargo 1.94 subset.
@@ -479,7 +487,7 @@ and its [unique path insertion](https://github.com/rust-lang/rustup/blob/1.28.2/
 This library still supplies no locality, claim or policy authority. The worker
 must combine it with decision-time locality, exact binding/pack linkage,
 complete output inventories, storage evaluation and locked audited completion.
-Storage enforcement remains disconnected until that integration is complete.
+The claimed consumer performs that handoff as described below.
 
 ## Checked execution cwd handoff
 
@@ -507,10 +515,10 @@ Callback, execution and worktree directory device/inode evidence is retained
 privately and checked immediately after resolution and during the final
 handoff recheck. Directory replacement, changed literal resolution or a new
 nested repository denies. Every identity probe now respects the remaining
-shared deadline; rechecks cannot reset that deadline. Integration still must
-combine these observations with the exact claim, pack, execution contract,
-input read set, storage report and locked audit completion. The live gate has
-not yet been wired to this API, and same-UID/post-check race limits remain.
+shared deadline; rechecks cannot reset that deadline. The gate combines these
+observations with the exact claim, pack, execution contract, input read set,
+storage report and locked audit completion. Same-UID and post-check race limits
+remain.
 
 Real identity fixtures cover same-cwd/nested/parent transitions, literal spaces,
 unchanged callback cwd, linked-worktree and cross-binding rejection, symlinks,
@@ -534,3 +542,81 @@ Compiler-driver, GCC/LLVM/LLD and native search-path environment overrides are
 excluded from the managed execution proof. Active build scripts, native links
 metadata and procedural-macro packages remain outside this conservative
 subset because their generated compiler/host environment is unresolved.
+
+
+## Claimed gate and audit
+
+After emitting its claim attempt, the synchronous worker fetches and compares
+one fresh complete pack. The authoritative registry decides Rust storage
+applicability. Analysis keeps callback cwd and session authority while resolving
+a literal execution cwd through `CheckedExecution`; a cross-binding or linked
+worktree transition cannot select another policy. Unsupported registry mandates
+remain enforced, including for otherwise read-only command spellings.
+
+The original worker deadline covers input, freshness, analysis and completion;
+the supervisor retains its separate 35-second hard boundary. Filesystem analysis
+runs synchronously. Inside installation and ordered lineage locks the gate
+rechecks the protected contract, binding, read set, executable identities and
+observable locality, evaluates every directory candidate with the same pack,
+then rechecks those inputs immediately before mandatory durable audit. Storage
+has its own bounded allowance capped by the original deadline. No cached,
+cancelled or late report can authorize a call. Required target, output,
+compiler-temporary and source roles remain distinct when their paths coincide.
+Empty coverage and all-NotApplicable build reports cannot pass.
+
+Audit v3 persists only the closed analysis outcome, candidate count, execution
+evidence version, domain-separated operation/provenance and scope digests, pack
+linkage and compact validated storage projection. Claim attempt, generation and
+root/child lineage stay in the record, linked by a separate domain-separated
+record digest. This checksum is evidence linkage, not authentication against a
+same-UID adversary. Raw argv, environment, paths, configuration, policy text and
+credentials are excluded. Failure before a report retains bounded indeterminate
+evidence. Validated v1/v2 records are accepted unchanged; new fields and reasons
+are rejected on those versions. Each v3 record must fit the existing 2-KiB
+ceiling, including maximum delegated fields; overflow or audit corruption denies.
+
+| Denial | Meaning | Operator remediation |
+| --- | --- | --- |
+| `rust_execution_unsupported` | Missing or changed sealed local execution capability, unsupported tool, or different binding | Verify the supported launcher, exact executable/environment/namespace/root pins and callback coverage; provision v6 separately, activate and deliver a fresh session |
+| `rust_analysis_indeterminate` | Unsupported grammar, configuration, generated environment, source coverage, read-set change or deadline | Use a documented literal subset and complete static paths; resolve ambiguous inputs before fresh delivery |
+| `rust_storage_denied` | An applicable candidate violates authoritative storage policy | Move every affected target/output/temp/source destination to approved storage, then deliver a fresh session |
+| `rust_storage_indeterminate` | Backing, mount/path or execution evidence cannot be proven | Establish positive backing and locality evidence; do not replace uncertainty with a profile declaration |
+
+Local child command violations retire only that child's exact claim. Parent
+policy changes retain the existing stronger captured-parent invalidation.
+Audit failure and stale generations deny through the existing conditional
+retirement mechanism, preserving unrelated parents and newer sessions.
+
+## Supported operation and fixture matrix
+
+| Static operation | Supported subset | Conservative exclusions |
+| --- | --- | --- |
+| Cargo build/check/test/clippy/run/bench/doc | Literal built-in action, selected manifest/workspace/local dependencies, known profile/target, complete directory inventory, pinned compiler/linker and generated environment | Active scripts, native links, proc-macro packages, unknown aliases/extensions, opaque flag/config mechanisms, future source trees |
+| Cargo test/bench `--list` or `--no-run` | Build-producing; same full candidate and storage checks | Diagnostic wording never bypasses storage |
+| Cargo install | Local `--path`, resolvable compilation/staging/cache/install directories and supported local dependencies | Registry/git installs with future sources or opaque staging destinations |
+| Direct rustc/rustdoc | Existing literal source and supported directory outputs; direct rustc includes `--test` and exact native linker flags | Individual output files, response files, opaque emit/linker/incremental/save-temp outputs |
+| Readonly | Exact pinned version and bounded built-in help forms | Metadata/fetch/update/clean/fmt, secondary aliases and arbitrary scripts |
+| Client execution | Codex 0.158.0 / Claude 2.1.92 synchronous local managed callback; protected Rust/Cargo 1.94.0 and rustup 1.28.2 | Remote, hosted, interactive/login shells, continuation input and namespace-changing entrypoints |
+
+The resolver's hand-authored fixtures establish key precedence, configuration
+extension/order/path bases, workspace/local selection, output roles, source
+aliases and read-set replacement without invoking analyzed tools. Private gate
+fixtures combine real protected state and claims with read-only filesystem
+observations and #88's deterministic backing provider. Supervised fixtures feed
+actual adapter events through the real fresh-pack fetch, claim, worker protocol,
+bounded collection and locked completion; their locality/backing injection exists
+only in test binaries. Required disk, volatile temp/source, unknown backing and
+isolated-container positive cases do not depend on development-host backing.
+Separate live probes report unavailable proof; virtiofs alone proves neither
+volatile nor persistent backing to the runtime evaluator. Executable/script and
+substitution sentinels establish nonexecution. Running the hook's test binaries
+is distinct from running proposed Rust commands.
+
+Rollout remains operator-controlled: finish implementation and exact-head checks,
+obtain independent review and merge, then separately provision protected v6
+launcher/environment/locality and any container attestation, activate to advance
+the epoch, deliver new sessions and run controlled canaries. This implementation
+installs or activates no live launcher or policy. The static contract does not
+bound arbitrary writes by run/test/bench code, macros or other user programs.
+Missing live callback coverage, same-UID tampering, kernel evidence limits and
+the race between final check and actual execution remain outside its guarantee.

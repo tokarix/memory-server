@@ -96,6 +96,46 @@ fn target(path: &Path) -> Candidate {
 }
 
 #[test]
+fn registry_query_retains_unknown_mandates_without_path_probes() {
+    use memory_hooks::storage::{requires_rust_analysis, scope_digest};
+    let fixture = Fixture::new();
+    let binding = fixture.binding("workstation-host");
+    let mut rule = manifest_rule("host_active");
+    assert!(requires_rust_analysis(&binding, &pack(&binding, vec![rule.clone()])).unwrap());
+    rule.values = [(
+        "rust.build.future_storage".to_owned(),
+        "unknown-secret".to_owned(),
+    )]
+    .into();
+    assert!(requires_rust_analysis(&binding, &pack(&binding, vec![rule.clone()])).unwrap());
+    rule.values.clear();
+    rule.content = "rust.build.target_storage=persistent-disk /secret".to_owned();
+    let empty = pack(&binding, vec![rule]);
+    assert!(!requires_rust_analysis(&binding, &empty).unwrap());
+    assert_eq!(
+        scope_digest(&binding).unwrap(),
+        evaluate(&binding, &empty, LOCAL, &[]).scope_hash()
+    );
+    let mut corrupt = empty;
+    corrupt.digest = "unknown-secret".to_owned();
+    assert!(requires_rust_analysis(&binding, &corrupt).is_err());
+}
+
+#[test]
+fn storage_scope_cannot_reset_an_expired_operation_deadline() {
+    let fixture = Fixture::new();
+    let binding = fixture.binding("workstation-host");
+    let pack = pack(&binding, vec![manifest_rule("host_active")]);
+    let expired = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(matches!(
+        memory_hooks::storage::EvaluationScope::observe_before(&binding, &pack, LOCAL, expired),
+        Err(Reason::Limit)
+    ));
+}
+
+#[test]
 fn structured_registry_scope_selectors_unknown_and_prose() {
     let fixture = Fixture::new();
     let binding = fixture.binding("workstation-host");

@@ -117,3 +117,11 @@ hooks, async hooks, and client kills are outside this boundary. Same-UID
 tampering is also outside the protected installation model. A nonblocking
 `SubagentStart` cannot prevent child creation, and local emission proves
 neither model obedience nor a sandbox or semantic policy interpretation.
+
+
+Enforced Rust child execution additionally uses the [v6 static build contract](hooks-rust-build.md).
+The child retains its callback authority and exact captured parent/pack linkage;
+a supported literal command cwd cannot cross binding or worktree. Storage,
+analysis, locality and audit failures retire only that child's claim. A changed
+mandatory pack still uses the existing captured-parent retirement rule. Parent
+spawn neutrality supplies no child storage proof.

@@ -6,10 +6,12 @@ use uuid::Uuid;
 
 use crate::config::{ClientAdapter, DelegationConfig, GateConfig, hash_part};
 use crate::error::{Error, Result};
+use crate::identity::ResolvedBinding;
 use crate::installation::Installation;
 use crate::pre_tool::{PreToolEvent, ToolCategory};
 use crate::session_identity::ChildIdentity;
 use crate::snapshot::{ClaimedCheck, session_hash};
+use crate::storage::{AuditProjection, Outcome, Report, scope_digest};
 
 const COUNTER: &str = "audit-counter";
 const LOCK: &str = "lock-audit";
@@ -43,6 +45,126 @@ struct Record {
     parent_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     child_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rust: Option<RustEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linkage: Option<String>,
+}
+
+/// Safe classification persisted without execution data.
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RustOutcome {
+    AuditedReadOnly,
+    CompleteBuild,
+    Indeterminate,
+}
+
+/// Validated redacted analysis handoff. Paths and command values cannot enter it.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RustEvidence {
+    analysis: RustOutcome,
+    candidates: u8,
+    contract: u8,
+    operation: String,
+    scope: String,
+    pack: String,
+    storage: Option<AuditProjection>,
+}
+
+impl RustEvidence {
+    pub(crate) fn new(
+        binding: &ResolvedBinding,
+        claim: &ClaimedCheck,
+        operation: &[u8],
+        contract: u8,
+    ) -> Result<Self> {
+        claim
+            .pack
+            .validate_for(binding.project(), binding.context())
+            .map_err(|_| Error::StateScopeMismatch)?;
+        let mut hash = Sha256::new();
+        hash.update(b"memory-hooks-rust-audit-operation-v1\0");
+        hash_part(&mut hash, operation);
+        let evidence = Self {
+            analysis: RustOutcome::Indeterminate,
+            candidates: 0,
+            contract,
+            operation: format!("{:x}", hash.finalize()),
+            scope: scope_digest(binding).map_err(|_| Error::StateCorrupt)?,
+            pack: claim.pack.digest.clone(),
+            storage: None,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    pub(crate) fn analyzed(&mut self, outcome: RustOutcome, count: usize) -> Result<()> {
+        self.analysis = outcome;
+        self.candidates = u8::try_from(count).map_err(|_| Error::StateCorrupt)?;
+        self.validate()
+    }
+
+    pub(crate) fn attach(&mut self, report: &Report) -> Result<()> {
+        if report.scope_hash() != self.scope || report.pack_digest() != self.pack {
+            return Err(Error::StateScopeMismatch);
+        }
+        self.storage = Some(report.audit_projection().map_err(|_| Error::StateCorrupt)?);
+        self.validate()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !matches!(self.contract, 0 | 2 | 3)
+            || !valid_hash(&self.operation)
+            || !valid_hash(&self.scope)
+            || self.pack.len() != 71
+            || !self.pack.starts_with("sha256:")
+            || !valid_hash(&self.pack[7..])
+            || self.candidates > 64
+            || match self.analysis {
+                RustOutcome::CompleteBuild => {
+                    !matches!(self.contract, 2 | 3) || self.candidates < 4
+                }
+                RustOutcome::AuditedReadOnly => {
+                    !matches!(self.contract, 2 | 3)
+                        || self.candidates != 0
+                        || self.storage.is_some()
+                }
+                RustOutcome::Indeterminate => self.candidates != 0 || self.storage.is_some(),
+            }
+        {
+            return Err(Error::StateCorrupt);
+        }
+        if let Some(projection) = &self.storage {
+            projection.validate().map_err(|_| Error::StateCorrupt)?;
+            if projection
+                .candidate_index()
+                .is_some_and(|index| index >= self.candidates)
+                || projection.counts().iter().copied().sum::<u32>()
+                    > u32::from(self.candidates) * 64
+                || projection.outcome() == Outcome::NotApplicable
+            {
+                return Err(Error::StateCorrupt);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn linkage(record: &Record) -> Result<String> {
+    // Serialize with the linkage omitted; all claim and projection fields enter
+    // the domain-separated digest. Hashes are evidence, not secret storage.
+    let mut value = serde_json::to_value(record).map_err(|_| Error::StateCorrupt)?;
+    value
+        .as_object_mut()
+        .ok_or(Error::StateCorrupt)?
+        .remove("linkage");
+    let bytes = serde_json::to_vec(&value).map_err(|_| Error::StateCorrupt)?;
+    let mut hash = Sha256::new();
+    hash.update(b"memory-hooks-rust-audit-linkage-v1\0");
+    hash_part(&mut hash, &bytes);
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -80,6 +202,10 @@ fn valid_reason(reason: &str) -> bool {
             | "unsupported_capability"
             | "missing_child_linkage"
             | "parent_invalid"
+            | "rust_analysis_indeterminate"
+            | "rust_execution_unsupported"
+            | "rust_storage_denied"
+            | "rust_storage_indeterminate"
     )
 }
 
@@ -108,6 +234,8 @@ pub(crate) fn append_child_start(
         event_kind: Some(AuditEvent::ChildStart),
         parent_hash: Some(parent_hash.to_owned()),
         child_hash: Some(child_hash.to_owned()),
+        rust: None,
+        linkage: None,
     };
     append_record(installation, &record, limits)
 }
@@ -133,12 +261,70 @@ pub(crate) fn append_unsupported_start(
         event_kind: Some(AuditEvent::ChildStart),
         parent_hash: Some(session_hash(installation, identity.session_id())?),
         child_hash: Some(identity.store_hash(installation.id(), installation.client())),
+        rust: None,
+        linkage: None,
     };
     append_record(installation, &record, limits)
 }
 
 fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_rust_record(record: &Record) -> bool {
+    let Some(evidence) = &record.rust else {
+        return false;
+    };
+    if evidence.validate().is_err()
+        || record.binding_hash.is_none()
+        || record.generation.is_none()
+        || record.epoch.is_none_or(|epoch| epoch == 0)
+        || record.intent == "published"
+        || record.reason == "published"
+        || !record.linkage.as_deref().is_some_and(valid_hash)
+        || linkage(record).ok().as_deref() != record.linkage.as_deref()
+    {
+        return false;
+    }
+    let lineage = match record.event_kind {
+        None => {
+            record.session_hash.is_some()
+                && record.parent_hash.is_none()
+                && record.child_hash.is_none()
+        }
+        Some(AuditEvent::ChildPreTool) => {
+            record.session_hash.is_none()
+                && record.parent_hash.is_some()
+                && record.child_hash.is_some()
+        }
+        Some(AuditEvent::ChildStart | AuditEvent::ParentSpawn) => false,
+    };
+    let decision = match (
+        record.intent.as_str(),
+        record.reason.as_str(),
+        evidence.analysis,
+    ) {
+        ("neutral", "checked", RustOutcome::AuditedReadOnly) => evidence.storage.is_none(),
+        ("neutral", "checked", RustOutcome::CompleteBuild) => evidence
+            .storage
+            .as_ref()
+            .is_some_and(|p| p.outcome() == Outcome::Pass),
+        ("deny", "rust_storage_denied", RustOutcome::CompleteBuild) => evidence
+            .storage
+            .as_ref()
+            .is_some_and(|p| p.outcome() == Outcome::Deny),
+        ("deny", "rust_storage_indeterminate", RustOutcome::CompleteBuild) => evidence
+            .storage
+            .as_ref()
+            .is_some_and(|p| p.outcome() == Outcome::Indeterminate),
+        (
+            "deny",
+            "rust_analysis_indeterminate" | "rust_execution_unsupported",
+            RustOutcome::Indeterminate,
+        ) => true,
+        _ => false,
+    };
+    lineage && decision
 }
 
 fn validate_record(record: &Record, installation: &Installation) -> Result<()> {
@@ -166,14 +352,20 @@ fn validate_record(record: &Record, installation: &Installation) -> Result<()> {
             .is_some_and(|hash| !valid_hash(hash))
         || match record.version {
             1 => {
-                record.event_kind.is_some()
+                record.rust.is_some()
+                    || record.linkage.is_some()
+                    || record.reason.starts_with("rust_")
+                    || record.event_kind.is_some()
                     || record.parent_hash.is_some()
                     || record.child_hash.is_some()
                     || record.intent == "published"
                     || record.reason == "published"
             }
             2 => {
-                record.parent_hash.is_none()
+                record.rust.is_some()
+                    || record.linkage.is_some()
+                    || record.reason.starts_with("rust_")
+                    || record.parent_hash.is_none()
                     || record.session_hash.is_some()
                     || match record.event_kind {
                         Some(AuditEvent::ChildStart) => {
@@ -192,6 +384,7 @@ fn validate_record(record: &Record, installation: &Installation) -> Result<()> {
                         None => true,
                     }
             }
+            3 => !valid_rust_record(record),
             _ => true,
         }
     {
@@ -284,6 +477,48 @@ pub(crate) fn append(
     reason: &'static str,
     limits: GateConfig,
 ) -> Result<()> {
+    append_decision(
+        installation,
+        claim,
+        category,
+        spawn,
+        (intent, reason),
+        limits,
+        None,
+    )
+}
+
+/// Append version three only for a validated Rust analysis handoff.
+pub(crate) fn append_rust(
+    installation: &Installation,
+    claim: &ClaimedCheck,
+    category: ToolCategory,
+    intent: &'static str,
+    reason: &'static str,
+    limits: GateConfig,
+    evidence: Option<RustEvidence>,
+) -> Result<()> {
+    append_decision(
+        installation,
+        claim,
+        category,
+        false,
+        (intent, reason),
+        limits,
+        evidence,
+    )
+}
+
+fn append_decision(
+    installation: &Installation,
+    claim: &ClaimedCheck,
+    category: ToolCategory,
+    spawn: bool,
+    decision: (&'static str, &'static str),
+    limits: GateConfig,
+    evidence: Option<RustEvidence>,
+) -> Result<()> {
+    let (intent, reason) = decision;
     let (version, event_kind, parent_hash, child_hash, session_hash) =
         if let Some(parent) = &claim.parent {
             (
@@ -304,8 +539,8 @@ pub(crate) fn append(
         } else {
             (1, None, None, None, Some(claim.hash.clone()))
         };
-    let record = Record {
-        version,
+    let mut record = Record {
+        version: if evidence.is_some() { 3 } else { version },
         event_id: Uuid::new_v4(),
         attempt: claim.attempt,
         adapter: installation.client(),
@@ -319,7 +554,12 @@ pub(crate) fn append(
         event_kind,
         parent_hash,
         child_hash,
+        rust: evidence,
+        linkage: None,
     };
+    if record.rust.is_some() {
+        record.linkage = Some(linkage(&record)?);
+    }
     append_record(installation, &record, limits)
 }
 
@@ -384,6 +624,11 @@ pub(crate) fn append_preclaim(
         event_kind,
         parent_hash,
         child_hash,
+        rust: None,
+        linkage: None,
     };
     append_record(installation, &record, limits)
 }
+
+#[cfg(test)]
+mod tests;

@@ -28,6 +28,66 @@ pub use evidence::{
 };
 pub use policy::{ConstraintKind, StorageRequirement};
 
+/// Query the validated closed registry without probing candidate paths.
+/// Unknown storage mandates still require complete Rust execution analysis.
+///
+/// # Errors
+/// Rejects invalid, mismatched or excessive authoritative packs.
+pub fn requires_rust_analysis(
+    binding: &ResolvedBinding,
+    pack: &GuardrailPack,
+) -> Result<bool, Reason> {
+    Ok(!policy::requirements(binding, pack)?.is_empty())
+}
+
+pub(crate) fn validate_rust_requirements(
+    binding: &ResolvedBinding,
+    pack: &GuardrailPack,
+) -> Result<(), Reason> {
+    for requirement in policy::requirements(binding, pack)? {
+        if let Some(reason) = requirement.failure {
+            return Err(reason);
+        }
+    }
+    Ok(())
+}
+
+/// Digest the exact protected binding used by a storage decision.
+///
+/// # Errors
+/// Rejects a binding that cannot be represented by its bounded public identity.
+pub fn scope_digest(binding: &ResolvedBinding) -> Result<String, Reason> {
+    Ok(evidence::hash(
+        b"scope",
+        binding
+            .public_json()
+            .map_err(|_| Reason::InvalidPack)?
+            .as_bytes(),
+    ))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+pub(crate) enum FixtureBacking {
+    #[default]
+    Disk,
+    Unknown,
+    Race,
+    SymlinkEscape,
+    NestedMount,
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_evaluate(
+    binding: &ResolvedBinding,
+    pack: &GuardrailPack,
+    candidates: &[Candidate],
+    volatile: Option<CandidateRole>,
+    backing: FixtureBacking,
+) -> Report {
+    tests::gate_report(binding, pack, candidates, volatile, backing)
+}
+
 /// Maximum explicit candidates per assessment.
 pub const MAX_CANDIDATES: usize = 64;
 /// Maximum bytes in a complete redacted report.
@@ -225,6 +285,24 @@ impl EvaluationScope {
         pack: &GuardrailPack,
         destination: ExecutionDestination,
     ) -> Result<Self, Reason> {
+        Self::observe_before(
+            binding,
+            pack,
+            destination,
+            Instant::now() + Duration::from_secs(5),
+        )
+    }
+
+    /// Observe within the caller's original deadline and the storage budget.
+    ///
+    /// # Errors
+    /// Returns fixed scope, locality, observation or deadline failure codes.
+    pub fn observe_before(
+        binding: &ResolvedBinding,
+        pack: &GuardrailPack,
+        destination: ExecutionDestination,
+        deadline: Instant,
+    ) -> Result<Self, Reason> {
         let requirements = policy::requirements(binding, pack)?;
         if requirements
             .iter()
@@ -236,6 +314,7 @@ impl EvaluationScope {
             return Err(Reason::UnknownDestination);
         }
         let mut budget = Budget::new();
+        budget.deadline = budget.deadline.min(deadline);
         let mut provider = linux::Linux::new(&mut budget).map_err(|error| error.reason)?;
         let initial = provider
             .snapshot(&mut budget)
@@ -497,18 +576,23 @@ fn empty_evidence(candidate: &Candidate, code: Option<i32>) -> Evidence {
 
 struct Budget {
     start: Instant,
+    deadline: Instant,
     operations: usize,
 }
 impl Budget {
     fn new() -> Self {
         Self {
             start: Instant::now(),
+            deadline: Instant::now() + Duration::from_secs(5),
             operations: 0,
         }
     }
     fn tick(&mut self) -> ProbeResult<()> {
         self.operations += 1;
-        if self.operations > MAX_OPERATIONS || self.start.elapsed() >= Duration::from_secs(5) {
+        if self.operations > MAX_OPERATIONS
+            || self.start.elapsed() >= Duration::from_secs(5)
+            || Instant::now() >= self.deadline
+        {
             return Err(ProbeError::new(Reason::Limit));
         }
         Ok(())

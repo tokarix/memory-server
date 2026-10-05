@@ -1,6 +1,6 @@
 //! Scripted complete evaluator fixtures; no subprocesses or privileged mounts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,138 @@ use super::path::Resolved;
 use super::*;
 
 const TABLE: &[u8] = b"1 99 0:1 / / rw - ext4 disk rw\n2 1 0:2 / /tmp rw future:bounded - tmpfs SECRET_MOUNT rw\n3 2 0:1 / /tmp/target/nested rw - ext4 disk rw\n";
+
+pub(super) fn gate_report(
+    binding: &ResolvedBinding,
+    pack: &GuardrailPack,
+    candidates: &[Candidate],
+    volatile: Option<CandidateRole>,
+    backing: FixtureBacking,
+) -> Report {
+    let mut provider = Fake::new();
+    provider.nodes.clear();
+    let point = if binding.context().profile.as_deref() == Some("woodpecker-container") {
+        Some(PathBuf::from("/tmp"))
+    } else {
+        volatile
+            .and_then(|role| candidates.iter().find(|candidate| candidate.role == role))
+            .map(|candidate| candidate.path.clone())
+            .or_else(|| Some(PathBuf::from("/tmp")))
+    };
+    let mut paths = BTreeSet::new();
+    paths.insert(PathBuf::from("/"));
+    for candidate in candidates {
+        for ancestor in candidate.path.ancestors() {
+            paths.insert(ancestor.to_owned());
+        }
+    }
+    for (index, path) in paths.into_iter().enumerate() {
+        let memory = point.as_ref().is_some_and(|point| path.starts_with(point));
+        let inode = if path == Path::new("/") {
+            1
+        } else if path == Path::new("/tmp") {
+            3
+        } else {
+            u64::try_from(index).unwrap() + 11
+        };
+        provider.nodes.insert(
+            path,
+            Node {
+                identity: ObjectIdentity {
+                    device: if memory { 2 } else { 1 },
+                    inode,
+                    mode: libc::S_IFDIR,
+                },
+                mount: if memory { 2 } else { 1 },
+                link: None,
+                accessible: true,
+            },
+        );
+    }
+    if matches!(backing, FixtureBacking::Unknown) {
+        provider.backing.insert(1, BackingClass::Unknown);
+    }
+    provider.execution_race = matches!(backing, FixtureBacking::Race);
+    let extra_mount = gate_escape(&mut provider, candidates, backing);
+    let point = point.as_deref().unwrap_or(Path::new("/tmp"));
+    let escaped = point
+        .to_str()
+        .unwrap()
+        .replace('\\', "\\134")
+        .replace(' ', "\\040");
+    let table = format!(
+        "1 99 0:1 / / rw - ext4 disk rw\n2 1 0:2 / {escaped} rw - tmpfs SECRET_MOUNT rw\n{extra_mount}"
+    );
+    Engine {
+        cwd: binding.effective_cwd().to_owned(),
+        profile: binding.context().profile.clone(),
+        scope_hash: scope_digest(binding).unwrap(),
+        pack_digest: pack.digest.clone(),
+        requirements: policy::requirements(binding, pack).unwrap(),
+        provider,
+        initial: Snapshot::fixture(table.as_bytes()),
+        attestation: binding.storage_execution().cloned(),
+        budget: Budget::new(),
+    }
+    .evaluate(candidates)
+}
+
+fn gate_escape(provider: &mut Fake, candidates: &[Candidate], backing: FixtureBacking) -> String {
+    let mut extra_mount = String::new();
+    if matches!(
+        backing,
+        FixtureBacking::SymlinkEscape | FixtureBacking::NestedMount
+    ) {
+        let escaped = candidates
+            .iter()
+            .find(|candidate| candidate.role == CandidateRole::BuildOutput)
+            .unwrap()
+            .path
+            .clone();
+        if matches!(backing, FixtureBacking::SymlinkEscape) {
+            provider.symlink(escaped.to_str().unwrap(), b"/tmp/target");
+            provider.nodes.insert(
+                PathBuf::from("/tmp"),
+                Node {
+                    identity: ObjectIdentity {
+                        device: 2,
+                        inode: 3,
+                        mode: libc::S_IFDIR,
+                    },
+                    mount: 2,
+                    link: None,
+                    accessible: true,
+                },
+            );
+            provider.nodes.insert(
+                PathBuf::from("/tmp/target"),
+                Node {
+                    identity: ObjectIdentity {
+                        device: 2,
+                        inode: 4,
+                        mode: libc::S_IFDIR,
+                    },
+                    mount: 2,
+                    link: None,
+                    accessible: true,
+                },
+            );
+        } else {
+            provider.backing.insert(4, BackingClass::Memory);
+            for (path, node) in &mut provider.nodes {
+                if path.starts_with(&escaped) {
+                    node.mount = 4;
+                    node.identity.device = 4;
+                }
+            }
+            extra_mount = format!(
+                "4 1 0:4 / {} rw - tmpfs SECRET_NESTED rw\n",
+                escaped.to_str().unwrap()
+            );
+        }
+    }
+    extra_mount
+}
 
 #[derive(Clone)]
 struct Node {
@@ -201,7 +333,7 @@ impl Kernel for Fake {
         let id = self.nodes[&resolved.handle].mount;
         Ok((
             snapshot.mounts[&id].clone(),
-            if id == 2 {
+            if id == 2 || id == 4 {
                 FilesystemClass::Memory
             } else {
                 FilesystemClass::Ext

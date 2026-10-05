@@ -1629,6 +1629,17 @@ impl Installation {
         claim: &ClaimedCheck,
         audit: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.finish_checked(claim, |_| audit().map_err(|_| Error::AuditFailed))
+    }
+
+    /// Recheck synchronous operation evidence under the exact claim locks,
+    /// after the original snapshot, binding and mandatory pack are validated.
+    /// The closure must persist audit evidence before returning success.
+    pub(crate) fn finish_checked(
+        &self,
+        claim: &ClaimedCheck,
+        check: impl FnOnce(&crate::config::TrustedHooksConfig) -> Result<()>,
+    ) -> Result<()> {
         let _installation_lock = self.lock()?;
         let active = self.active_locked()?;
         if active.epoch != claim.epoch || active.nonce != claim.nonce {
@@ -1683,7 +1694,7 @@ impl Installation {
         if pack != claim.pack {
             return Err(Error::SnapshotInvalid("pack changed"));
         }
-        audit().map_err(|_| Error::AuditFailed)?;
+        check(&active.config)?;
         guard.state = GuardState::Completed;
         replace_guard(self, &head, &guard)?;
         let readback = read_guard(self, &head)?;

@@ -202,6 +202,141 @@ fn serve(listener: TcpListener, bodies: Vec<Vec<u8>>) -> thread::JoinHandle<usiz
     })
 }
 
+fn storage_pack(rig: &Rig) -> GuardrailPack {
+    let mut pack = rig.pack("SENTINEL_POLICY_SECRET");
+    pack.mandatory[0].values = [(
+        "rust.build.target_storage".to_owned(),
+        "persistent-disk".to_owned(),
+    )]
+    .into();
+    GuardrailPack::new(
+        pack.project,
+        pack.context,
+        pack.resolver_schema_version,
+        pack.mandatory,
+    )
+    .expect("storage pack")
+}
+
+#[test]
+fn legacy_execution_and_unknown_tools_deny_enforced_rust_with_v3_safe_evidence() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let rig = Rig::new_with(adapter);
+        let pack = storage_pack(&rig);
+        let proposals = [
+            ("Bash", json!({"command":"cargo build"})),
+            (
+                "Bash",
+                json!({"argv":["rustc", "source.rs", "--out-dir", "/output"]}),
+            ),
+            ("Bash", json!({"command":"ssh host cargo build"})),
+            (
+                "Bash",
+                json!({"command":"opaque-no-rust-name SENTINEL_SECRET"}),
+            ),
+            (
+                "Bash",
+                json!({"command":format!("touch {}",rig.cwd.join("marker").display())}),
+            ),
+            (
+                "remote_execution_tool",
+                json!({"command":"cargo build", "profile":"woodpecker-container"}),
+            ),
+        ];
+        let server = serve(
+            rig.listener.try_clone().unwrap(),
+            vec![serde_json::to_vec(&pack).unwrap(); proposals.len()],
+        );
+        for (index, (tool, input)) in proposals.iter().enumerate() {
+            rig.deliver(pack.clone());
+            let output = rig.invoke(&rig.event(tool, input));
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stdout).contains("rust_execution_unsupported"));
+            assert!(output.stderr.is_empty());
+            let text = fs::read_to_string(
+                rig.root
+                    .path()
+                    .join(format!("control/audit-{:08}", index + 1)),
+            )
+            .unwrap();
+            let record: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(record["version"], 3);
+            assert_eq!(record["rust"]["analysis"], "indeterminate");
+            assert_eq!(record["rust"]["contract"], 0);
+            assert_eq!(record["rust"]["candidates"], 0);
+            assert_eq!(record["rust"]["storage"], Value::Null);
+            assert!(text.len() <= 2048);
+            assert!(!text.contains("SENTINEL") && !text.contains("cargo") && !text.contains('/'));
+        }
+        assert_eq!(server.join().unwrap(), proposals.len());
+        assert!(!rig.cwd.join("marker").exists());
+    }
+}
+
+#[test]
+fn enforced_rust_keeps_known_inspection_and_edits_under_generic_native_gate() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let rig = Rig::new_with(adapter);
+        let pack = storage_pack(&rig);
+        rig.deliver(pack.clone());
+        let (edit, input) = if adapter == ClientAdapter::CodexV1 {
+            (
+                "apply_patch",
+                json!({"command":"SENTINEL_PATCH_BODY cargo build $(evil)"}),
+            )
+        } else {
+            (
+                "Write",
+                json!({"file_path":"literal", "content":"SENTINEL_PATCH_BODY"}),
+            )
+        };
+        let server = serve(
+            rig.listener.try_clone().unwrap(),
+            vec![serde_json::to_vec(&pack).unwrap(); 2],
+        );
+        for (tool, input) in [(edit, input), ("Read", json!({"file_path":"literal"}))] {
+            let output = rig.invoke(&rig.event(tool, &input));
+            assert!(
+                output.status.success() && output.stdout.is_empty() && output.stderr.is_empty()
+            );
+        }
+        assert_eq!(server.join().unwrap(), 2);
+        assert!(!rig.cwd.join("literal").exists());
+    }
+}
+
+#[test]
+fn generic_execution_cwd_cannot_cross_binding_or_hide_behind_unsupported_fields() {
+    for adapter in [ClientAdapter::CodexV1, ClientAdapter::ClaudeV1] {
+        let rig = Rig::new_with(adapter);
+        let pack = rig.pack("generic");
+        rig.deliver(pack.clone());
+        let server = serve(
+            rig.listener.try_clone().unwrap(),
+            vec![serde_json::to_vec(&pack).unwrap()],
+        );
+        let output = rig.invoke(&rig.event("Bash", &json!({"command":"true", "workdir":"/"})));
+        assert_eq!(decision(&output).as_deref(), Some("snapshot_invalid"));
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(rig.installation.read_snapshot("session", &rig.cwd).is_err());
+        let record: Value = serde_json::from_slice(
+            &fs::read(rig.root.path().join("control/audit-00000001")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["intent"], "deny");
+        assert_eq!(record["reason"], "snapshot_invalid");
+        assert!(record["generation"].is_string() && record["attempt"].is_string());
+        rig.deliver(pack);
+        let output = rig.invoke(&rig.event(
+            "Bash",
+            &json!({"command":"true", "workdir":"/", "opaque_mode":"SENTINEL_SECRET"}),
+        ));
+        assert_eq!(decision(&output).as_deref(), Some("event_invalid"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SENTINEL"));
+        assert!(rig.installation.read_snapshot("session", &rig.cwd).is_err());
+    }
+}
+
 fn serve_failure(listener: TcpListener, status: &str, body: &[u8]) -> thread::JoinHandle<()> {
     let status = status.to_owned();
     let body = body.to_vec();

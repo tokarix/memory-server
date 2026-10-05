@@ -238,3 +238,14 @@ before return but is not an atomic filesystem snapshot.
 The standalone [storage evaluator](hooks-storage.md) adds protected v5
 container-execution provisioning while preserving v1-v4 contracts. A selected
 container profile alone does not prove isolation or local mount provenance.
+
+
+Schema v6 extends protected authority with the [managed Rust execution contract](hooks-rust-build.md),
+including exact installed/entrypoint executables, optional direct native-linker
+pin, sealed inherited environment and observable client namespace/root pins.
+Every trusted input enters the normalized fingerprint. Repository files, tool
+payloads and inline profiles remain execution data. Host execution requires no
+container attestation; its exception still needs separately protected exact
+container evidence. V1-v5 delivery remains supported, but enforced Rust execution
+without this capability denies. Provisioning and activation remain separate
+operator actions; hook decisions never migrate configuration or install tools.

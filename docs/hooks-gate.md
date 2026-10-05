@@ -129,6 +129,11 @@ are not live PreToolUse interoperability evidence.
 
 ## Storage assessment handoff
 
-The standalone [storage evaluator](hooks-storage.md) is not called by this gate.
-Issue #90 must prove operation locality and complete candidate coverage, persist
-the versioned compact projection, and reject expired or changed evidence.
+The [managed Rust consumer](hooks-rust-build.md) calls the authoritative
+[storage evaluator](hooks-storage.md) in enforced Rust execution scope after
+fresh-pack equality. A protected v6 execution contract is required. Complete
+role coverage, observable locality, input/executable rechecks and audit v3
+persistence are mandatory before neutral completion. Missing proof, unknown
+execution tools, volatile host storage and indeterminate backing deny. Known
+file edits and reads retain this generic gate; native permissions follow every
+neutral result. Child-local violations retire only the exact child claim.

@@ -328,11 +328,23 @@ fn supervise() -> (DenyReason, bool) {
         Ok(bytes) => bytes,
         Err(error) => return (audit_denial(&installation, None, map_error(error)), false),
     };
-    let event = match parse_supervised_event(&installation, client, &event_bytes) {
+    supervise_event(&installation, &event_bytes, deadline, || {
+        spawn_worker(&path, id, client)
+    })
+}
+
+fn supervise_event(
+    installation: &Installation,
+    event_bytes: &[u8],
+    deadline: Instant,
+    spawn: impl FnOnce() -> Result<Child>,
+) -> (DenyReason, bool) {
+    let client = installation.client();
+    let event = match parse_supervised_event(installation, client, event_bytes) {
         Ok(value) => value,
         Err(denial) => return denial,
     };
-    if let Some(denial) = ambiguous_root_denial(&installation, &event) {
+    if let Some(denial) = ambiguous_root_denial(installation, &event) {
         return denial;
     }
     let observed = (if let Some(child) = event.child() {
@@ -342,28 +354,28 @@ fn supervise() -> (DenyReason, bool) {
     })
     .ok()
     .map(|snapshot| snapshot.generation);
-    let Ok(mut child) = spawn_worker(&path, id, client) else {
+    let Ok(mut child) = spawn() else {
         if let Some(generation) = observed {
-            reject_observed(&installation, &event, generation);
+            reject_observed(installation, &event, generation);
         }
         return (
             audit_denial(
-                &installation,
+                installation,
                 Some(&event),
                 DenyReason::UnsupportedCapability,
             ),
             false,
         );
     };
-    let write_result = send_input(&mut child, &event_bytes, deadline);
+    let write_result = send_input(&mut child, event_bytes, deadline);
     if write_result.is_err() {
         terminate(&mut child);
         if let Some(generation) = observed {
-            reject_observed(&installation, &event, generation);
+            reject_observed(installation, &event, generation);
         }
         return (
             audit_denial(
-                &installation,
+                installation,
                 Some(&event),
                 DenyReason::UnsupportedCapability,
             ),
@@ -375,14 +387,14 @@ fn supervise() -> (DenyReason, bool) {
     if collected.is_err() {
         terminate(&mut child);
         if let Some((generation, attempt)) = claimed_prefix(&bytes) {
-            fail_attempt(&installation, &event, generation, attempt);
+            fail_attempt(installation, &event, generation, attempt);
         } else if let Some(generation) = observed {
-            reject_observed(&installation, &event, generation);
+            reject_observed(installation, &event, generation);
         }
     }
     if collected.is_err() {
         return (
-            audit_denial(&installation, Some(&event), DenyReason::SnapshotInvalid),
+            audit_denial(installation, Some(&event), DenyReason::SnapshotInvalid),
             false,
         );
     }
@@ -397,7 +409,7 @@ fn supervise() -> (DenyReason, bool) {
         && (status.is_none_or(|status| !status.success())
             || !parsed.as_ref().is_ok_and(|(_, _, neutral)| *neutral))
     {
-        fail_attempt(&installation, &event, generation, attempt);
+        fail_attempt(installation, &event, generation, attempt);
     } else if (status.is_none_or(|status| !status.success())
         || parsed.is_err()
         || parsed.as_ref().is_ok_and(|(claim, reason, _)| {
@@ -405,29 +417,49 @@ fn supervise() -> (DenyReason, bool) {
         }))
         && let Some(generation) = observed
     {
-        reject_observed(&installation, &event, generation);
+        reject_observed(installation, &event, generation);
     }
     match (status, parsed) {
         (Some(status), Ok((_, reason, true))) if status.success() => (reason, true),
         (Some(status), Ok((_, reason, false))) if status.success() => (reason, false),
         _ => (
-            audit_denial(&installation, Some(&event), DenyReason::SnapshotInvalid),
+            audit_denial(installation, Some(&event), DenyReason::SnapshotInvalid),
             false,
         ),
     }
 }
 
+// Test binaries can exercise the exact bounded supervisor with a dedicated
+// protocol pipe. Production always spawns the protected current executable.
+#[cfg(test)]
+pub(crate) fn fixture_supervise(
+    installation: &Installation,
+    event_bytes: &[u8],
+    deadline: Instant,
+    child: Child,
+) -> (DenyReason, bool) {
+    supervise_event(installation, event_bytes, deadline, || Ok(child))
+}
+
 /// Run the protected outer command. Every failure returns a blocking result.
 #[must_use]
 pub fn run_supervisor() -> i32 {
-    let (reason, neutral) = supervise();
+    publish_decision(supervise(), || {
+        DeadlineWriter::new(Instant::now() + Duration::from_secs(2))
+            .map_err(|error| crate::error::io("denial output", &error))
+    })
+}
+
+fn publish_decision<W: Write>(
+    (reason, neutral): (DenyReason, bool),
+    writer: impl FnOnce() -> Result<W>,
+) -> i32 {
     if neutral {
         return 0;
     }
     let bytes = deny_json(reason.code());
     let write = bytes.and_then(|bytes| {
-        let mut writer = DeadlineWriter::new(Instant::now() + Duration::from_secs(2))
-            .map_err(|error| crate::error::io("denial output", &error))?;
+        let mut writer = writer()?;
         writer
             .write_all(&bytes)
             .map_err(|error| crate::error::io("denial output", &error))?;
@@ -441,6 +473,11 @@ pub fn run_supervisor() -> i32 {
         eprintln!("pre_tool: deny output unavailable");
         2
     }
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_decision(result: (DenyReason, bool), writer: &mut Vec<u8>) -> i32 {
+    publish_decision(result, || Ok(writer))
 }
 
 /// Run only the internal worker protocol; the outer process validates it.

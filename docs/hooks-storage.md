@@ -1,12 +1,11 @@
 # Filesystem-backed storage assessment
 
-Issue #88 adds a standalone Linux library evaluator in `memory_hooks::storage`.
-It is not active enforcement: no client command, `pre_tool` consumer, candidate
-discovery, command parser, policy fetch, session retirement or audit append is
-added. Issue #90 must establish complete build candidates, prove operation
-locality, integrate the result with the gate, persist the audit projection, and
-invalidate stale or expired requests. Evaluation does not approve native tool
-permissions or certify that the caller found every output.
+The Linux `memory_hooks::storage` library assesses explicit directory candidates
+against the authoritative structured registry. The [managed Rust gate](hooks-rust-build.md)
+resolves complete candidates, proves local execution, evaluates them after a
+fresh mandatory pack comparison, persists audit v3 evidence and conditionally
+retires denied or stale claims. Evaluation is point-in-time evidence; neutral
+output continues to native client permissions.
 
 ## Calling contract
 
@@ -97,7 +96,7 @@ persistence, hardware power-loss guarantees, future free space or remote durabil
 ## Protected v5 provisioning
 
 V1-v4 loading and fingerprints retain their existing behavior. Host evaluation
-works with older configurations. The container exception requires schema v5,
+works with older configurations. The container exception requires schema v5 or v6,
 which retains all v4 delivery/gate/delegation requirements and adds exactly one
 protected `storage_execution` assertion. The
 [non-live v5 template](../memory-hooks-v5.toml.example) intentionally contains
@@ -171,9 +170,10 @@ policy ordering follows the authoritative pack and structured key ordering.
 `Report::audit_projection` returns version-one aggregate counts, decisive safe
 reason/candidate, policy UUID/revision with the remaining identity hashed, and
 complete assessment/evidence digests. Fixtures verify the projection with existing
-identity/delegation fields fits the 2-KiB record envelope. #90 must version and
-allowlist persistence in the existing append path, bind it to the checked session
-and pending operation, and handle invalidation. #88 does not claim audit persistence.
+identity/delegation fields fits the 2-KiB record envelope. The managed consumer
+validates and persists it in audit v3, bound to the exact checked claim, mandatory
+pack, execution scope and bounded operation/provenance digest. Audit overflow or
+corruption denies; old v1/v2 records remain validated without rewriting.
 
 Tests use exact structured conversion-manifest policies, scripted path/kernel and
 sysfs providers, conservative unsupported cases, controlled races, redaction and
