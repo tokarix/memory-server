@@ -569,7 +569,7 @@ impl Configuration {
                 return Err(Failure::Executable);
             }
         }
-        for (action, encoded, variable, config, config_env) in [
+        for (action, encoded, variable, _config, config_env) in [
             (
                 BuildAction::Rustc,
                 "CARGO_ENCODED_RUSTFLAGS",
@@ -585,30 +585,7 @@ impl Configuration {
                 "CARGO_BUILD_RUSTDOCFLAGS",
             ),
         ] {
-            let flags = if let Some(value) = environment.get(encoded) {
-                if value.is_empty() {
-                    Vec::new()
-                } else {
-                    value.split('\u{1f}').map(str::to_owned).collect()
-                }
-            } else if let Some(value) = environment.get(variable) {
-                value.split_whitespace().map(str::to_owned).collect()
-            } else {
-                let node = self.node(&["build", config])?;
-                if environment.get(config_env).is_some() && node.is_some() {
-                    // Array/environment merging is a separate Cargo mechanism.
-                    return Err(Failure::Configuration);
-                }
-                if let Some(value) = environment.get(config_env).filter(|_| {
-                    !node.is_some_and(|node| {
-                        matches!(node.origin, Origin::CommandFile | Origin::CommandValue)
-                    })
-                }) {
-                    value.split_whitespace().map(str::to_owned).collect()
-                } else {
-                    node.map(flags_value).transpose()?.unwrap_or_default()
-                }
-            };
+            let flags = self.compiler_flags(environment, action)?;
             validate_extra_flags(action, &flags)?;
             for key in [encoded, variable, config_env] {
                 if child.get(key) != environment.get(key) {
@@ -617,6 +594,52 @@ impl Configuration {
             }
         }
         Ok(())
+    }
+    pub(super) fn compiler_flags(
+        &self,
+        environment: &Environment,
+        action: BuildAction,
+    ) -> Result<Vec<String>, Failure> {
+        let (encoded, variable, config, config_env) = match action {
+            BuildAction::Rustc => (
+                "CARGO_ENCODED_RUSTFLAGS",
+                "RUSTFLAGS",
+                "rustflags",
+                "CARGO_BUILD_RUSTFLAGS",
+            ),
+            BuildAction::Rustdoc => (
+                "CARGO_ENCODED_RUSTDOCFLAGS",
+                "RUSTDOCFLAGS",
+                "rustdocflags",
+                "CARGO_BUILD_RUSTDOCFLAGS",
+            ),
+            _ => return Err(Failure::Unsupported),
+        };
+        let flags = if let Some(value) = environment.get(encoded) {
+            if value.is_empty() {
+                Vec::new()
+            } else {
+                value.split('\u{1f}').map(str::to_owned).collect()
+            }
+        } else if let Some(value) = environment.get(variable) {
+            value.split_whitespace().map(str::to_owned).collect()
+        } else {
+            let node = self.node(&["build", config])?;
+            if environment.get(config_env).is_some() && node.is_some() {
+                // Array/environment merging is a separate Cargo mechanism.
+                return Err(Failure::Configuration);
+            }
+            if let Some(value) = environment.get(config_env).filter(|_| {
+                !node.is_some_and(|node| {
+                    matches!(node.origin, Origin::CommandFile | Origin::CommandValue)
+                })
+            }) {
+                value.split_whitespace().map(str::to_owned).collect()
+            } else {
+                node.map(flags_value).transpose()?.unwrap_or_default()
+            }
+        };
+        Ok(flags)
     }
 }
 

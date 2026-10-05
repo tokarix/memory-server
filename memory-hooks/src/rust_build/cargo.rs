@@ -438,6 +438,38 @@ impl Directory {
 /// Consumers must not use this as a `CompleteBuild` or authorize execution from it.
 pub struct Layout {
     directories: Vec<Directory>,
+    units: Vec<UnitLayout>,
+}
+
+/// One host or explicitly selected target's profile layout, without unit hashes.
+pub struct UnitLayout {
+    artifact: PathBuf,
+    intermediate: PathBuf,
+    temporary: PathBuf,
+    target: Option<String>,
+}
+
+impl UnitLayout {
+    /// Final profile directory for executable artifacts.
+    #[must_use]
+    pub fn artifact(&self) -> &Path {
+        &self.artifact
+    }
+    /// Intermediate profile directory containing deps and incremental outputs.
+    #[must_use]
+    pub fn intermediate(&self) -> &Path {
+        &self.intermediate
+    }
+    /// Cargo's generated integration-test/bench temporary directory.
+    #[must_use]
+    pub fn temporary(&self) -> &Path {
+        &self.temporary
+    }
+    /// Explicit target; absence denotes host units.
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
 }
 
 impl Layout {
@@ -458,6 +490,7 @@ impl Layout {
         let (process, compiler) = environments;
         let mut layout = Self {
             directories: Vec::new(),
+            units: Vec::new(),
         };
         for source in sources.directories() {
             layout.push(CandidateRole::SourceWorktree, source.to_owned())?;
@@ -516,6 +549,7 @@ impl Layout {
                 &profile,
                 options,
             )?;
+            layout.units.last_mut().ok_or(Failure::Unsupported)?.target = Some(name);
         }
         if options.action == BuildAction::Install {
             let root = configuration.install_root(options.install_root.as_deref(), process)?;
@@ -536,6 +570,12 @@ impl Layout {
         self.push(CandidateRole::BuildOutput, build.to_owned())?;
         let artifacts = target.join(profile);
         let intermediate = build.join(profile);
+        self.units.push(UnitLayout {
+            artifact: artifacts.clone(),
+            intermediate: intermediate.clone(),
+            temporary: build.join("tmp"),
+            target: None,
+        });
         self.push(CandidateRole::BuildOutput, artifacts.clone())?;
         self.push(CandidateRole::BuildOutput, artifacts.join("examples"))?;
         self.push(CandidateRole::BuildOutput, intermediate.clone())?;
@@ -557,6 +597,12 @@ impl Layout {
             self.push(CandidateRole::BuildOutput, target.join("cargo-timings"))?;
         }
         Ok(())
+    }
+
+    /// Stable host-first layout evidence for generated child environments.
+    #[must_use]
+    pub fn units(&self) -> &[UnitLayout] {
+        &self.units
     }
 
     fn push(&mut self, role: CandidateRole, path: PathBuf) -> Result<(), Failure> {

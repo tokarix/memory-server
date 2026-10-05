@@ -523,6 +523,24 @@ impl<'a, P: ReadProvider> ReadSet<'a, P> {
         &mut self,
         path: &Path,
     ) -> Result<Option<Vec<DirectoryEntry>>, Failure> {
+        paths::validate(path)?;
+        self.checkpoint()?;
+        // A retained missing directory proves its ordinary descendants absent
+        // at the same instant. Recheck that prefix, rather than spending the
+        // shared read budget repeatedly below it. Never cancel parent traversal
+        // or treat a missing ordinary file as directory absence evidence.
+        if self.files.iter().any(|((prefix, kind), observation)| {
+            *kind == ReadKind::OutputDirectory
+                && observation.bytes.is_none()
+                && path.strip_prefix(prefix).is_ok_and(|suffix| {
+                    !suffix.as_os_str().is_empty()
+                        && suffix
+                            .components()
+                            .all(|part| matches!(part, Component::Normal(_)))
+                })
+        }) {
+            return Ok(None);
+        }
         self.retain(path, ReadKind::OutputDirectory)?
             .map(decode_directory)
             .transpose()
@@ -718,6 +736,52 @@ mod tests {
 
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn missing_directory_prefix_covers_only_ordinary_descendants_and_rechecks() {
+        let provider = Scripted::default();
+        let mut reads = ReadSet::new(&provider, deadline());
+        assert!(
+            reads
+                .output_directory(Path::new("/output"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reads
+                .output_directory(Path::new("/output/profile/deps"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !provider
+                .calls
+                .borrow()
+                .contains(&Path::new("/output/profile/deps").to_owned())
+        );
+        reads
+            .output_directory(Path::new("/output/../else"))
+            .unwrap();
+        assert!(
+            provider
+                .calls
+                .borrow()
+                .contains(&Path::new("/output/../else").to_owned())
+        );
+        reads.read(Path::new("/missing-file")).unwrap();
+        reads
+            .output_directory(Path::new("/missing-file/child"))
+            .unwrap();
+        assert!(
+            provider
+                .calls
+                .borrow()
+                .contains(&Path::new("/missing-file/child").to_owned())
+        );
+        reads.recheck().unwrap();
+        provider.list("/output", &[]);
+        assert_eq!(reads.recheck(), Err(Failure::Changed));
     }
 
     #[test]

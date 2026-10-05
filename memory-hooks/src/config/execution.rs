@@ -23,6 +23,7 @@ pub struct RustExecution {
     raw: RawRustExecution,
     identities: BTreeMap<String, Vec<u8>>,
     installed_identities: BTreeMap<String, Vec<u8>>,
+    linker_identity: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -112,6 +113,9 @@ mod tests {
             "BASH_FUNC_cargo%%",
             "BASH_ENV",
             "ENV",
+            "CDPATH",
+            "PWD",
+            "OLDPWD",
         ] {
             assert!(unsupported_environment_mechanism(key));
         }
@@ -193,9 +197,11 @@ pub(crate) fn literal_fixture() -> (RustExecution, tempfile::TempDir) {
                 })
                 .collect(),
                 environment,
+                native_linker: None,
             },
             identities: BTreeMap::new(),
             installed_identities: BTreeMap::new(),
+            linker_identity: None,
         },
         directory,
     )
@@ -293,6 +299,32 @@ pub(crate) fn execution_fixture(proxy: bool) -> (RustExecution, tempfile::TempDi
     (contract, directory)
 }
 
+#[cfg(test)]
+pub(crate) fn pin_fixture_linker(contract: &mut RustExecution, directory: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let linker = directory
+        .join("rustup-home/toolchains")
+        .join(contract.toolchain())
+        .join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
+    std::fs::create_dir_all(linker.parent().unwrap()).unwrap();
+    std::fs::write(
+        &linker,
+        "#!/bin/sh\nexit 99\nLINKER_NONEXECUTION_SENTINEL\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&linker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    contract.linker_identity =
+        Some(executable_stamp(&linker, Instant::now() + limits::RESOLVE_DEADLINE).unwrap());
+    contract.raw.environment.insert(
+        "RUSTFLAGS".to_owned(),
+        format!("-C linker={} -C linker-flavor=ld.lld", linker.display()),
+    );
+    contract.raw.native_linker = Some(NativeLinker {
+        semantics: "rust-lld-1.94.0-linux-v1".to_owned(),
+        path: linker,
+    });
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawRustExecution {
@@ -314,6 +346,15 @@ pub(super) struct RawRustExecution {
     executables: BTreeMap<String, PathBuf>,
     installed_executables: BTreeMap<String, PathBuf>,
     environment: BTreeMap<String, String>,
+    #[serde(default)]
+    native_linker: Option<NativeLinker>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLinker {
+    semantics: String,
+    path: PathBuf,
 }
 
 /// Only these variables can affect the supported static Rust contract.
@@ -352,12 +393,44 @@ pub fn supported_environment_key(key: &str) -> bool {
 }
 
 fn unsupported_environment_mechanism(key: &str) -> bool {
-    ["CARGO_", "RUST", "CLIPPY_", "LD_", "DYLD_"]
-        .iter()
-        .any(|prefix| key.starts_with(prefix))
+    [
+        "CARGO_",
+        "RUST",
+        "CLIPPY_",
+        "LD_",
+        "DYLD_",
+        "GCC_",
+        "COMPILER_",
+        "LLVM_",
+        "LLD_",
+    ]
+    .iter()
+    .any(|prefix| key.starts_with(prefix))
         || matches!(
             key,
-            "CARGO" | "SYSROOT" | "BASH_ENV" | "ENV" | "SHELLOPTS" | "BASHOPTS"
+            "CARGO"
+                | "SYSROOT"
+                | "BASH_ENV"
+                | "ENV"
+                | "CDPATH"
+                | "PWD"
+                | "OLDPWD"
+                | "SHELLOPTS"
+                | "BASHOPTS"
+                | "CC"
+                | "CXX"
+                | "AR"
+                | "AS"
+                | "CFLAGS"
+                | "CXXFLAGS"
+                | "LDFLAGS"
+                | "LIBRARY_PATH"
+                | "CPATH"
+                | "C_INCLUDE_PATH"
+                | "CPLUS_INCLUDE_PATH"
+                | "OBJC_INCLUDE_PATH"
+                | "COLLECT_GCC_OPTIONS"
+                | "SDKROOT"
         )
         || key.starts_with("BASH_FUNC_")
 }
@@ -548,6 +621,37 @@ impl RawRustExecution {
         Ok(())
     }
 
+    fn validate_linker(&self, bindings: &[Binding], deadline: Instant) -> Result<Option<Vec<u8>>> {
+        self.native_linker
+            .as_ref()
+            .map(|linker| {
+                let expected = PathBuf::from(
+                    self.environment
+                        .get("RUSTUP_HOME")
+                        .ok_or(Error::ConfigInvalid("Rust linker home"))?,
+                )
+                .join("toolchains")
+                .join(&self.toolchain)
+                .join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
+                if linker.semantics != "rust-lld-1.94.0-linux-v1" || linker.path != expected {
+                    return Err(Error::ConfigInvalid("Rust linker pin"));
+                }
+                for binding in bindings {
+                    let scope = match &binding.identity {
+                        BindingIdentity::Git { common, primary } => {
+                            primary.as_ref().unwrap_or(common)
+                        }
+                        BindingIdentity::Directory { root, .. } => root,
+                    };
+                    if within(&linker.path, scope) {
+                        return Err(Error::ConfigUntrusted("Rust linker inside workspace"));
+                    }
+                }
+                executable_stamp(&linker.path, deadline)
+            })
+            .transpose()
+    }
+
     pub(super) fn validate(
         self,
         adapter: ClientAdapter,
@@ -619,10 +723,12 @@ impl RawRustExecution {
                 stamps.insert(name.clone(), executable_stamp(path, deadline)?);
             }
         }
+        let linker_identity = self.validate_linker(bindings, deadline)?;
         Ok(RustExecution {
             raw: self,
             identities,
             installed_identities,
+            linker_identity,
         })
     }
 }
@@ -740,6 +846,11 @@ impl RustExecution {
                 return Err(Error::ConfigUntrusted("Rust executable changed"));
             }
         }
+        if let Some(linker) = &self.raw.native_linker
+            && self.linker_identity.as_ref() != Some(&executable_stamp(&linker.path, deadline)?)
+        {
+            return Err(Error::ConfigUntrusted("Rust linker changed"));
+        }
         Ok(())
     }
 
@@ -765,7 +876,20 @@ impl RustExecution {
     /// Fixed grammar/semantic version, suitable for safe audit metadata.
     #[must_use]
     pub const fn version(&self) -> u8 {
-        2
+        if self.raw.native_linker.is_some() {
+            3
+        } else {
+            2
+        }
+    }
+
+    /// Exact protected direct rust-lld executable; no driver or PATH inference.
+    #[must_use]
+    pub fn native_linker(&self) -> Option<&Path> {
+        self.raw
+            .native_linker
+            .as_ref()
+            .map(|linker| linker.path.as_path())
     }
 
     /// Private exact entrypoint path, separate from rustup's installed tools.
@@ -876,6 +1000,14 @@ impl RustExecution {
         for (key, value) in &self.raw.environment {
             hash_part(hash, key.as_bytes());
             hash_part(hash, value.as_bytes());
+        }
+        hash_part(hash, b"native-linker-v1");
+        if let Some(linker) = &self.raw.native_linker {
+            hash_part(hash, linker.semantics.as_bytes());
+            hash_part(hash, super::path_bytes(&linker.path));
+            if let Some(identity) = &self.linker_identity {
+                hash_part(hash, identity);
+            }
         }
     }
 }

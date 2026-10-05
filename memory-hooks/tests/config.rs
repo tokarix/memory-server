@@ -80,6 +80,36 @@ fn v6_host_contract_is_required_bounded_and_fingerprinted() {
     let trusted = TrustedHooksConfig::load(&path).expect("host v6 without container attestation");
     assert!(trusted.fingerprint().starts_with("v6:"));
     assert_eq!(trusted.rust_execution().expect("execution").version(), 2);
+    let linker = Path::new(document["rust_execution"]["environment"]["RUSTUP_HOME"].as_str().expect("home"))
+        .join("toolchains/1.94.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
+    fs::create_dir_all(linker.parent().expect("parent")).expect("linker directory");
+    fs::write(&linker, "LINKER_NONEXECUTION_SENTINEL").expect("linker");
+    fs::set_permissions(&linker, fs::Permissions::from_mode(0o700)).expect("linker mode");
+    let with_linker = format!(
+        "{source}\n[rust_execution.native_linker]\nsemantics='rust-lld-1.94.0-linux-v1'\npath={:?}\n",
+        linker.display().to_string()
+    );
+    write(&with_linker);
+    let pinned = TrustedHooksConfig::load(&path).expect("protected native linker");
+    assert_eq!(pinned.rust_execution().expect("execution").version(), 3);
+    assert_ne!(trusted.fingerprint(), pinned.fingerprint());
+    fs::write(&linker, "REPLACED_LINKER_SECRET").expect("replace linker");
+    let error = pinned
+        .rust_execution()
+        .expect("execution")
+        .recheck_executables(std::time::Instant::now() + std::time::Duration::from_secs(5))
+        .expect_err("changed linker");
+    assert!(!format!("{error:?}").contains("REPLACED_LINKER_SECRET"));
+    for invalid in [
+        with_linker.replace("rust-lld-1.94.0-linux-v1", "opaque-driver"),
+        with_linker.replace(
+            &format!("path={:?}", linker.display().to_string()),
+            "path='/opaque-secret'",
+        ),
+    ] {
+        write(&invalid);
+        assert!(TrustedHooksConfig::load(&path).is_err());
+    }
     for altered in [
         source.replace("client_ancestor = 3", "client_ancestor = 0"),
         source.replace("rust-cargo-1.94.0-linux-v1", "nightly"),

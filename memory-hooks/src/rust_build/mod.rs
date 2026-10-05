@@ -8,6 +8,7 @@ pub mod execution;
 pub mod files;
 pub mod inventory;
 pub mod manifest;
+pub mod operation;
 pub mod paths;
 pub mod toolchain;
 

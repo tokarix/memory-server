@@ -31,6 +31,20 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    #[cfg(test)]
+    pub(super) fn contains(&self, role: CandidateRole, path: &Path) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.role == role && entry.path == path)
+    }
+
+    pub(super) fn source_roots(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.role == CandidateRole::SourceWorktree)
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
     /// Expand Cargo's required roots through all existing output directories.
     /// Regular files remain on their parent mount; unsupported file kinds deny.
     ///
@@ -69,13 +83,14 @@ impl Inventory {
         };
         let (source, output) = direct_paths(action, invocation.arguments(), cwd)?;
         reads.read(&source)?.ok_or(Failure::Read)?;
+        let source_root = source.parent().ok_or(Failure::Cwd)?;
+        // A mounted individual source cannot inherit its parent's backing.
+        // Retain metadata only; symlinks and special source-root entries deny.
+        reads.output_directory(source_root)?.ok_or(Failure::Read)?;
         let mut inventory = Self {
             entries: Vec::new(),
         };
-        inventory.push(
-            CandidateRole::SourceWorktree,
-            source.parent().ok_or(Failure::Cwd)?.to_owned(),
-        )?;
+        inventory.push(CandidateRole::SourceWorktree, source_root.to_owned())?;
         inventory.push(CandidateRole::TargetDirectory, output.clone())?;
         inventory.push(CandidateRole::BuildOutput, output)?;
         inventory.push(
@@ -86,7 +101,7 @@ impl Inventory {
         Ok(inventory)
     }
 
-    fn push(&mut self, role: CandidateRole, path: PathBuf) -> Result<(), Failure> {
+    pub(super) fn push(&mut self, role: CandidateRole, path: PathBuf) -> Result<(), Failure> {
         paths::validate(&path)?;
         if !path.is_absolute() {
             return Err(Failure::Cwd);
@@ -105,7 +120,10 @@ impl Inventory {
         Ok(())
     }
 
-    fn expand<P: ReadProvider>(&mut self, reads: &mut ReadSet<'_, P>) -> Result<(), Failure> {
+    pub(super) fn expand<P: ReadProvider>(
+        &mut self,
+        reads: &mut ReadSet<'_, P>,
+    ) -> Result<(), Failure> {
         let roots: BTreeSet<_> = self
             .entries
             .iter()
@@ -319,6 +337,7 @@ mod tests {
 
     fn fixture() -> Scripted {
         let provider = Scripted::default();
+        provider.list("/work", &[("source.rs", false)]);
         provider.put(
             "/work/source.rs",
             "// SECRET_SENTINEL: never launched\nfn main() {}\n",

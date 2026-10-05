@@ -106,7 +106,15 @@ impl Environment {
     }
 
     pub(super) fn cargo_generated(&mut self, key: &str, value: &str) -> Result<(), Failure> {
-        if key != "CARGO" {
+        if !matches!(
+            key,
+            "CARGO"
+                | "LD_LIBRARY_PATH"
+                | "CARGO_MANIFEST_DIR"
+                | "CARGO_MANIFEST_PATH"
+                | "CARGO_TARGET_TMPDIR"
+                | "CARGO_PRIMARY_PACKAGE"
+        ) {
             return Err(Failure::Environment);
         }
         self.fixed_generated(key, value, Origin::Cargo)

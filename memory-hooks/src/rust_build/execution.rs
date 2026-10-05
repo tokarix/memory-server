@@ -101,7 +101,7 @@ fn unique_path(value: Option<&str>, prepend: &Path) -> Result<String, Failure> {
     }
 }
 
-fn rustup_environment(
+pub(super) fn rustup_environment(
     cwd: &Path,
     environment: &Environment,
     selection: &Selection,

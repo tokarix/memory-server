@@ -1,5 +1,32 @@
 # Managed Rust execution contract
 
+The complete-operation library combines the earlier grammar, configuration,
+source, toolchain, executable and output inventories within one shared read
+budget and original deadline. It retains every required role, scans existing
+source/declared-target subtrees with metadata-only no-follow observations,
+and retains default build-script absence. Explicit source files must exist.
+Changed source directories, new default scripts, new configuration and changed
+installed executables invalidate final rechecks.
+
+Cargo's host dependency loader prefix and each target's runtime artifact,
+dependency and sysroot-library prefixes are modeled separately, before the
+secondary Rustup hop. Cargo-generated manifest/cwd and test/bench temporary
+values enter private provenance; relative compiler TMPDIR is resolved for
+every selected/local dependency package cwd. Generated values never grant
+authority. Local-install compilation, cache and installation/staging directory
+roots retain distinct coverage through the existing descendant inventory.
+The stage does not launch Cargo or discover unit hashes by compilation.
+
+Build scripts, native links declarations and unknown target metadata remain
+unsupported in complete operations: future script output can change compiler
+environment, loader/linker flags and destinations. Cached script output cannot
+prove its next execution. Explicitly disabled scripts and local packages
+without a default script are supported. This conservative exclusion does not
+turn the hook into a sandbox for procedural macros or arbitrary run/test/bench
+code. The consumer must still prove execution locality, exact binding and
+claim/pack linkage, evaluate storage and complete mandatory audit under locks.
+The library alone does not authorize a command or connect live enforcement.
+
 Schema v6 adds `rust_execution` to the protected operator configuration.
 The non-live [v6 example](../memory-hooks-v6.toml.example) deliberately has
 invalid boot/namespace/root pins. It does not install or activate a launcher.
@@ -490,3 +517,20 @@ unchanged callback cwd, linked-worktree and cross-binding rejection, symlinks,
 new nested repositories, directory/root replacement, changed protected
 fingerprints, input bounds and deadline expiry. These fixture setup commands
 are distinct from analyzed build proposals.
+
+The combined operation proof additionally requires an operator-pinned direct
+`rust-lld` for Cargo builds and direct rustc. The optional protected
+`rust_execution.native_linker` table pins `semantics =
+"rust-lld-1.94.0-linux-v1"` and the exact installed toolchain
+`lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld` path and content identity.
+Its presence advances the execution evidence version to 3 and changes the
+installation fingerprint. It does not change the proposed command. Effective
+Cargo Rust flags (with the documented encoded/environment/config precedence)
+or direct rustc argv must explicitly select that path with `-C linker=PATH`
+and a supported direct `ld.lld` or `wasm-ld` flavor. Duplicate selections,
+inferred drivers, linker arguments and unknown replacements deny. A bare Cargo
+command can use these exact flags in the protected inherited environment.
+Compiler-driver, GCC/LLVM/LLD and native search-path environment overrides are
+excluded from the managed execution proof. Active build scripts, native links
+metadata and procedural-macro packages remain outside this conservative
+subset because their generated compiler/host environment is unresolved.

@@ -665,6 +665,8 @@ fn compiler_option(
             && !matches!(
                 value.split_once('=').map_or(value, |(key, _)| key),
                 "opt-level"
+                    | "linker"
+                    | "linker-flavor"
                     | "debuginfo"
                     | "codegen-units"
                     | "debug-assertions"
