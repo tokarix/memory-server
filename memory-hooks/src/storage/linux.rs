@@ -389,7 +389,13 @@ impl Linux {
         budget.tick()?;
         // SAFETY: Linux BTRFS_IOC_FS_INFO writes a 1024-byte, aligned UAPI
         // buffer. The read-only directory descriptor and buffer remain alive.
-        let status = unsafe { libc::ioctl(directory.as_raw_fd(), 0x8400_941f, info.as_mut_ptr()) };
+        let status = unsafe {
+            libc::ioctl(
+                directory.as_raw_fd(),
+                libc::_IOR::<[u64; 128]>(0x94, 31),
+                info.as_mut_ptr(),
+            )
+        };
         if status != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
